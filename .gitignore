@@ -1,0 +1,27 @@
+# Training outputs
+logs/
+*.pt
+*.npy
+
+# Images (sata_overview.png already tracked — exempted automatically)
+*.png
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+.pytest_cache/
+.eggs/
+build/
+dist/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db

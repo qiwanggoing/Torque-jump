@@ -30,29 +30,96 @@
 
 from legged_gym import LEGGED_GYM_ROOT_DIR
 import os
+import re
 
 import isaacgym
 from legged_gym.envs import *
-from legged_gym.utils import get_args, export_policy_as_jit, task_registry, Logger
+from legged_gym.utils import get_args, export_policy_as_jit, task_registry, Logger, get_load_path
 
 import numpy as np
 import torch
 
 
+def infer_checkpoint_iter(load_path):
+    match = re.search(r"model_(\d+)\.pt", os.path.basename(load_path))
+    if match is None:
+        return None
+    return int(match.group(1))
+
+
 def play(args):
     env_cfg, train_cfg = task_registry.get_cfgs(name=args.task)
+    num_commands = env_cfg.commands.num_commands
+    is_jump_task = (
+        "jump" in args.task
+        or hasattr(env_cfg.commands.ranges, "landing_dx")
+        or hasattr(env_cfg.commands.ranges, "jump_height")
+        or hasattr(env_cfg.commands.ranges, "jump_toggle")
+        or hasattr(env_cfg.commands.ranges, "jump_command")
+    )
+    supports_heading_command = (
+        (not is_jump_task)
+        and num_commands > 3
+        and hasattr(env_cfg.commands.ranges, "ang_vel_yaw")
+    )
+    experiment_name = train_cfg.runner.experiment_name if args.experiment_name is None else args.experiment_name
+    load_run = train_cfg.runner.load_run if args.load_run is None else args.load_run
+    checkpoint = train_cfg.runner.checkpoint if args.checkpoint is None else args.checkpoint
+
+    checkpoint_iter = None
+    try:
+        log_root = os.path.join(LEGGED_GYM_ROOT_DIR, 'logs', experiment_name)
+        load_path = get_load_path(log_root, load_run=load_run, checkpoint=checkpoint)
+        checkpoint_iter = infer_checkpoint_iter(load_path)
+        if checkpoint_iter is not None:
+            print(f"[Play] Resolved checkpoint: {os.path.basename(load_path)} -> iter {checkpoint_iter}")
+    except Exception as exc:
+        print(f"[Play] Warning: could not resolve checkpoint path for curriculum sync: {exc}")
+
     # override some parameters for testing
     env_cfg.env.num_envs = min(env_cfg.env.num_envs, 1)
     env_cfg.env.episode_length_s = 20
-    env_cfg.control.control_type = 'T'
+    # Keep the jump task on the same control stack used during training.
+    if not is_jump_task:
+        env_cfg.control.control_type = 'T'
     env_cfg.test.use_test = True
+    if is_jump_task:
+        env_cfg.test.use_test = True
+        env_cfg.test.single_jump_play = True   # mirror training: one jump per episode, then disable jump_command for post-landing stand
+        if (
+            hasattr(env_cfg, "curriculum")
+            and getattr(env_cfg.curriculum, "enabled", False)
+            and hasattr(env_cfg.curriculum, "play_stage")
+        ):
+            env_cfg.curriculum.force_stage = int(env_cfg.curriculum.play_stage)
+            if hasattr(env_cfg.curriculum, "play_stand_command_prob"):
+                env_cfg.curriculum.stand_command_prob_after_takeoff = float(
+                    env_cfg.curriculum.play_stand_command_prob
+                )
+            print(
+                f"[Play] Forcing metric curriculum stage={env_cfg.curriculum.force_stage},"
+                f" stand_prob={getattr(env_cfg.curriculum, 'stand_command_prob_after_takeoff', 'n/a')}"
+            )
     env_cfg.test.checkpoint = 3000
-    env_cfg.test.vel = torch.tensor([0.0, 0.0, 0., 0.0], dtype=torch.float32)
+    default_test_vel = getattr(env_cfg.test, "vel", None)
+    if default_test_vel is None or len(default_test_vel) != num_commands:
+        env_cfg.test.vel = torch.zeros(num_commands, dtype=torch.float32)
+    else:
+        env_cfg.test.vel = default_test_vel.clone().float()
+
+    if checkpoint_iter is not None:
+        policy_steps_per_iter = train_cfg.runner.num_steps_per_env
+        physics_steps_per_policy_step = max(1, int(round(1.0 / (env_cfg.sim.dt * env_cfg.growth.start_freq))))
+        approx_physics_steps = checkpoint_iter * policy_steps_per_iter * physics_steps_per_policy_step
+        env_cfg.test.checkpoint = checkpoint_iter * physics_steps_per_policy_step
+    else:
+        approx_physics_steps = None
 
     env_cfg.control.activation_process = True
     env_cfg.control.hill_model = True
     env_cfg.control.motor_fatigue = True
-    env_cfg.commands.heading_command = True
+    env_cfg.commands.heading_command = supports_heading_command
+    print(f"[Play] Using control_type={env_cfg.control.control_type}")
 
     env_cfg.terrain.mesh_type = 'plane'  # 'trimesh'
     env_cfg.terrain.num_rows = 5
@@ -66,6 +133,16 @@ def play(args):
 
     # prepare environment
     env, _ = task_registry.make_env(name=args.task, args=args, env_cfg=env_cfg)
+    if approx_physics_steps is not None:
+        env.common_step_counter = approx_physics_steps
+        if hasattr(env, "step_count"):
+            env.step_count = approx_physics_steps
+        print(
+            f"[Play] Syncing play-time curriculum approximately:"
+            f" common_step_counter={env.common_step_counter},"
+            f" step_count={getattr(env, 'step_count', -1)},"
+            f" test.checkpoint={env_cfg.test.checkpoint}"
+        )
     obs = env.get_observations()
     # load policy
     train_cfg.runner.resume = True
@@ -85,21 +162,144 @@ def play(args):
     stop_rew_log = env.max_episode_length + 1  # number of steps before print average episode rewards
     img_idx = 0
     vel_x = 1.0
-    env_cfg.test.vel = torch.tensor([vel_x, 0.0, 0., 0.], dtype=torch.float32)
+    if num_commands > 0 and not is_jump_task:
+        env_cfg.test.vel[0] = vel_x
+    if is_jump_task and env_cfg.test.use_test:
+        print(f"[Play] Continuous jump command = {env_cfg.test.vel.tolist()}")
+    elif is_jump_task:
+        print("[Play] Jump task uses train-style command resampling.")
     change_vel = 0.2
+    single_jump_play = bool(getattr(env_cfg.test, "single_jump_play", False))
+    single_jump_initial_command = env_cfg.test.vel.clone()
+    target_jump_cmd = float(single_jump_initial_command[4].item()) if env.commands.shape[1] > 4 else 0.0
+
+    # Play state machine:
+    #   pre_idle  → cmd[4]=0 for PRE_JUMP_IDLE_SECONDS (let robot settle from reset)
+    #   jumping   → cmd[4]=target until just_landed fires
+    #   post_stand→ cmd[4]=0 for POST_JUMP_STAND_SECONDS (verify landing stability)
+    #   then manual reset → back to pre_idle
+    PRE_JUMP_IDLE_SECONDS = 2.0
+    POST_JUMP_STAND_SECONDS = 2.0
+    PRE_JUMP_IDLE_STEPS = max(int(round(PRE_JUMP_IDLE_SECONDS / env.dt)), 1)
+    POST_JUMP_STAND_STEPS = max(int(round(POST_JUMP_STAND_SECONDS / env.dt)), 1)
+
+    # Suppress env's own auto-reset (rewards.post_jump_stand_steps) so play state machine controls cycle timing.
+    if single_jump_play and hasattr(env.cfg.rewards, "post_jump_stand_steps"):
+        env.cfg.rewards.post_jump_stand_steps = max(int(env.cfg.rewards.post_jump_stand_steps), POST_JUMP_STAND_STEPS + 200)
+
+    play_phase = "pre_idle"
+    play_phase_step = 0
+
+    # Initialize: cmd[4]=0, robot stays idle until pre_idle timer elapses.
+    if single_jump_play and env.commands.shape[1] > 4:
+        env_cfg.test.vel[4] = 0.0
+        env.commands[:, 4] = 0.0
+        if hasattr(env, "single_jump_play_done"):
+            env.single_jump_play_done[:] = True   # double-lock: cfg.test.vel[4]=0 AND play_done flag → cmd absolutely 0
+        print(
+            f"[Play] State machine: pre_idle ({PRE_JUMP_IDLE_SECONDS}s = {PRE_JUMP_IDLE_STEPS} steps)"
+            f" → jump → post_stand ({POST_JUMP_STAND_SECONDS}s = {POST_JUMP_STAND_STEPS} steps) → reset"
+        )
 
     for i in range(10 * int(env.max_episode_length)):
         actions = policy(obs.detach())
         obs, _, rews, dones, infos = env.step(actions.detach())
+        # === Play state machine ===
+        if single_jump_play:
+            # Auto-reset from env (termination/fall or timeout) → back to pre_idle
+            if bool(dones[robot_index].item()):
+                play_phase = "pre_idle"
+                play_phase_step = 0
+                env_cfg.test.vel[4] = 0.0
+                if env.commands.shape[1] > 4:
+                    env.commands[:, 4] = 0.0
+                if hasattr(env, "single_jump_play_done"):
+                    env.single_jump_play_done[:] = True
+                print(f"[Play] Step {i}: env auto-reset → pre_idle ({PRE_JUMP_IDLE_SECONDS}s)")
+            else:
+                play_phase_step += 1
+                if play_phase == "pre_idle":
+                    # Enforce cmd[4]=0 throughout idle (defense against any stray state)
+                    env_cfg.test.vel[4] = 0.0
+                    if env.commands.shape[1] > 4:
+                        env.commands[:, 4] = 0.0
+                    if hasattr(env, "single_jump_play_done"):
+                        env.single_jump_play_done[:] = True
+                    if play_phase_step >= PRE_JUMP_IDLE_STEPS:
+                        # Transition to jumping: enable cmd[4]=target
+                        play_phase = "jumping"
+                        play_phase_step = 0
+                        env_cfg.test.vel[4] = target_jump_cmd
+                        if env.commands.shape[1] > 4:
+                            env.commands[:, 4] = target_jump_cmd
+                        if hasattr(env, "single_jump_play_done"):
+                            env.single_jump_play_done[:] = False  # unlock jump command in env
+                        print(f"[Play] Step {i}: pre_idle done → jumping (cmd[4]={target_jump_cmd})")
+                elif play_phase == "jumping":
+                    # Detect jump cycle completion. Three exit signals:
+                    #   1. just_landed: clean landing (success path)
+                    #   2. single_jump_command_done: env says jump cycle ended (success OR takeoff_timeout fail)
+                    #   3. play_phase_step timeout: safety net if neither signal arrives
+                    single_jump_landed = hasattr(env, "just_landed") and bool(env.just_landed[robot_index].item())
+                    cmd_done_in_env = (
+                        hasattr(env, "single_jump_command_done")
+                        and bool(env.single_jump_command_done[robot_index].item())
+                    )
+                    JUMPING_PHASE_TIMEOUT_STEPS = int(round(4.0 / env.dt))   # 4s hard cap
+                    timeout_exit = play_phase_step >= JUMPING_PHASE_TIMEOUT_STEPS
+
+                    exit_reason = None
+                    if single_jump_landed:
+                        exit_reason = "just_landed"
+                    elif cmd_done_in_env:
+                        exit_reason = "env_cmd_done (likely takeoff_timeout fail)"
+                    elif timeout_exit:
+                        exit_reason = "play timeout fallback"
+
+                    if exit_reason is not None:
+                        play_phase = "post_stand"
+                        play_phase_step = 0
+                        env_cfg.test.vel[4] = 0.0
+                        if env.commands.shape[1] > 4:
+                            env.commands[:, 4] = 0.0
+                        if hasattr(env, "single_jump_play_done"):
+                            env.single_jump_play_done[:] = True   # lock cmd[4]=0 in env
+                        print(
+                            f"[Play] Step {i}: jump cycle done ({exit_reason})"
+                            f" peak={env.peak_base_height[robot_index].item():.3f}"
+                            f" base={env.root_states[robot_index, 2].item():.3f}"
+                            f" → post_stand ({POST_JUMP_STAND_SECONDS}s)"
+                        )
+                elif play_phase == "post_stand":
+                    # Enforce cmd[4]=0 throughout stand
+                    env_cfg.test.vel[4] = 0.0
+                    if env.commands.shape[1] > 4:
+                        env.commands[:, 4] = 0.0
+                    if hasattr(env, "single_jump_play_done"):
+                        env.single_jump_play_done[:] = True
+                    if play_phase_step >= POST_JUMP_STAND_STEPS:
+                        # Manual reset → back to pre_idle
+                        env_ids = torch.arange(env.num_envs, device=env.device)
+                        env.reset_idx(env_ids)
+                        play_phase = "pre_idle"
+                        play_phase_step = 0
+                        env_cfg.test.vel[4] = 0.0
+                        if env.commands.shape[1] > 4:
+                            env.commands[:, 4] = 0.0
+                        if hasattr(env, "single_jump_play_done"):
+                            env.single_jump_play_done[:] = True
+                        env.compute_observations()
+                        obs = env.get_observations()
+                        print(f"[Play] Step {i}: post_stand done → manual reset → pre_idle")
         foot_z = env.rigid_body_states[0, env.feet_indices, 2].cpu().numpy()
-        if CHANGE_VEL:
+        if CHANGE_VEL and supports_heading_command and not is_jump_task:
             if i % 100 == 0:
                 if vel_x > 1.5 or vel_x < -0.0:
                     # change_vel = -change_vel
                     change_vel = 0
                 vel_x += change_vel
                 # vel_x = 0.5
-                env_cfg.test.vel = torch.tensor([vel_x , 0.0, 0., 0.], dtype=torch.float32)
+                env_cfg.test.vel[0] = vel_x
         if RECORD_FRAMES:
             if i % 2:
                 filename = os.path.join(LEGGED_GYM_ROOT_DIR, 'logs', train_cfg.runner.experiment_name, 'exported',
@@ -111,6 +311,11 @@ def play(args):
             camera_position = robot_pos + np.array([1, 1, 1])
             env.set_camera(camera_position, robot_pos)
         if i < stop_state_log:
+            command_0 = env.commands[robot_index, 0].item() if env.commands.shape[1] > 0 else 0.0
+            command_1 = env.commands[robot_index, 1].item() if env.commands.shape[1] > 1 else 0.0
+            command_2 = env.commands[robot_index, 2].item() if env.commands.shape[1] > 2 else 0.0
+            command_3 = env.commands[robot_index, 3].item() if env.commands.shape[1] > 3 else 0.0
+            command_4 = env.commands[robot_index, 4].item() if env.commands.shape[1] > 4 else 0.0
             logger.log_states(
                 {
                     'actions': actions[robot_index].detach().cpu().numpy(),
@@ -118,9 +323,11 @@ def play(args):
                     'dof_pos': env.dof_pos[robot_index, joint_index].item(),
                     'dof_vel': env.dof_vel[robot_index, joint_index].item(),
                     'dof_torque': env.torques[robot_index, joint_index].item(),
-                    'command_x': env.commands[robot_index, 0].item(),
-                    'command_y': env.commands[robot_index, 1].item(),
-                    'command_yaw': env.commands[robot_index, 2].item(),
+                    'command_x': command_0,
+                    'command_y': command_1,
+                    'command_yaw': command_2,
+                    'command_jump_height': command_3,
+                    'command_jump': command_4,
                     'base_vel_x': env.base_lin_vel[robot_index, 0].item(),
                     'base_vel_y': env.base_lin_vel[robot_index, 1].item(),
                     'base_vel_z': env.base_lin_vel[robot_index, 2].item(),
@@ -142,6 +349,7 @@ def play(args):
                     logger.log_rewards(infos["episode"], num_episodes)
         elif i == stop_rew_log:
             logger.print_rewards()
+        # (Old post-landing reset block removed; play state machine above handles reset timing.)
 
 
 if __name__ == '__main__':

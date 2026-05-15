@@ -28,6 +28,7 @@
 #
 # Copyright (c) 2021 ETH Zurich, Nikita Rudin
 
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -52,6 +53,11 @@ class PPO:
                  schedule="fixed",
                  desired_kl=0.01,
                  device='cpu',
+                 sym_loss=False,
+                 obs_permutation=None,
+                 act_permutation=None,
+                 frame_stack=1,
+                 sym_coef=1.0,
                  ):
 
         self.device = device
@@ -77,6 +83,23 @@ class PPO:
         self.lam = lam
         self.max_grad_norm = max_grad_norm
         self.use_clipped_value_loss = use_clipped_value_loss
+        self.sym_loss = sym_loss
+        self.sym_coef = sym_coef
+        if self.sym_loss:
+            self.act_perm_mat = torch.zeros((len(act_permutation), len(act_permutation)), device=self.device)
+            for i, perm in enumerate(act_permutation):
+                self.act_perm_mat[int(abs(perm))][i] = np.sign(perm)
+
+            obs_permutation_stack = []
+            for i in range(frame_stack):
+                for p in obs_permutation:
+                    obs_permutation_stack.append(np.sign(p) * (abs(p) + i * len(obs_permutation)))
+
+            self.obs_perm_mat = torch.zeros(
+                (len(obs_permutation_stack), len(obs_permutation_stack)), device=self.device
+            )
+            for i, perm in enumerate(obs_permutation_stack):
+                self.obs_perm_mat[int(abs(perm))][i] = np.sign(perm)
 
     def init_storage(self, num_envs, num_transitions_per_env, actor_obs_shape, critic_obs_shape, action_shape):
         self.storage = RolloutStorage(num_envs, num_transitions_per_env, actor_obs_shape, critic_obs_shape, action_shape, self.device)
@@ -120,6 +143,8 @@ class PPO:
     def update(self):
         mean_value_loss = 0
         mean_surrogate_loss = 0
+        mean_sym_loss = 0
+        extra_loss_sums = {}
         if self.actor_critic.is_recurrent:
             generator = self.storage.reccurent_mini_batch_generator(self.num_mini_batches, self.num_learning_epochs)
         else:
@@ -134,6 +159,13 @@ class PPO:
                 mu_batch = self.actor_critic.action_mean
                 sigma_batch = self.actor_critic.action_std
                 entropy_batch = self.actor_critic.entropy
+
+                sym_loss = 0
+                if self.sym_loss:
+                    mirror_obs = torch.matmul(obs_batch, self.obs_perm_mat)
+                    mirror_act = self.actor_critic.actor(mirror_obs)
+                    mapped_mirror_act = torch.matmul(mirror_act, self.act_perm_mat)
+                    sym_loss = (mu_batch - mapped_mirror_act).pow(2).mean()
 
                 # KL
                 if self.desired_kl != None and self.schedule == 'adaptive':
@@ -168,7 +200,18 @@ class PPO:
                 else:
                     value_loss = (returns_batch - value_batch).pow(2).mean()
 
-                loss = surrogate_loss + self.value_loss_coef * value_loss - self.entropy_coef * entropy_batch.mean()
+                loss = (
+                    surrogate_loss
+                    + self.value_loss_coef * value_loss
+                    - self.entropy_coef * entropy_batch.mean()
+                    + self.sym_coef * sym_loss
+                )
+
+                if hasattr(self.actor_critic, "compute_auxiliary_loss"):
+                    aux_loss, aux_stats = self.actor_critic.compute_auxiliary_loss(obs_batch, critic_obs_batch)
+                    loss = loss + aux_loss
+                    for loss_name, loss_value in aux_stats.items():
+                        extra_loss_sums[loss_name] = extra_loss_sums.get(loss_name, 0.0) + float(loss_value.item())
 
                 # Gradient step
                 self.optimizer.zero_grad()
@@ -178,10 +221,20 @@ class PPO:
 
                 mean_value_loss += value_loss.item()
                 mean_surrogate_loss += surrogate_loss.item()
+                if self.sym_loss:
+                    mean_sym_loss += sym_loss.item()
 
         num_updates = self.num_learning_epochs * self.num_mini_batches
         mean_value_loss /= num_updates
         mean_surrogate_loss /= num_updates
+        if self.sym_loss:
+            mean_sym_loss /= num_updates
         self.storage.clear()
 
-        return mean_value_loss, mean_surrogate_loss
+        if extra_loss_sums:
+            mean_extra_losses = {
+                loss_name: loss_sum / num_updates for loss_name, loss_sum in extra_loss_sums.items()
+            }
+            return mean_value_loss, mean_surrogate_loss, mean_sym_loss, mean_extra_losses
+
+        return mean_value_loss, mean_surrogate_loss, mean_sym_loss

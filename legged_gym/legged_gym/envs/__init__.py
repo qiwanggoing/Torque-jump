@@ -33,6 +33,19 @@ from .base.legged_robot import LeggedRobot
 
 from .go2.go2_torque.go2_torque_config import GO2TorqueCfg, GO2TorqueCfgPPO
 from .go2.go2_torque.go2_torque import GO2Torque
+from .go2.go2_jump_torque.go2_jump_torque_config import GO2JumpTorqueCfg, GO2JumpTorqueCfgPPO
+from .go2.go2_jump_torque.go2_jump_torque import GO2JumpTorque
+from .go2.go2_my_jump_torque.go2_my_jump_torque_config import GO2MyJumpTorqueCfg, GO2MyJumpTorqueCfgPPO
+from .go2.go2_my_jump_torque.go2_my_jump_torque import GO2MyJumpTorque
+from .go2.go2_omninet_torque.go2_omninet_torque_config import GO2OmniNetTorqueCfg, GO2OmniNetTorqueCfgPPO
+from .go2.go2_omninet_torque.go2_omninet_torque import GO2OmniNetTorque
+from .go2.go2_omnijump_torque.go2_omnijump_torque_config import GO2OmniJumpTorqueCfg, GO2OmniJumpTorqueCfgPPO
+from .go2.go2_omnijump_torque.go2_omnijump_torque import GO2OmniJumpTorque
+from .go2.go2_omnijump_curriculum_torque.go2_omnijump_curriculum_torque_config import (
+    GO2OmniJumpCurriculumTorqueCfg,
+    GO2OmniJumpCurriculumTorqueCfgPPO,
+)
+from .go2.go2_omnijump_curriculum_torque.go2_omnijump_curriculum_torque import GO2OmniJumpCurriculumTorque
 from .go2.go2_config import GO2RoughCfg, GO2RoughCfgPPO
 
 
@@ -42,4 +55,14 @@ from legged_gym.utils.task_registry import task_registry
 
 
 task_registry.register("go2_torque", GO2Torque, GO2TorqueCfg(), GO2TorqueCfgPPO())
+task_registry.register("go2_jump_torque", GO2JumpTorque, GO2JumpTorqueCfg(), GO2JumpTorqueCfgPPO())
+task_registry.register("go2_my_jump_torque", GO2MyJumpTorque, GO2MyJumpTorqueCfg(), GO2MyJumpTorqueCfgPPO())
+task_registry.register("go2_omninet_torque", GO2OmniNetTorque, GO2OmniNetTorqueCfg(), GO2OmniNetTorqueCfgPPO())
+task_registry.register("go2_omnijump_torque", GO2OmniJumpTorque, GO2OmniJumpTorqueCfg(), GO2OmniJumpTorqueCfgPPO())
+task_registry.register(
+    "go2_omnijump_curriculum_torque",
+    GO2OmniJumpCurriculumTorque,
+    GO2OmniJumpCurriculumTorqueCfg(),
+    GO2OmniJumpCurriculumTorqueCfgPPO(),
+)
 task_registry.register("go2_rough", LeggedRobot, GO2RoughCfg(), GO2RoughCfgPPO())

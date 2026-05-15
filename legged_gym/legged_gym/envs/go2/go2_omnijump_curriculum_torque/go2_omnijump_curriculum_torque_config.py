@@ -1,0 +1,148 @@
+from legged_gym.envs.go2.go2_omnijump_torque.go2_omnijump_torque_config import (
+    GO2OmniJumpTorqueCfg,
+    GO2OmniJumpTorqueCfgPPO,
+)
+
+
+class GO2OmniJumpCurriculumTorqueCfg(GO2OmniJumpTorqueCfg):
+    class growth(GO2OmniJumpTorqueCfg.growth):
+        start_torque_scale = 0.5   # start at 50% torque
+        k = 0.0001                 # unused under linear schedule (kept for compatibility)
+        warmup_steps = 96000       # PD stays at full 0.5 until step_count ≥ 96000 (~iter 1000 at freq=100). Lets RL bootstrap with PD support before fade starts.
+        x0 = 288000                # linear-fade end: general_scale=1, pd_alpha=0 at step_count=288000 (~iter 3000-4000 with feedback). 2000-step ramp over iter 1000→3000ish.
+
+    class curriculum:
+        enabled = False
+        stage = "metric"
+        ema_alpha = 0.10
+        min_updates_per_stage = 8
+        stand_stage_reward_threshold = 1.80
+        zero_command_base_height_threshold = 0.25
+        default_hip_pos_threshold = 0.05
+        takeoff_vertical_velocity_threshold = 0.45
+        takeoff_flight_rate_threshold = 0.03
+        flight_rate_threshold = 0.45
+        flight_mean_peak_height_threshold = 0.20
+        landing_rate_threshold = 0.55
+        successful_jump_rate_threshold = 0.45
+        stand_command_prob_before_takeoff = 1.0
+        stand_command_prob_after_takeoff = 0.20
+        velocity_command_start_stage = 1
+        force_stage = -1
+        play_stage = 4
+        play_stand_command_prob = 0.0
+        notes = "Disabled: train all jump rewards and commands in one stage, OmniNet-style."
+
+    class control(GO2OmniJumpTorqueCfg.control):
+        curriculum_action_scale_start = 10.0
+        curriculum_action_scale_end = GO2OmniJumpTorqueCfg.control.action_scale
+        curriculum_rl_prior_start = 0.50
+        curriculum_rl_prior_end = 0.50
+        curriculum_pd_prior_start = 0.50
+        curriculum_pd_prior_end = 0.50
+
+    class commands(GO2OmniJumpTorqueCfg.commands):
+        single_jump_command_prob = 1.0
+        class ranges(GO2OmniJumpTorqueCfg.commands.ranges):
+            jump_height = [0.40, 0.70]
+            lin_vel_x = [0.0, 0.0]
+            lin_vel_y = [0.0, 0.0]
+            ang_vel_yaw = [0.0, 0.0]
+
+    class rewards(GO2OmniJumpTorqueCfg.rewards):
+        zero_command_velocity_sigma = 0.25
+        zero_command_yaw_sigma = 0.25
+        zero_command_height_gain = 10.0
+        default_hip_pos_gain = 4.0
+        pose_tracking_sigma = 0.20
+        prelanding_tracking_sigma = 0.20
+        joint_symmetry_tracking_sigma = 0.25
+        success_height_tolerance = 0.10
+        success_use_velocity_score = False
+        task_max_height_sigma = 0.05
+        height_tracking_sigma = 0.05
+        tracking_linear_velocity_all_time = True
+        landing_buffer_steps = 25    # was 50; shorter buffer = give policy faster credit for surviving landing
+        stand_rearm_steps = 5
+        one_jump_reward_per_episode = True
+        rsi_prob = 0.2
+        rsi_vel_z_min = 1.0
+        rsi_vel_z_max = 3.0
+        rsi_height_offset_min = 0.0
+        rsi_height_offset_max = 0.1   # smaller spread; RSI now starts from squat (~0.20m), not standing
+        post_jump_stand_steps = 80
+
+        class scales(GO2OmniJumpTorqueCfg.rewards.scales):
+            maintain_contact = 0.10            # moderate: standing anchor without dominating takeoff signal
+            peak_height_progress = 5.0         # boosted (was 3.0): more dense "fly higher" gradient
+            all_feet_airborne = 2.0            # boosted (was 1.0): bigger airborne reward
+            takeoff_vertical_velocity = 10.0   # boosted (was 4.0): strong stance push signal — primary lever to break "don't jump" mode
+            projected_peak = 7.0               # boosted (was 5.0): bigger flight-phase peak-tracking signal
+            termination = -10.0                # not in OmniNet, kept for base-contact episodes
+            orientation = -1.6                 # boosted (was -0.8): stronger upright pull during all phases
+            collision = -3.0                   # boosted (was -1.0): kill leg-leg self-collision in air
+            torques = -1e-5                    # OmniNet: -1e-5
+            action_rate = -0.03                # boosted (was -0.025 → -0.08): direct twitching penalty
+            dof_acc = -2.5e-7                  # restored to original: was over-penalizing fast (smooth) motion
+            horizontal_drift = -1.5            # penalize world-frame xy velocity → enforce vertical jumps
+            takeoff_direction = 80.0           # boosted (was 30): signal too small to push policy; now dominant-tier weight
+            height_tracking = 1.0              # OmniNet: 1.0
+            successful_jump = 300.0            # boosted (was 200): make completion reward dominate to overcome ep-short collapse
+            tracking_linear_velocity = 0.0     # disabled: vel=0 cmd creates stand-still local optimum
+            tracking_angular_velocity = 0.0    # disabled: same reason
+            joint_angle_loaded = 0.0           # disabled: sigma=1.5 bug makes exp ≈ 0 always; re-enable after sigma fix
+            joint_angle_extended = 0.0         # disabled: same reason
+            default_pos = -0.1                 # mygo2jump-style L1 toward q_squat (target = squat per user); small weight to allow push/flight deviation
+            default_hip_pos = 0.3              # mygo2jump-style exp keep hip joints near default (no outward/inward drift)
+            joint_angle_aerial = 0.0           # superseded by joint_angle_extended
+            joint_angle_prelanding = 0.0       # superseded by joint_angle_extended
+            joint_angle_landing = 0.0          # superseded by joint_angle_extended
+
+    class logging(GO2OmniJumpTorqueCfg.logging):
+        print_episode_keys = [
+            "rew_height_tracking",
+            "rew_peak_height_progress",
+            "rew_all_feet_airborne",
+            "rew_maintain_contact",
+            "rew_takeoff_vertical_velocity",
+            "rew_projected_peak",
+            "rew_successful_jump",
+            "rew_orientation",
+            "rew_joint_angle_loaded",
+            "rew_joint_angle_extended",
+            "rew_collision",
+            "rew_termination",
+            "rew_torques",
+            "rew_action_rate",
+            "rew_dof_acc",
+            "rew_horizontal_drift",
+            "rew_takeoff_direction",
+            "rew_default_pos",
+            "rew_default_hip_pos",
+            "jump_flight_rate",
+            "jump_landing_rate",
+            "jump_completed_cycles",
+            "successful_jump_rate",
+            "mean_peak_height",
+        ]
+
+    class test(GO2OmniJumpTorqueCfg.test):
+        vel = GO2OmniJumpTorqueCfg.test.vel.clone()
+        single_jump_play = True    # mirror training: one jump per episode, then stand for post_jump_stand_steps
+
+
+class GO2OmniJumpCurriculumTorqueCfgPPO(GO2OmniJumpTorqueCfgPPO):
+    class policy(GO2OmniJumpTorqueCfgPPO.policy):
+        init_noise_std = 0.50                # was 0.35; need more action-space coverage to discover coordinated push-off
+
+    class algorithm(GO2OmniJumpTorqueCfgPPO.algorithm):
+        entropy_coef = 0.005                 # fresh-start exploration; resist premature noise_std collapse
+
+    class runner(GO2OmniJumpTorqueCfgPPO.runner):
+        experiment_name = "go2_omnijump_curriculum_torque"
+        run_name = "auto_curriculum"
+        resume = False                       # from-scratch with positive pose rewards + new smoothness balance
+        load_run = -1
+        checkpoint = -1
+        resume_path = None
+        max_iterations = 7500                # extra budget for new reward landscape to converge
