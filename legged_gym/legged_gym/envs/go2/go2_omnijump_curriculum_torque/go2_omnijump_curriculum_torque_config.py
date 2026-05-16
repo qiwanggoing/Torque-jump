@@ -6,10 +6,10 @@ from legged_gym.envs.go2.go2_omnijump_torque.go2_omnijump_torque_config import (
 
 class GO2OmniJumpCurriculumTorqueCfg(GO2OmniJumpTorqueCfg):
     class growth(GO2OmniJumpTorqueCfg.growth):
-        start_torque_scale = 0.5   # start at 50% torque
+        start_torque_scale = 1.0   # disable cur_scale ramp; RL effective scale ramp reduced from 4× (5.875→23.5) to 2× (11.75→23.5) — matches mygo2jump 2.35× shape and gives RL ~12Nm authority from iter 0
         k = 0.0001                 # unused under linear schedule (kept for compatibility)
         warmup_steps = 96000       # PD stays at full 0.5 until step_count ≥ 96000 (~iter 1000 at freq=100). Lets RL bootstrap with PD support before fade starts.
-        x0 = 288000                # linear-fade end: general_scale=1, pd_alpha=0 at step_count=288000 (~iter 3000-4000 with feedback). 2000-step ramp over iter 1000→3000ish.
+        x0 = 384000                # linear-fade end: general_scale=1, pd_alpha=0 at step_count=384000 (~iter 4000 at ~96 step/iter). 3000-iter slow ramp; ~1.67pp PD drop per 100 iter (was 2.5pp).
 
     class curriculum:
         enabled = False
