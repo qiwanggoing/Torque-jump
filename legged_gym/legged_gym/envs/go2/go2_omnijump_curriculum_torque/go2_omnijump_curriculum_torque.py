@@ -113,7 +113,27 @@ class GO2OmniJumpCurriculumTorque(GO2OmniJumpTorque):
         if self.curriculum_stage_idx != stage_before:
             self._resample_commands(env_ids)
 
+    JUMP_REWARDS_TO_BOOST = (
+        "successful_jump",
+        "takeoff_direction",
+        "takeoff_vertical_velocity",
+        "projected_peak",
+        "peak_height_progress",
+        "all_feet_airborne",
+        "height_tracking",
+    )
+
     def compute_reward(self):
+        if not hasattr(self, "_base_jump_reward_scales"):
+            self._base_jump_reward_scales = {
+                name: float(self.reward_scales[name])
+                for name in self.JUMP_REWARDS_TO_BOOST
+                if name in self.reward_scales
+            }
+        # boost goes 1× → 2× as PD fades (general_scale: 0 → 1)
+        boost = 1.0 + float(getattr(self, "general_scale", 0.0))
+        for name, base in self._base_jump_reward_scales.items():
+            self.reward_scales[name] = base * boost
         if getattr(self.cfg.curriculum, "enabled", False):
             self._apply_curriculum_reward_scales()
         super().compute_reward()
