@@ -6,8 +6,8 @@ from legged_gym.envs.go2.go2_torque.go2_torque_config import GO2TorqueCfg, GO2To
 class GO2OmniJumpTorqueCfg(GO2TorqueCfg):
     class env(GO2TorqueCfg.env):
         num_envs = 4096
-        num_observations = 68
-        num_privileged_obs = 108
+        num_observations = 69   # +1 for pd_alpha (curriculum PD strength 0..0.5); lets policy condition on PD fade level
+        num_privileged_obs = 109  # +1 propagated (privileged_obs concats obs_buf)
         num_actions = 12
         episode_length_s = 10.0
         env_spacing = 3.0
@@ -250,6 +250,7 @@ class GO2OmniJumpTorqueCfgPPO(GO2TorqueCfgPPO):
             39, -34, 35, 36, 41, 40, 43, 42, -47, 48, 49, -44,
             45, 46, -53, 54, 55, -50, 51, 52, 59, 60, 61, 56,
             57, 58, 65, 66, 67, 62, 63, 64,
+            68,   # pd_alpha (scalar curriculum value, mirror-invariant)
         ]
         act_permutation = [-3, 4, 5, -0.0001, 1, 2, -9, 10, 11, -6, 7, 8]
         frame_stack = 1
