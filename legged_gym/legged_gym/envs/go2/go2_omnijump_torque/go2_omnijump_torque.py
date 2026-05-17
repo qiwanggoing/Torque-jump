@@ -594,7 +594,6 @@ class GO2OmniJumpTorque(GO2Torque):
                 self.dof_vel * self.obs_scales.dof_vel,
                 foot_contact_obs,
                 self.torques,
-                self.pd_prior_torques,
                 motor_fatigue,
             ),
             dim=-1,
@@ -638,8 +637,7 @@ class GO2OmniJumpTorque(GO2Torque):
         noise_vec[28:40] = noise_scales.dof_vel * noise_level * self.obs_scales.dof_vel
         noise_vec[40:44] = 0.0
         noise_vec[44:56] = 0.0
-        noise_vec[56:68] = 0.0   # pd_prior_torques: deterministic, no noise
-        noise_vec[68:80] = noise_scales.fatigue * noise_level / 10.0
+        noise_vec[56:68] = noise_scales.fatigue * noise_level / 10.0
         return noise_vec
 
     def _compute_torques(self, actions):
