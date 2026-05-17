@@ -6,8 +6,8 @@ from legged_gym.envs.go2.go2_torque.go2_torque_config import GO2TorqueCfg, GO2To
 class GO2OmniJumpTorqueCfg(GO2TorqueCfg):
     class env(GO2TorqueCfg.env):
         num_envs = 4096
-        num_observations = 68
-        num_privileged_obs = 108
+        num_observations = 80   # +12 for pd_prior_torques: lets policy see PD's current per-joint output
+        num_privileged_obs = 120  # +12 propagated (privileged_obs concats obs_buf)
         num_actions = 12
         episode_length_s = 10.0
         env_spacing = 3.0
@@ -248,8 +248,9 @@ class GO2OmniJumpTorqueCfgPPO(GO2TorqueCfgPPO):
             12, 13, 14, 15, -19, 20, 21, -16, 17, 18, -25, 26,
             27, -22, 23, 24, -31, 32, 33, -28, 29, 30, -37, 38,
             39, -34, 35, 36, 41, 40, 43, 42, -47, 48, 49, -44,
-            45, 46, -53, 54, 55, -50, 51, 52, 59, 60, 61, 56,
-            57, 58, 65, 66, 67, 62, 63, 64,
+            45, 46, -53, 54, 55, -50, 51, 52,
+            -59, 60, 61, -56, 57, 58, -65, 66, 67, -62, 63, 64,   # pd_prior_torques (slots 56-67): same FL↔FR / RL↔RR swap with hip sign-flip as torques
+            71, 72, 73, 68, 69, 70, 77, 78, 79, 74, 75, 76,        # motor_fatigue (shifted to slots 68-79)
         ]
         act_permutation = [-3, 4, 5, -0.0001, 1, 2, -9, 10, 11, -6, 7, 8]
         frame_stack = 1
