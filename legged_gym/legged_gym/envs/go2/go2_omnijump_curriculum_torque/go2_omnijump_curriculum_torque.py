@@ -12,7 +12,7 @@ from legged_gym.envs.go2.go2_torque.go2_torque_config import GO2TorqueCfgPPO
 class GO2OmniJumpCurriculumTorque(GO2OmniJumpTorque):
     cfg: GO2OmniJumpCurriculumTorqueCfg
 
-    ACTIVE_REWARD_WHITELIST = GO2OmniJumpTorque.ACTIVE_REWARD_WHITELIST
+    ACTIVE_REWARD_WHITELIST = GO2OmniJumpTorque.ACTIVE_REWARD_WHITELIST | {"aerial_dof_acc"}
 
     STAGE_NAMES = ("stand", "takeoff", "flight", "landing", "motion")
 
@@ -68,6 +68,7 @@ class GO2OmniJumpCurriculumTorque(GO2OmniJumpTorque):
         "takeoff_direction": 0,
         "default_pos": 0,
         "default_hip_pos": 0,
+        "aerial_dof_acc": 0,
 
         # Stage 2 — airborne pose quality (legacy, weight 0)
         "joint_angle_aerial": 2,
@@ -437,6 +438,15 @@ class GO2OmniJumpCurriculumTorque(GO2OmniJumpTorque):
         # with no reward-side anchor, so RL never learned to hold standing pose
         # without PD).
         return torch.sum(torch.abs(self.dof_pos - self.default_dof_pos), dim=1)
+
+    def _reward_aerial_dof_acc(self):
+        # Airborne-only joint acceleration penalty. Global dof_acc covers full
+        # episode; this term specifically targets in-air twitching/flailing
+        # observed after PD fades out. Active only when all four feet off
+        # contact and not yet in prelanding.
+        active = (self.airborne & (~self.prelanding)).float()
+        acc = (self.last_dof_vel - self.dof_vel) / self.dt
+        return active * torch.sum(torch.square(acc), dim=1)
 
     def _reward_joint_angle_aerial(self):
         active = (self.airborne & (~self.prelanding)).float()
