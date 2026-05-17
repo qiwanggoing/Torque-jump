@@ -433,8 +433,10 @@ class GO2OmniJumpCurriculumTorque(GO2OmniJumpTorque):
         return torch.exp(-self.cfg.rewards.default_hip_pos_gain * hip_error)
 
     def _reward_default_pos(self):
-        hip_ids = [0, 3, 6, 9]
-        return torch.sum(torch.abs(self.dof_pos[:, hip_ids] - self.default_dof_pos[:, hip_ids]), dim=1)
+        # mygo2jump-style L1 over ALL 12 joints (was hip-only — left thigh/calf
+        # with no reward-side anchor, so RL never learned to hold standing pose
+        # without PD).
+        return torch.sum(torch.abs(self.dof_pos - self.default_dof_pos), dim=1)
 
     def _reward_joint_angle_aerial(self):
         active = (self.airborne & (~self.prelanding)).float()
