@@ -107,6 +107,12 @@ def play(args):
     else:
         env_cfg.test.vel = default_test_vel.clone().float()
 
+    # === Play-time command override (edit the number to test different jump heights) ===
+    # cmd layout: [lin_vel_x, lin_vel_y, ang_vel_yaw, jump_height, jump_command]
+    # jump_height training range: [0.40, 0.70]
+    env_cfg.test.vel[3] = 0.4   # ← change this number to test other heights
+    # ============================================================================
+
     if checkpoint_iter is not None:
         policy_steps_per_iter = train_cfg.runner.num_steps_per_env
         physics_steps_per_policy_step = max(1, int(round(1.0 / (env_cfg.sim.dt * env_cfg.growth.start_freq))))

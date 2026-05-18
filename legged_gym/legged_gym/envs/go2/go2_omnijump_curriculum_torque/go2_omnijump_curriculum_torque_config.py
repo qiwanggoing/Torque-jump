@@ -45,11 +45,12 @@ class GO2OmniJumpCurriculumTorqueCfg(GO2OmniJumpTorqueCfg):
         single_jump_command_prob = 1.0
         class ranges(GO2OmniJumpTorqueCfg.commands.ranges):
             jump_height = [0.40, 0.70]
-            lin_vel_x = [0.0, 0.0]
-            lin_vel_y = [0.0, 0.0]
-            ang_vel_yaw = [0.0, 0.0]
+            lin_vel_x = [-0.5, 0.5]   # opened up for directional jumps (was [0,0] for pure vertical)
+            lin_vel_y = [-0.3, 0.3]   # opened up for lateral jumps
+            ang_vel_yaw = [0.0, 0.0]  # yaw cmd still off — learn linear directions first
 
     class rewards(GO2OmniJumpTorqueCfg.rewards):
+        projected_peak_sigma = 0.05        # widened from 0.025 to give more tolerance during cmd-conditional height learning
         zero_command_velocity_sigma = 0.25
         zero_command_yaw_sigma = 0.25
         zero_command_height_gain = 10.0
@@ -74,22 +75,22 @@ class GO2OmniJumpCurriculumTorqueCfg(GO2OmniJumpTorqueCfg):
 
         class scales(GO2OmniJumpTorqueCfg.rewards.scales):
             maintain_contact = 0.10            # moderate: standing anchor without dominating takeoff signal
-            peak_height_progress = 5.0         # boosted (was 3.0): more dense "fly higher" gradient
+            peak_height_progress = 10.0        # 5.0 → 10.0: stronger cmd-conditional climbing gradient (controlled-jump phase)
             all_feet_airborne = 2.0            # boosted (was 1.0): bigger airborne reward
             takeoff_vertical_velocity = 10.0   # boosted (was 4.0): strong stance push signal — primary lever to break "don't jump" mode
-            projected_peak = 7.0               # boosted (was 5.0): bigger flight-phase peak-tracking signal
+            projected_peak = 15.0              # 7.0 → 15.0: dominant cmd-conditional peak-tracking signal (paired with sigma 0.05 widening)
             termination = -10.0                # not in OmniNet, kept for base-contact episodes
             orientation = -1.6                 # boosted (was -0.8): stronger upright pull during all phases
             collision = -3.0                   # boosted (was -1.0): kill leg-leg self-collision in air
             torques = -1e-5                    # OmniNet: -1e-5
             action_rate = -0.03                # boosted (was -0.025 → -0.08): direct twitching penalty
             dof_acc = -2.5e-7                  # restored to original: was over-penalizing fast (smooth) motion
-            horizontal_drift = -1.5            # penalize world-frame xy velocity → enforce vertical jumps
+            horizontal_drift = 0.0             # disabled: conflicts with directional jump tracking (lin_vel_x/y cmds want non-zero horizontal velocity)
             takeoff_direction = 80.0           # boosted (was 30): signal too small to push policy; now dominant-tier weight
-            height_tracking = 1.0              # OmniNet: 1.0
+            height_tracking = 5.0              # 1.0 → 5.0: 5× cmd-conditional height tracking (was dominated by non-cmd successful_jump)
             successful_jump = 300.0            # boosted (was 200): make completion reward dominate to overcome ep-short collapse
-            tracking_linear_velocity = 0.0     # disabled: vel=0 cmd creates stand-still local optimum
-            tracking_angular_velocity = 0.0    # disabled: same reason
+            tracking_linear_velocity = 2.0     # 0 → 2.0: enabled now that cmd ranges expanded to non-zero (lin_vel_x [-0.5,0.5], lin_vel_y [-0.3,0.3])
+            tracking_angular_velocity = 0.0    # still disabled: ang_vel_yaw cmd range still [0,0]
             joint_angle_loaded = 0.0           # disabled: sigma=1.5 bug makes exp ≈ 0 always; re-enable after sigma fix
             joint_angle_extended = 0.0         # disabled: same reason
             default_pos = -0.3                 # mygo2jump weight; now spans ALL 12 joints (fix: was hip-only and 1/3 weight). Strong pose anchor toward default standing pose — critical for surviving PD=0 stand.
