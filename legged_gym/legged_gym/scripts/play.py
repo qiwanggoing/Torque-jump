@@ -185,7 +185,8 @@ def play(args):
     #   post_stand→ cmd[4]=0 for POST_JUMP_STAND_SECONDS (verify landing stability)
     #   then manual reset → back to pre_idle
     PRE_JUMP_IDLE_SECONDS = 2.0
-    POST_JUMP_STAND_SECONDS = 2.0
+    POST_JUMP_STAND_SECONDS = 1.0   # post-landing stand duration before triggering next jump
+    CONTINUOUS_JUMP = True           # True = re-arm next jump from current pose (no reset). False = manual reset → init pose each cycle.
     PRE_JUMP_IDLE_STEPS = max(int(round(PRE_JUMP_IDLE_SECONDS / env.dt)), 1)
     POST_JUMP_STAND_STEPS = max(int(round(POST_JUMP_STAND_SECONDS / env.dt)), 1)
 
@@ -284,19 +285,42 @@ def play(args):
                     if hasattr(env, "single_jump_play_done"):
                         env.single_jump_play_done[:] = True
                     if play_phase_step >= POST_JUMP_STAND_STEPS:
-                        # Manual reset → back to pre_idle
                         env_ids = torch.arange(env.num_envs, device=env.device)
-                        env.reset_idx(env_ids)
-                        play_phase = "pre_idle"
-                        play_phase_step = 0
-                        env_cfg.test.vel[4] = 0.0
-                        if env.commands.shape[1] > 4:
-                            env.commands[:, 4] = 0.0
-                        if hasattr(env, "single_jump_play_done"):
-                            env.single_jump_play_done[:] = True
-                        env.compute_observations()
-                        obs = env.get_observations()
-                        print(f"[Play] Step {i}: post_stand done → manual reset → pre_idle")
+                        if CONTINUOUS_JUMP:
+                            # Re-arm for next jump without resetting robot pose.
+                            # Clear the env's jump-tracking flags so the next cmd[4]=1
+                            # is recognised as a new jump cycle, but keep the robot
+                            # standing where it landed.
+                            if hasattr(env, "_reset_jump_buffers"):
+                                env._reset_jump_buffers(env_ids)
+                            # Update landing target to current xy so the robot is
+                            # rewarded for landing back where it currently is.
+                            if hasattr(env, "atan_p_des"):
+                                env.atan_p_des[:, 0] = env.root_states[:, 0]
+                                env.atan_p_des[:, 1] = env.root_states[:, 1]
+                            env_cfg.test.vel[4] = target_jump_cmd
+                            if env.commands.shape[1] > 4:
+                                env.commands[:, 4] = target_jump_cmd
+                            if hasattr(env, "single_jump_play_done"):
+                                env.single_jump_play_done[:] = False
+                            play_phase = "jumping"
+                            play_phase_step = 0
+                            env.compute_observations()
+                            obs = env.get_observations()
+                            print(f"[Play] Step {i}: post_stand done → next jump (continuous)")
+                        else:
+                            # Manual reset → back to pre_idle
+                            env.reset_idx(env_ids)
+                            play_phase = "pre_idle"
+                            play_phase_step = 0
+                            env_cfg.test.vel[4] = 0.0
+                            if env.commands.shape[1] > 4:
+                                env.commands[:, 4] = 0.0
+                            if hasattr(env, "single_jump_play_done"):
+                                env.single_jump_play_done[:] = True
+                            env.compute_observations()
+                            obs = env.get_observations()
+                            print(f"[Play] Step {i}: post_stand done → manual reset → pre_idle")
         foot_z = env.rigid_body_states[0, env.feet_indices, 2].cpu().numpy()
         if CHANGE_VEL and supports_heading_command and not is_jump_task:
             if i % 100 == 0:

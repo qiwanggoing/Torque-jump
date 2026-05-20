@@ -58,7 +58,7 @@ class GO2AtanassovJumpTorqueCfg(GO2OmniJumpTorqueCfg):
         resampling_time = 1e9        # never resample mid-episode (Stage 1 is single-jump)
         jump_command_threshold = 0.5
         stand_command_prob = 0.0
-        single_jump_command_prob = 1.0
+        single_jump_command_prob = 0.7    # 70% jump episodes + 30% pure-stand episodes (cmd[4]=0 throughout) — teaches policy "cmd[4]=0 → stand still"
         atanassov_target_height = 0.6   # default target peak (lowered from paper 0.9 — easier to reach for torque control)
 
         class ranges(GO2OmniJumpTorqueCfg.commands.ranges):
@@ -206,7 +206,7 @@ class GO2AtanassovJumpTorqueCfg(GO2OmniJumpTorqueCfg):
         ground_foot_height = 0.30
         air_foot_height = 0.18
         prelanding_foot_height = 0.25
-        post_jump_stand_steps = 100
+        post_jump_stand_steps = 300   # 100 → 300 (1s → 3s): more cmd[4]=0 data after each jump so policy learns to stand instead of bouncing
 
         class scales(GO2OmniJumpTorqueCfg.rewards.scales):
             # =====================================================================
