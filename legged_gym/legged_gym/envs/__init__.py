@@ -46,6 +46,16 @@ from .go2.go2_omnijump_curriculum_torque.go2_omnijump_curriculum_torque_config i
     GO2OmniJumpCurriculumTorqueCfgPPO,
 )
 from .go2.go2_omnijump_curriculum_torque.go2_omnijump_curriculum_torque import GO2OmniJumpCurriculumTorque
+from .go2.go2_omninet_jump_torque.go2_omninet_jump_torque_config import (
+    GO2OmniNetJumpTorqueCfg,
+    GO2OmniNetJumpTorqueCfgPPO,
+)
+from .go2.go2_omninet_jump_torque.go2_omninet_jump_torque import GO2OmniNetJumpTorque
+from .go2.go2_atanassov_jump_torque.go2_atanassov_jump_torque_config import (
+    GO2AtanassovJumpTorqueCfg,
+    GO2AtanassovJumpTorqueCfgPPO,
+)
+from .go2.go2_atanassov_jump_torque.go2_atanassov_jump_torque import GO2AtanassovJumpTorque
 from .go2.go2_config import GO2RoughCfg, GO2RoughCfgPPO
 
 
@@ -64,5 +74,17 @@ task_registry.register(
     GO2OmniJumpCurriculumTorque,
     GO2OmniJumpCurriculumTorqueCfg(),
     GO2OmniJumpCurriculumTorqueCfgPPO(),
+)
+task_registry.register(
+    "go2_omninet_jump_torque",
+    GO2OmniNetJumpTorque,
+    GO2OmniNetJumpTorqueCfg(),
+    GO2OmniNetJumpTorqueCfgPPO(),
+)
+task_registry.register(
+    "go2_atanassov_jump_torque",
+    GO2AtanassovJumpTorque,
+    GO2AtanassovJumpTorqueCfg(),
+    GO2AtanassovJumpTorqueCfgPPO(),
 )
 task_registry.register("go2_rough", LeggedRobot, GO2RoughCfg(), GO2RoughCfgPPO())
