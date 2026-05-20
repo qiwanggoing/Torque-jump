@@ -122,7 +122,7 @@ class GO2AtanassovJumpTorqueCfg(GO2OmniJumpTorqueCfg):
         sigma_pz_flight = 0.05     # broader for peak target
         sigma_pos_landing = 0.05   # landing xy position
         sigma_pos_max = 0.05       # max height
-        sigma_ori_stance = 0.10
+        sigma_ori_stance = 0.05    # narrower (0.10 → 0.05): pitch sensitivity 2× sharper
         sigma_ori_landing = 0.10
         sigma_v_flight = 0.25
         sigma_omega = 0.25
@@ -220,7 +220,7 @@ class GO2AtanassovJumpTorqueCfg(GO2OmniJumpTorqueCfg):
 
             # Dense phase-aware
             atanassov_base_position = 8.0          # boosted 3 → 8: dominant phase target signal (squat / peak / land)
-            atanassov_orientation_tracking = 2.0   # 1 → 2: now active in flight too (anti-roll/pitch in air)
+            atanassov_orientation_tracking = 8.0   # 2 → 8 (4×): strong pitch/roll penalty; was too weak to prevent head-down butt-up posture
             atanassov_base_lin_vel = 1.0           # flight
             atanassov_base_ang_vel = 0.5           # flight + 0.1·landing
             atanassov_feet_clearance = 1.0         # reduced 2 → 1: pose is secondary
@@ -304,8 +304,11 @@ class GO2AtanassovJumpTorqueCfg(GO2OmniJumpTorqueCfg):
 
 class GO2AtanassovJumpTorqueCfgPPO(GO2OmniJumpTorqueCfgPPO):
     class policy(GO2OmniJumpTorqueCfgPPO.policy):
-        init_noise_std = 0.5         # was 1.0 (paper); reduced because our torque-direct policy is
-                                     # more sensitive to action noise than the paper's POSE+lowpass+PD stack
+        # SATA OmniJump torque baseline parameters (these were validated on the
+        # SATA torque task). Paper Atanassov / OmniNet use 1.0 noise + 0.01 entropy
+        # but those are tuned for POSE+PD@10kHz control where actions get filtered
+        # before reaching joints. Direct torque control needs much less noise.
+        init_noise_std = 0.35        # SATA baseline (was 0.5; paper 1.0)
         actor_hidden_dims = [512, 256, 128]
         critic_hidden_dims = [512, 256, 128]
         activation = "elu"
@@ -314,10 +317,10 @@ class GO2AtanassovJumpTorqueCfgPPO(GO2OmniJumpTorqueCfgPPO):
         value_loss_coef = 1.0
         use_clipped_value_loss = True
         clip_param = 0.2
-        entropy_coef = 0.005         # was 0.01 (paper); reduced to prevent noise_std growth in torque control
+        entropy_coef = 0.001         # SATA baseline (was 0.005; paper 0.01). Lower entropy prevents adaptive-LR from blowing up noise_std late in training.
         num_learning_epochs = 5
         num_mini_batches = 4
-        learning_rate = 1.0e-3
+        learning_rate = 1.0e-4       # SATA baseline (was 1e-3; paper uses 1e-3 but for POSE control). 10× smaller for stable torque PPO updates.
         schedule = "adaptive"
         gamma = 0.99
         lam = 0.95
@@ -328,7 +331,7 @@ class GO2AtanassovJumpTorqueCfgPPO(GO2OmniJumpTorqueCfgPPO):
     class runner(GO2OmniJumpTorqueCfgPPO.runner):
         policy_class_name = "ActorCritic"
         algorithm_class_name = "PPO"
-        num_steps_per_env = 24
+        num_steps_per_env = 48       # SATA baseline (was 24). Longer rollouts → more stable PPO updates.
         max_iterations = 5000          # 4000 PD-fade (warmup 1000 + fade 1000→4000) + 1000 pure-torque refinement
         save_interval = 200
         experiment_name = "go2_atanassov_jump_torque"
