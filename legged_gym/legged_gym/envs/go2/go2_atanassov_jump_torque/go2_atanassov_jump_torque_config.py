@@ -213,14 +213,14 @@ class GO2AtanassovJumpTorqueCfg(GO2OmniJumpTorqueCfg):
             # Atanassov Table 1 — Task rewards (positive weights, phase-gated)
             # =====================================================================
             # Sparse (landing phase only) — boosted because they fire ≤1× per ep
-            atanassov_landing_position = 15.0      # 5 → 15 (3×)
+            atanassov_landing_position = 50.0      # 15 → 50 (3.3×) — strong landing-at-init incentive
             atanassov_landing_orientation = 10.0   # 3 → 10 (3.3×)
             atanassov_max_height = 100.0           # 50 → 100 (2×, dominant jump-completion signal)
             atanassov_jumping_sparse = 20.0        # 5 → 20 (4×)
 
             # Dense phase-aware
-            atanassov_base_position = 8.0          # boosted 3 → 8: dominant phase target signal (squat / peak / land)
-            atanassov_orientation_tracking = 8.0   # 2 → 8 (4×): strong pitch/roll penalty; was too weak to prevent head-down butt-up posture
+            atanassov_base_position = 15.0         # 8 → 15: stronger phase target signal; landing-phase 3D position pull doubled to push back-jumping correction
+            atanassov_orientation_tracking = 0.0   # disabled — replaced by curriculum-style raw `orientation` below (more continuous gradient at large tilts)
             atanassov_base_lin_vel = 1.0           # flight
             atanassov_base_ang_vel = 0.5           # flight + 0.1·landing
             atanassov_feet_clearance = 1.0         # reduced 2 → 1: pose is secondary
@@ -249,7 +249,7 @@ class GO2AtanassovJumpTorqueCfg(GO2OmniJumpTorqueCfg):
             all_feet_airborne = 0.0
             takeoff_vertical_velocity = 0.0
             projected_peak = 0.0
-            orientation = 0.0
+            orientation = -1.6            # curriculum-style raw form (sum(square(projected_gravity_xy))); no exp saturation — pitch/roll penalty grows continuously with tilt
             collision = -1.0              # paper Table 1 "Collisions": penalty for non-foot body contact (hip/thigh/calf via penalize_contacts_on)
             torques = 0.0
             horizontal_drift = 0.0
@@ -271,6 +271,7 @@ class GO2AtanassovJumpTorqueCfg(GO2OmniJumpTorqueCfg):
         print_episode_keys = [
             "rew_atanassov_base_position",
             "rew_atanassov_orientation_tracking",
+            "rew_orientation",
             "rew_atanassov_base_lin_vel",
             "rew_atanassov_base_ang_vel",
             "rew_atanassov_feet_clearance",

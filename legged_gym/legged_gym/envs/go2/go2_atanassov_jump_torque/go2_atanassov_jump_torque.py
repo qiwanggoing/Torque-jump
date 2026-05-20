@@ -53,6 +53,7 @@ class GO2AtanassovJumpTorque(GO2OmniJumpTorque):
         "atanassov_nominal_pose",
         "atanassov_maintain_contact",
         "atanassov_takeoff_vz",
+        "orientation",  # parent's raw-form orientation penalty (curriculum-style); replaces atanassov_orientation_tracking
         # Regularization (negative scale)
         "atanassov_energy",
         "atanassov_base_acceleration",
