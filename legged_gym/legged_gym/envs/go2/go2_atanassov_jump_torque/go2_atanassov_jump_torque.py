@@ -277,10 +277,15 @@ class GO2AtanassovJumpTorque(GO2OmniJumpTorque):
         return stance * r_st + flight * r_fl + landing * r_la
 
     def _reward_atanassov_orientation_tracking(self):
-        # Stance and landing only (paper Table 1 shows 0 in flight)
-        active = (self._stance_mask() | self._landing_mask()).float()
+        # All phases (stance + flight + landing). Paper Table 1 sets flight to
+        # 0 to allow somersault-style rotations, but we want vertical jump in
+        # place and our torque-direct policy lacks paper's PD@10kHz stabiliser,
+        # so the in-air orientation needs an explicit anchor against roll/pitch.
+        active = (
+            self._stance_mask() | self._flight_mask() | self._landing_mask()
+        ).float()
         err = torch.sum(torch.square(self.projected_gravity[:, :2]), dim=1)
-        sigma = float(self.cfg.rewards.sigma_ori_stance)  # same σ for stance/landing
+        sigma = float(self.cfg.rewards.sigma_ori_stance)
         return active * torch.exp(-err / sigma)
 
     def _reward_atanassov_base_lin_vel(self):

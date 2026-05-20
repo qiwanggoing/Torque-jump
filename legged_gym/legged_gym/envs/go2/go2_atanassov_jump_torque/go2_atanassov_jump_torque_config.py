@@ -220,7 +220,7 @@ class GO2AtanassovJumpTorqueCfg(GO2OmniJumpTorqueCfg):
 
             # Dense phase-aware
             atanassov_base_position = 8.0          # boosted 3 → 8: dominant phase target signal (squat / peak / land)
-            atanassov_orientation_tracking = 1.0   # reduced 2 → 1: pose is secondary
+            atanassov_orientation_tracking = 2.0   # 1 → 2: now active in flight too (anti-roll/pitch in air)
             atanassov_base_lin_vel = 1.0           # flight
             atanassov_base_ang_vel = 0.5           # flight + 0.1·landing
             atanassov_feet_clearance = 1.0         # reduced 2 → 1: pose is secondary
