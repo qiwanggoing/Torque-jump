@@ -289,9 +289,14 @@ class GO2AtanassovJumpTorque(GO2OmniJumpTorque):
         return active * torch.exp(-err / sigma)
 
     def _reward_atanassov_base_lin_vel(self):
-        # Flight only — track desired xy velocity (Stage 1: v_des = 0)
+        # Flight only — penalise world-frame xy velocity (Stage 1: v_des = 0).
+        # IMPORTANT: world frame via root_states[:, 7:9], NOT body-frame
+        # base_lin_vel[:, :2]. Body-frame xy velocity stays ≈ 0 when the
+        # robot tilts and pushes purely along body-z, so the previous
+        # body-frame version completely missed tilt-induced lateral motion.
+        # OmniJump open-source code uses world frame here for the same reason.
         active = self._flight_mask().float()
-        err = torch.sum(torch.square(self.base_lin_vel[:, :2]), dim=1)  # v_des = 0
+        err = torch.sum(torch.square(self.root_states[:, 7:9]), dim=1)
         sigma = float(self.cfg.rewards.sigma_v_flight)
         return active * torch.exp(-err / sigma)
 
@@ -373,12 +378,14 @@ class GO2AtanassovJumpTorque(GO2OmniJumpTorque):
         # Quadratic upward-velocity reward, gated on two conditions:
         #   1. Pre-takeoff (~has_taken_off) so it stops once airborne
         #   2. Significant vz (>0.8 m/s) — kills micro-jitter exploit
-        # Note: contact-gate was tried but killed the signal entirely (push-off
-        # naturally lifts feet asynchronously). Symmetry (weight 2.0) and
-        # maintain_contact (weight 5.0) handle balance/4-foot as separate
-        # rewards instead.
-        active = (~self.has_taken_off) & (self.base_lin_vel[:, 2] > 0.8)
-        clipped_vz = torch.clamp(self.base_lin_vel[:, 2], min=0.0, max=4.0)
+        # IMPORTANT: use root_states[:, 9] (world-frame z velocity), NOT
+        # base_lin_vel[:, 2] (body-frame z). With a tilted body, body-z is
+        # not aligned with world-up, so pushing along body-z gives high
+        # body-z velocity but only a fraction of that as world-z — this is
+        # what caused the previous "tilt to side and push" exploit.
+        vz_world = self.root_states[:, 9]
+        active = (~self.has_taken_off) & (vz_world > 0.8)
+        clipped_vz = torch.clamp(vz_world, min=0.0, max=4.0)
         return active.float() * torch.square(clipped_vz)
 
     # ---- Regularization rewards (negative scale; squared into r^-) ----
