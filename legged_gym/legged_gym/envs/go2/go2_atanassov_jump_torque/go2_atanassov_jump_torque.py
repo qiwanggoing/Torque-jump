@@ -188,6 +188,63 @@ class GO2AtanassovJumpTorque(GO2OmniJumpTorque):
         self.atan_last_contacts[:] = contact_now
 
     # ====================================================================== #
+    # PD-fade torque computation (override base which uses constant pd_alpha).
+    # ``GO2OmniJumpTorque._compute_torques`` reads ``pd_prior_weight`` and
+    # ``rl_prior_weight`` as constants — so the growth schedule (warmup_steps,
+    # x0) doesn't actually fade PD. We override here to make pd_alpha scale
+    # with ``general_scale`` (1 - g): full pd_prior_weight at warmup, 0 once
+    # the fade window completes.
+    # ====================================================================== #
+    def _compute_torques(self, actions):
+        self._update_growth_scale()
+        self._update_default_joint_pd_target()
+        residual_torques = actions[:, :12] * self.cfg.control.action_scale
+
+        # PD fades from pd_prior_weight → 0 as general_scale 0 → 1
+        pd_alpha = float(self.cfg.control.pd_prior_weight) * max(0.0, 1.0 - float(self.general_scale))
+        rl_alpha = 1.0 - pd_alpha
+
+        self.rl_prior_alpha[:] = rl_alpha
+        self.pd_prior_alpha[:] = pd_alpha
+        self.residual_torques_action = residual_torques * rl_alpha * self.current_torque_limit_scale
+        self.pd_prior_torques = (
+            self.p_gains * (self.default_joint_pd_target - self.dof_pos) - self.d_gains * self.dof_vel
+        ) * pd_alpha
+
+        self.torques_action = self.residual_torques_action + self.pd_prior_torques
+        torques_limits = torch.clamp(self.torque_limits, min=1e-6).clone()
+
+        if self.cfg.control.activation_process:
+            current_activation_sign = torch.tanh(self.torques_action / torques_limits)
+            activation_sign = (current_activation_sign - self.activation_sign) * 0.6 + self.activation_sign
+        else:
+            activation_sign = self.torques_action / torques_limits
+        self.activation_sign = torch.where(
+            torch.rand(self.num_envs, device=self.device).unsqueeze(1) > self.cfg.domain_rand.loss_rate,
+            activation_sign,
+            self.activation_sign,
+        )
+
+        if self.cfg.control.hill_model:
+            self.torques = self.activation_sign * torques_limits * (
+                1 - torch.sign(self.activation_sign) * self.dof_vel / self.dof_vel_limits
+            )
+        else:
+            self.torques = self.activation_sign * torques_limits
+        self.torques = torch.clip(self.torques, -torques_limits, torques_limits)
+
+        if self.cfg.control.motor_fatigue:
+            self.motor_fatigue += torch.abs(self.torques) * self.dt
+            self.motor_fatigue *= 0.9
+        else:
+            self.motor_fatigue = torch.zeros_like(self.motor_fatigue)
+
+        if self.low_torque:
+            self.torques[:, :3] = self.torques[:, :3] * 0.2
+
+        return self.torques
+
+    # ====================================================================== #
     # Phase-aware PD target (SATA-style assist during PD-fade phase).
     # Parent computes a single PD blend toward ``default_joint_pd_target`` each
     # step. We override the target each step so the PD prior physically pulls

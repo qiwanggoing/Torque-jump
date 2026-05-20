@@ -35,11 +35,12 @@ class GO2AtanassovJumpTorqueCfg(GO2OmniJumpTorqueCfg):
         send_timeouts = True
 
     class growth(GO2OmniJumpTorqueCfg.growth):
-        # SATA PD-fade schedule unchanged
+        # Compressed PD fade: warmup iter ~600, fade ends iter ~2000.
+        # At ~96 step_count/iter (num_steps_per_env=48 × 2 physics steps): 600×96=57600, 2000×96=192000.
         start_torque_scale = 1.0
         k = 0.0001
-        warmup_steps = 96000
-        x0 = 384000
+        warmup_steps = 57600    # PD locked at 50% until iter ~600
+        x0 = 192000             # PD → 0 by iter ~2000
 
     class control(GO2OmniJumpTorqueCfg.control):
         control_type = "TG"
@@ -333,7 +334,7 @@ class GO2AtanassovJumpTorqueCfgPPO(GO2OmniJumpTorqueCfgPPO):
         policy_class_name = "ActorCritic"
         algorithm_class_name = "PPO"
         num_steps_per_env = 48       # SATA baseline (was 24). Longer rollouts → more stable PPO updates.
-        max_iterations = 5000          # 4000 PD-fade (warmup 1000 + fade 1000→4000) + 1000 pure-torque refinement
+        max_iterations = 3000          # warmup 0-600, fade 600-2000, pure-torque refinement 2000-3000
         save_interval = 200
         experiment_name = "go2_atanassov_jump_torque"
         run_name = "stage1_vertical"
