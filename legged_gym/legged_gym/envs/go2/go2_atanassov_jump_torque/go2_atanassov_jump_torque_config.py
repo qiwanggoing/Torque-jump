@@ -35,12 +35,13 @@ class GO2AtanassovJumpTorqueCfg(GO2OmniJumpTorqueCfg):
         send_timeouts = True
 
     class growth(GO2OmniJumpTorqueCfg.growth):
-        # Compressed PD fade: warmup iter ~600, fade ends iter ~2000.
-        # At ~96 step_count/iter (num_steps_per_env=48 × 2 physics steps): 600×96=57600, 2000×96=192000.
+        # SATA curriculum-validated schedule: warmup iter ~1000, fade ends iter ~4000.
+        # Linear ramp = (4000-1000) × 96 = 288000 step_count → 1.67pp PD drop per 100 iter
+        # (vs the compressed 3.6pp/100iter that collapsed at iter 800).
         start_torque_scale = 1.0
         k = 0.0001
-        warmup_steps = 57600    # PD locked at 50% until iter ~600
-        x0 = 192000             # PD → 0 by iter ~2000
+        warmup_steps = 96000    # PD locked at 50% until iter ~1000
+        x0 = 384000             # PD → 0 by iter ~4000
 
     class control(GO2OmniJumpTorqueCfg.control):
         control_type = "TG"
@@ -128,7 +129,7 @@ class GO2AtanassovJumpTorqueCfg(GO2OmniJumpTorqueCfg):
         sigma_ori_landing = 0.10
         sigma_v_flight = 0.25
         sigma_omega = 0.25
-        sigma_q_nominal = 0.5
+        sigma_q_nominal = 0.3      # 0.5 → 0.3: sharper nominal_pose kernel — more sensitive to joint deviation
 
         # ---------- Multiplicative reward sigma ----------
         # r_total = r^+ * exp(-||r^-||^2 / sigma_reg)
@@ -227,7 +228,7 @@ class GO2AtanassovJumpTorqueCfg(GO2OmniJumpTorqueCfg):
             atanassov_base_ang_vel = 0.5           # flight + 0.1·landing
             atanassov_feet_clearance = 1.0         # reduced 2 → 1: pose is secondary
             atanassov_symmetry = 2.0               # 0.2 → 2.0 (10×): force left-right symmetric joint angles to kill tilted-push exploit
-            atanassov_nominal_pose = 5.0           # 0.5 → 5.0 (10×): strong default-pose anchor (per Atanassov spirit, modify existing reward not add new ones)
+            atanassov_nominal_pose = 8.0           # 5 → 8: stronger default-pose anchor to survive PD fade
             atanassov_maintain_contact = 5.0       # 0.5 → 5.0 (10×): strict 4-foot-contact gate; main stance stability incentive
             atanassov_takeoff_vz = 5.0             # 20 → 5: reward is now vz² with threshold 0.8; max per step = 5 × 16 = 80, balanced
 
@@ -257,7 +258,7 @@ class GO2AtanassovJumpTorqueCfg(GO2OmniJumpTorqueCfg):
             horizontal_drift = 0.0
             takeoff_direction = 0.0
             default_pos = 0.0
-            default_hip_pos = 2.0          # hip-only exp form (target = default 0.1/-0.1), focused anti-splay
+            default_hip_pos = 5.0          # 2 → 5: stronger hip-only anti-splay
             joint_angle_loaded = 0.0
             joint_angle_extended = 0.0
             joint_angle_aerial = 0.0
@@ -336,7 +337,7 @@ class GO2AtanassovJumpTorqueCfgPPO(GO2OmniJumpTorqueCfgPPO):
         policy_class_name = "ActorCritic"
         algorithm_class_name = "PPO"
         num_steps_per_env = 48       # SATA baseline (was 24). Longer rollouts → more stable PPO updates.
-        max_iterations = 3000          # warmup 0-600, fade 600-2000, pure-torque refinement 2000-3000
+        max_iterations = 5000          # warmup 0-1000, fade 1000-4000, pure-torque refinement 4000-5000
         save_interval = 200
         experiment_name = "go2_atanassov_jump_torque"
         run_name = "stage1_vertical"

@@ -96,16 +96,6 @@ class GO2OmniJumpCurriculumTorque(GO2OmniJumpTorque):
         self.curriculum_metric_ema = {}
         super()._init_buffers()
 
-        # === Success-rate-gated cmd curriculum ===
-        # Start at cmd_progress = 0 (pure vertical jumps) and only open up direction
-        # commands once successful_jump_rate EMA crosses gates.
-        self.success_cmd_ema = 0.0
-        self.cmd_progress_value = 0.0
-        self._base_cmd_lin_vel_x = list(self.command_ranges["lin_vel_x"])
-        self._base_cmd_lin_vel_y = list(self.command_ranges["lin_vel_y"])
-        self.command_ranges["lin_vel_x"] = [0.0, 0.0]
-        self.command_ranges["lin_vel_y"] = [0.0, 0.0]
-
     def _prepare_reward_function(self):
         super()._prepare_reward_function()
         self.curriculum_final_reward_scales = dict(self.reward_scales)
@@ -116,41 +106,6 @@ class GO2OmniJumpCurriculumTorque(GO2OmniJumpTorque):
     def reset_idx(self, env_ids):
         if len(env_ids) == 0:
             return
-
-        # === Success-rate cmd-curriculum gate (run BEFORE super so jump_* buffers
-        # still carry the episode counters; super().reset_idx zeros them). ===
-        eval_den = torch.clamp(self.jump_evaluations[env_ids], min=1.0)
-        rates = self.successful_jumps[env_ids] / eval_den
-        mask = self.jump_evaluations[env_ids] > 0
-        if mask.any():
-            batch_rate = rates[mask].mean().item()
-            self.success_cmd_ema = 0.95 * self.success_cmd_ema + 0.05 * batch_rate
-            # Ratchet-up: each stage needs sustained success_ema > 0.90 at the
-            # current cmd level before unlocking the next stage. Never regress
-            # — once unlocked, stays unlocked even if success temporarily dips.
-            if self.cmd_progress_value < 0.5 and self.success_cmd_ema > 0.90:
-                new_progress = 0.5
-            elif self.cmd_progress_value < 1.0 and self.success_cmd_ema > 0.90:
-                new_progress = 1.0
-            else:
-                new_progress = self.cmd_progress_value
-            if new_progress != self.cmd_progress_value:
-                self.cmd_progress_value = new_progress
-                self.command_ranges["lin_vel_x"] = [
-                    self._base_cmd_lin_vel_x[0] * new_progress,
-                    self._base_cmd_lin_vel_x[1] * new_progress,
-                ]
-                self.command_ranges["lin_vel_y"] = [
-                    self._base_cmd_lin_vel_y[0] * new_progress,
-                    self._base_cmd_lin_vel_y[1] * new_progress,
-                ]
-                print(
-                    f"[CmdCurriculum] success_ema={self.success_cmd_ema:.3f} → "
-                    f"cmd_progress={new_progress} "
-                    f"(lin_vel_x={self.command_ranges['lin_vel_x']}, "
-                    f"lin_vel_y={self.command_ranges['lin_vel_y']})"
-                )
-
         super().reset_idx(env_ids)
         if not getattr(self.cfg.curriculum, "enabled", False):
             return
@@ -168,13 +123,6 @@ class GO2OmniJumpCurriculumTorque(GO2OmniJumpTorque):
         super()._log_jump_episode_stats(env_ids)
         if "episode" not in self.extras:
             self.extras["episode"] = {}
-        # Success-rate cmd-curriculum diagnostics
-        self.extras["episode"]["cmd_curriculum_success_ema"] = torch.tensor(
-            float(self.success_cmd_ema), dtype=torch.float, device=self.device
-        )
-        self.extras["episode"]["cmd_curriculum_progress"] = torch.tensor(
-            float(self.cmd_progress_value), dtype=torch.float, device=self.device
-        )
         self.extras["episode"]["curriculum_stage"] = torch.tensor(
             float(self.curriculum_stage_idx), dtype=torch.float, device=self.device
         )
