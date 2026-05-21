@@ -1003,7 +1003,7 @@ class GO2OmniJumpTorque(GO2Torque):
         # mygo2jump-style: exp reward keeping 4 hip joints near their default values (no outward/inward drift).
         hip_indices = [0, 3, 6, 9]
         hip_diff = torch.sum(
-            torch.abs(self.dof_pos[:, hip_indices] - self.default_dof_pos[hip_indices].unsqueeze(0)),
+            torch.abs(self.dof_pos[:, hip_indices] - self.default_dof_pos[:, hip_indices]),
             dim=1,
         )
         return torch.exp(-hip_diff * 4.0)
