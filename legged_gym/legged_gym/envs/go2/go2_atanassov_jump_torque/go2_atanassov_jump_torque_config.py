@@ -109,6 +109,7 @@ class GO2AtanassovJumpTorqueCfg(GO2OmniJumpTorqueCfg):
         # Other Atanassov rand parameters can be inherited / matched at deploy
 
     class rewards(GO2OmniJumpTorqueCfg.rewards):
+        default_hip_pos_gain = 4.0   # exp(-gain × hip_diff) sharpness for default_hip_pos reward
         # ---------- Phase targets (Table 1) ----------
         only_positive_rewards = False
         atanassov_target_peak = 0.6              # peak height target (lowered from paper 0.9)
@@ -256,7 +257,7 @@ class GO2AtanassovJumpTorqueCfg(GO2OmniJumpTorqueCfg):
             horizontal_drift = 0.0
             takeoff_direction = 0.0
             default_pos = 0.0
-            default_hip_pos = 0.0
+            default_hip_pos = 2.0          # hip-only exp form (target = default 0.1/-0.1), focused anti-splay
             joint_angle_loaded = 0.0
             joint_angle_extended = 0.0
             joint_angle_aerial = 0.0
@@ -273,6 +274,7 @@ class GO2AtanassovJumpTorqueCfg(GO2OmniJumpTorqueCfg):
             "rew_atanassov_base_position",
             "rew_atanassov_orientation_tracking",
             "rew_orientation",
+            "rew_default_hip_pos",
             "rew_atanassov_base_lin_vel",
             "rew_atanassov_base_ang_vel",
             "rew_atanassov_feet_clearance",

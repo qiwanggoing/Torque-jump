@@ -54,6 +54,7 @@ class GO2AtanassovJumpTorque(GO2OmniJumpTorque):
         "atanassov_maintain_contact",
         "atanassov_takeoff_vz",
         "orientation",  # parent's raw-form orientation penalty (curriculum-style); replaces atanassov_orientation_tracking
+        "default_hip_pos",  # parent's exp(-gain × Σ|q_hip - q_hip_default|) — hip-specific anti-splay (mygo2jump-style, but target = configured default 0.1/-0.1)
         # Regularization (negative scale)
         "atanassov_energy",
         "atanassov_base_acceleration",
@@ -186,6 +187,39 @@ class GO2AtanassovJumpTorque(GO2OmniJumpTorque):
         # Update last contacts for contact_change reward (next-step diff)
         contact_now = self._get_contact_state()
         self.atan_last_contacts[:] = contact_now
+
+    # ====================================================================== #
+    # Linear PD-fade schedule (override base's Gompertz curve).
+    # Base GO2Torque._update_growth_scale uses Gompertz which doesn't honour
+    # warmup_steps and concentrates the fade in a narrow sigmoid window
+    # around x0. We use the same warmup+linear-ramp layout as
+    # GO2OmniJumpCurriculumTorque for predictable scheduling:
+    #   step < warmup_steps:                general_scale = 0  (PD locked full)
+    #   warmup_steps ≤ step ≤ x0:           ramps linearly 0 → 1
+    #   step > x0:                          general_scale = 1  (PD fully faded)
+    # ====================================================================== #
+    def _update_growth_scale(self):
+        self.step_count += 1
+        if self.cfg.control.control_type == "T" or self.cfg.test.use_test:
+            from legged_gym.envs.go2.go2_torque.go2_torque_config import GO2TorqueCfgPPO
+            self.step_count = GO2TorqueCfgPPO().runner.num_steps_per_env * self.cfg.test.checkpoint
+
+        warmup_steps = max(0.0, float(getattr(self.cfg.growth, "warmup_steps", 0)))
+        fade_end_steps = max(float(self.cfg.growth.x0), warmup_steps + 1.0)
+        if self.step_count < warmup_steps:
+            self.general_scale = 0.0
+        else:
+            ramp_progress = (self.step_count - warmup_steps) / (fade_end_steps - warmup_steps)
+            self.general_scale = min(1.0, max(0.0, ramp_progress))
+
+        self.current_freq = self.general_scale * (self.max_freq - self.start_freq) + self.start_freq
+        self.current_torque_limit_scale = (
+            self.general_scale * (self.max_torque_scale - self.start_torque_scale) + self.start_torque_scale
+        )
+        self.r_leg_scaled = (
+            self.general_scale * (self.max_rear_torque_scale - self.start_rear_torque_scale)
+            + self.start_rear_torque_scale
+        )
 
     # ====================================================================== #
     # PD-fade torque computation (override base which uses constant pd_alpha).
@@ -407,16 +441,19 @@ class GO2AtanassovJumpTorque(GO2OmniJumpTorque):
         return torch.exp(-err / 0.5)
 
     def _reward_atanassov_nominal_pose(self):
-        # Phase-weighted pose anchor. With overall weight now 5.0 in config,
-        # per-phase contribution is:
-        #   stance 0.5 — mild pull; doesn't override squat (base_position 8 dominates)
-        #   flight 1.0 — STRONG anti-splay during airborne (was 0.1, too weak)
-        #   landing 1.0 — full pull to stable landing pose
+        # Phase-weighted pose anchor + idle (between/before/without jumps).
+        # Without the idle term, pure-stand episodes (cmd[4]=0 throughout)
+        # have all three jump phases inactive → nominal_pose contributes
+        # nothing during the 30% of episodes meant to teach standing.
+        # idle = no jump command active AND hasn't landed (covers pre-takeoff
+        # idle and the unstarted-jump portion of pure-stand episodes).
         err = torch.sum(torch.square(self.dof_pos - self.default_dof_pos), dim=1)
         sigma = float(self.cfg.rewards.sigma_q_nominal)
         rew = torch.exp(-err / sigma)
+        idle = (~self.jumping_state) & (~self.has_landed)
         weight = (
-            0.5 * self._stance_mask().float()
+            1.0 * idle.float()
+            + 0.5 * self._stance_mask().float()
             + 1.0 * self._flight_mask().float()
             + 1.0 * self._landing_mask().float()
         )
