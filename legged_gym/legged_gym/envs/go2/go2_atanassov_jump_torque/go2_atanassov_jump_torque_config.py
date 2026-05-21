@@ -313,7 +313,7 @@ class GO2AtanassovJumpTorqueCfgPPO(GO2OmniJumpTorqueCfgPPO):
         # SATA torque task). Paper Atanassov / OmniNet use 1.0 noise + 0.01 entropy
         # but those are tuned for POSE+PD@10kHz control where actions get filtered
         # before reaching joints. Direct torque control needs much less noise.
-        init_noise_std = 0.35        # SATA baseline (was 0.5; paper 1.0)
+        init_noise_std = 0.5         # 0.35 → 0.5: prior run noise collapsed to 0.01 by iter 2800, policy then froze and crashed when PD hit 0 (iter 4000+)
         actor_hidden_dims = [512, 256, 128]
         critic_hidden_dims = [512, 256, 128]
         activation = "elu"
@@ -322,7 +322,7 @@ class GO2AtanassovJumpTorqueCfgPPO(GO2OmniJumpTorqueCfgPPO):
         value_loss_coef = 1.0
         use_clipped_value_loss = True
         clip_param = 0.2
-        entropy_coef = 0.001         # SATA baseline (was 0.005; paper 0.01). Lower entropy prevents adaptive-LR from blowing up noise_std late in training.
+        entropy_coef = 0.005         # 0.001 → 0.005: prior 0.001 let noise_std collapse to 0.01 well before fade ended → no exploration to adapt to PD=0
         num_learning_epochs = 5
         num_mini_batches = 4
         learning_rate = 1.0e-4       # SATA baseline (was 1e-3; paper uses 1e-3 but for POSE control). 10× smaller for stable torque PPO updates.
