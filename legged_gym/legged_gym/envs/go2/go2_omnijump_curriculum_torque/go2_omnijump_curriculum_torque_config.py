@@ -101,7 +101,6 @@ class GO2OmniJumpCurriculumTorqueCfg(GO2OmniJumpTorqueCfg):
             aerial_dof_acc = -3e-6             # 1e-6 → 3e-6 (3×): stronger airborne q̈ penalty to suppress in-air leg flailing
             task_max_height = 20.0             # 12 → 20: with new Olsen φ+3ψ shape, boost to dominate. Policy needs strong signal to push peak past 0.20m plateau.
             landing_stability = 15.0           # 5 → 15: prior 5 + tight sigma made reward ~0; weight boost + sigma loosened (see config below)
-            idle_base_too_low = -30.0          # NEW: penalty for belly-flat exploit. Active when NOT in airborne flight; squared(clamp(0.20 - base, 0)). Base 0.087m → (0.113)² × 30 = 0.38/step penalty → unsustainable to lie flat.
             joint_angle_aerial = 0.0           # superseded by joint_angle_extended
             joint_angle_prelanding = 0.0       # superseded by joint_angle_extended
             joint_angle_landing = 0.0          # superseded by joint_angle_extended
@@ -130,7 +129,6 @@ class GO2OmniJumpCurriculumTorqueCfg(GO2OmniJumpTorqueCfg):
             "rew_default_hip_pos",
             "rew_task_max_height",
             "rew_landing_stability",
-            "rew_idle_base_too_low",
             "jump_flight_rate",
             "jump_landing_rate",
             "jump_completed_cycles",

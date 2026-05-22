@@ -16,7 +16,6 @@ class GO2OmniJumpCurriculumTorque(GO2OmniJumpTorque):
         "aerial_dof_acc",
         "task_max_height",      # explicit "reach the commanded peak height" reward
         "landing_stability",    # exp(-vel²) during landing observation window — kills post-landing slide
-        "idle_base_too_low",    # penalty for belly-flat exploit (Laplacian task_max_height made policy lie down then explode upward)
     }
 
     STAGE_NAMES = ("stand", "takeoff", "flight", "landing", "motion")
@@ -76,7 +75,6 @@ class GO2OmniJumpCurriculumTorque(GO2OmniJumpTorque):
         "aerial_dof_acc": 0,
         "task_max_height": 0,
         "landing_stability": 0,
-        "idle_base_too_low": 0,
 
         # Stage 2 — airborne pose quality (legacy, weight 0)
         "joint_angle_aerial": 2,
