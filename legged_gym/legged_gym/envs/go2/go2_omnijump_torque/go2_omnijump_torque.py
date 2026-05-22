@@ -1035,6 +1035,18 @@ class GO2OmniJumpTorque(GO2Torque):
         )
         return torch.exp(-hip_diff * 4.0)
 
+    def _reward_idle_base_too_low(self):
+        # Penalize lying-flat posture when NOT actively in the airborne push/flight window.
+        # Without this, with Laplacian-form task_max_height the policy exploits "drop to belly
+        # (base ≈ 0.087m) then explode upward" — measured peak (e.g. 0.69m) gets huge reward
+        # while abs base went from belly to peak. This reward kills that exploit by penalizing
+        # base below 0.20m in every state except active airborne flight.
+        # Active fires squared (clamp(0.20 - base, 0)²) so cost grows fast as base drops further.
+        base_z = self.root_states[:, 2]
+        too_low = torch.clamp(0.20 - base_z, min=0.0)
+        not_in_flight = ~(self.jumping_state & self.has_taken_off & (~self.has_landed))
+        return not_in_flight.float() * torch.square(too_low)
+
     def _reward_takeoff_direction(self):
         # One-shot reward fired at just_took_off: vz / ||v|| measures how vertical the takeoff momentum is.
         # Range [-1, 1]: 1=pure vertical, 0=pure horizontal, -1=downward. Robot cannot cheat from the ground

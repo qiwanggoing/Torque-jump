@@ -79,9 +79,9 @@ class GO2OmniJumpCurriculumTorqueCfg(GO2OmniJumpTorqueCfg):
         class scales(GO2OmniJumpTorqueCfg.rewards.scales):
             maintain_contact = 0.10            # moderate: standing anchor without dominating takeoff signal
             peak_height_progress = 5.0         # boosted (was 3.0): more dense "fly higher" gradient
-            all_feet_airborne = 6.0            # 2 → 6 (3×): dense reward for getting all 4 feet off — direct "you jumped!" signal
-            takeoff_vertical_velocity = 25.0   # 10 → 25 (2.5×): strongest dense gradient for "push up faster"; offsets smoothness penalties that suppress jumping
-            projected_peak = 7.0               # boosted (was 5.0): bigger flight-phase peak-tracking signal
+            all_feet_airborne = 10.0           # 6 → 10: stronger "you jumped!" signal to push policy past flat-jump plateau (mean_peak stuck at 0.19)
+            takeoff_vertical_velocity = 32.0   # 25 → 32: stronger push-up gradient
+            projected_peak = 14.0              # 7 → 14: with new Olsen φ+3ψ shape, doubling weight maintains relative dominance after Laplacian increased magnitude
             termination = -10.0                # not in OmniNet, kept for base-contact episodes
             orientation = -1.6                 # boosted (was -0.8): stronger upright pull during all phases
             collision = -3.0                   # boosted (was -1.0): kill leg-leg self-collision in air
@@ -96,11 +96,12 @@ class GO2OmniJumpCurriculumTorqueCfg(GO2OmniJumpTorqueCfg):
             tracking_angular_velocity = 0.0    # disabled: same reason
             joint_angle_loaded = 0.0           # disabled: sigma=1.5 bug makes exp ≈ 0 always; re-enable after sigma fix
             joint_angle_extended = 0.0         # disabled: same reason
-            default_pos = -0.3                 # mygo2jump weight; now spans ALL 12 joints (fix: was hip-only and 1/3 weight). Strong pose anchor toward default standing pose — critical for surviving PD=0 stand.
+            default_pos = -3.0                 # -0.3 → -3.0 (10×): policy started lying belly-flat (base 0.087m) to exploit Laplacian task_max_height; 10× stronger pose anchor makes lying flat too expensive vs jumping cleanly from default standing.
             default_hip_pos = 0.3              # mygo2jump-style exp keep hip joints near default (no outward/inward drift)
             aerial_dof_acc = -3e-6             # 1e-6 → 3e-6 (3×): stronger airborne q̈ penalty to suppress in-air leg flailing
-            task_max_height = 12.0             # 5 → 12: prior 5 was too weak (reward 0.16/episode); larger pull to commanded peak height
+            task_max_height = 20.0             # 12 → 20: with new Olsen φ+3ψ shape, boost to dominate. Policy needs strong signal to push peak past 0.20m plateau.
             landing_stability = 15.0           # 5 → 15: prior 5 + tight sigma made reward ~0; weight boost + sigma loosened (see config below)
+            idle_base_too_low = -30.0          # NEW: penalty for belly-flat exploit. Active when NOT in airborne flight; squared(clamp(0.20 - base, 0)). Base 0.087m → (0.113)² × 30 = 0.38/step penalty → unsustainable to lie flat.
             joint_angle_aerial = 0.0           # superseded by joint_angle_extended
             joint_angle_prelanding = 0.0       # superseded by joint_angle_extended
             joint_angle_landing = 0.0          # superseded by joint_angle_extended
@@ -129,6 +130,7 @@ class GO2OmniJumpCurriculumTorqueCfg(GO2OmniJumpTorqueCfg):
             "rew_default_hip_pos",
             "rew_task_max_height",
             "rew_landing_stability",
+            "rew_idle_base_too_low",
             "jump_flight_rate",
             "jump_landing_rate",
             "jump_completed_cycles",
