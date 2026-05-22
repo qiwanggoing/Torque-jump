@@ -433,10 +433,15 @@ class GO2OmniJumpTorque(GO2Torque):
         start_ids = ready_to_jump.nonzero(as_tuple=False).flatten()
         self._start_jump(start_ids)
 
+        # Real-takeoff gate: require upward velocity > 0.3 m/s.
+        # Contact filter alone fires falsely during squat-down (feet briefly lift while base
+        # is descending), making takeoff_direction reward measure vz/||v|| at vz<0 → negative.
+        # Adding vz gate ensures just_took_off only fires when robot is actually leaving the ground upward.
         self.just_took_off = (
             self.jumping_state
             & (~self.has_taken_off)
             & torch.all(~contact_filt, dim=1)
+            & (self.root_states[:, 9] > 0.3)
         )
         self.has_taken_off |= self.just_took_off
         self.airborne = self.jumping_state & self.has_taken_off & (~self.has_landed) & (~any_foot_contact)
@@ -690,18 +695,13 @@ class GO2OmniJumpTorque(GO2Torque):
         return self.torques
 
     def _update_default_joint_pd_target(self):
-        # Two-phase PD prior matching the reward design:
-        #   loaded → q_squat (fold legs during squat-down / pre-pushoff)
-        #   extended → q_ground (straight legs through pushoff / flight / landing)
-        #   non-jumping → default_dof_pos (idle standing)
-        self.default_joint_pd_target[:] = self.q_ground_target.unsqueeze(0)
+        # Two-target PD prior, mirroring _reward_default_pos:
+        #   phase_loaded (squat-down) → q_squat_target (deep squat)
+        #   everything else → default_dof_pos (standing)
+        # Removes the q_ground intermediate target that produced ambiguous mid-poses
+        # during pushoff/flight/landing.
+        self.default_joint_pd_target[:] = self.default_dof_pos.expand(self.num_envs, -1)
         self.default_joint_pd_target[self.phase_loaded] = self.q_squat_target.unsqueeze(0)
-
-        use_default_pose = (~self.jumping_state) & (self.jump_starts <= 0.0)
-        if self.cfg.commands.num_commands > 4:
-            jump_command_active = self.commands[:, 4] > float(self.cfg.commands.jump_command_threshold)
-            use_default_pose |= (~self.jumping_state) & (~jump_command_active)
-        self.default_joint_pd_target[use_default_pose] = self.default_dof_pos.expand(self.num_envs, -1)[use_default_pose]
 
     def check_termination(self):
         self.reset_buf = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
@@ -994,9 +994,18 @@ class GO2OmniJumpTorque(GO2Torque):
         return active.float() * horizontal_vel_sq
 
     def _reward_default_pos(self):
-        # mygo2jump-style L1 penalty toward q_squat (we want robot to bias toward squat posture).
-        # Active throughout episode — small weight because push/flight legitimately deviates.
-        joint_diff = torch.sum(torch.abs(self.dof_pos - self.q_squat_target.unsqueeze(0)), dim=1)
+        # Two-target pose anchor:
+        #   phase_loaded (squat-down before pushoff) → q_squat_target (deep squat)
+        #   everything else (idle, pushoff, flight, landing, post-landing) → default_dof_pos (standing)
+        # Cleaner than the old q_ground intermediate target that produced ambiguous mid-poses.
+        squat_expand = self.q_squat_target.unsqueeze(0).expand_as(self.dof_pos)
+        standing_expand = self.default_dof_pos.expand_as(self.dof_pos)
+        target = torch.where(
+            self.phase_loaded.unsqueeze(-1),
+            squat_expand,
+            standing_expand,
+        )
+        joint_diff = torch.sum(torch.abs(self.dof_pos - target), dim=1)
         return joint_diff
 
     def _reward_default_hip_pos(self):
@@ -1053,11 +1062,15 @@ class GO2OmniJumpTorque(GO2Torque):
         return active * pose_error
 
     def _reward_landing_stability(self):
-        # Penalty for velocity during the landing observation period
+        # Positive reward for low velocity during the landing observation window.
+        # Sigmas configurable so kernel width matches actual landing velocity magnitude
+        # (default 0.25 was too tight — exp ≈ 0 when robot lands at ~1 m/s, gradient too small).
         active = self.landing.float()
         lin_vel_error = torch.sum(torch.square(self.base_lin_vel), dim=1)
         ang_vel_error = torch.sum(torch.square(self.base_ang_vel[:, :2]), dim=1)
+        lin_sigma = float(getattr(self.cfg.rewards, "landing_stability_lin_vel_sigma", 0.25))
+        ang_sigma = float(getattr(self.cfg.rewards, "landing_stability_ang_vel_sigma", 0.5))
         return active * (
-            torch.exp(-lin_vel_error / 0.25) * torch.exp(-ang_vel_error / 0.5)
+            torch.exp(-lin_vel_error / lin_sigma) * torch.exp(-ang_vel_error / ang_sigma)
         )
 

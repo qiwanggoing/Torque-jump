@@ -12,7 +12,11 @@ from legged_gym.envs.go2.go2_torque.go2_torque_config import GO2TorqueCfgPPO
 class GO2OmniJumpCurriculumTorque(GO2OmniJumpTorque):
     cfg: GO2OmniJumpCurriculumTorqueCfg
 
-    ACTIVE_REWARD_WHITELIST = GO2OmniJumpTorque.ACTIVE_REWARD_WHITELIST | {"aerial_dof_acc"}
+    ACTIVE_REWARD_WHITELIST = GO2OmniJumpTorque.ACTIVE_REWARD_WHITELIST | {
+        "aerial_dof_acc",
+        "task_max_height",      # explicit "reach the commanded peak height" reward
+        "landing_stability",    # exp(-vel²) during landing observation window — kills post-landing slide
+    }
 
     STAGE_NAMES = ("stand", "takeoff", "flight", "landing", "motion")
 
@@ -69,6 +73,8 @@ class GO2OmniJumpCurriculumTorque(GO2OmniJumpTorque):
         "default_pos": 0,
         "default_hip_pos": 0,
         "aerial_dof_acc": 0,
+        "task_max_height": 0,
+        "landing_stability": 0,
 
         # Stage 2 — airborne pose quality (legacy, weight 0)
         "joint_angle_aerial": 2,

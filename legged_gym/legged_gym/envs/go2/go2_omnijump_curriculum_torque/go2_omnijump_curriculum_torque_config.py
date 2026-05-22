@@ -1,3 +1,5 @@
+import torch
+
 from legged_gym.envs.go2.go2_omnijump_torque.go2_omnijump_torque_config import (
     GO2OmniJumpTorqueCfg,
     GO2OmniJumpTorqueCfgPPO,
@@ -8,8 +10,8 @@ class GO2OmniJumpCurriculumTorqueCfg(GO2OmniJumpTorqueCfg):
     class growth(GO2OmniJumpTorqueCfg.growth):
         start_torque_scale = 1.0   # disable cur_scale ramp; RL effective scale ramp reduced from 4× (5.875→23.5) to 2× (11.75→23.5) — matches mygo2jump 2.35× shape and gives RL ~12Nm authority from iter 0
         k = 0.0001                 # unused under linear schedule (kept for compatibility)
-        warmup_steps = 96000       # PD stays at full 0.5 until step_count ≥ 96000 (~iter 1000 at freq=100). Lets RL bootstrap with PD support before fade starts.
-        x0 = 384000                # linear-fade end: general_scale=1, pd_alpha=0 at step_count=384000 (~iter 4000 at ~96 step/iter). 3000-iter slow ramp; ~1.67pp PD drop per 100 iter (was 2.5pp).
+        warmup_steps = 96000       # PD locked at 0.5 until step_count ≥ 96000 (~iter 1000). Re-enable fade for fresh from-scratch train.
+        x0 = 384000                # general_scale linearly 0→1 from iter 1000 to iter 4000 → pure-torque iter 4000+
 
     class curriculum:
         enabled = False
@@ -45,12 +47,11 @@ class GO2OmniJumpCurriculumTorqueCfg(GO2OmniJumpTorqueCfg):
         single_jump_command_prob = 1.0
         class ranges(GO2OmniJumpTorqueCfg.commands.ranges):
             jump_height = [0.40, 0.70]
-            lin_vel_x = [-0.5, 0.5]   # opened up for directional jumps (was [0,0] for pure vertical)
-            lin_vel_y = [-0.3, 0.3]   # opened up for lateral jumps
-            ang_vel_yaw = [0.0, 0.0]  # yaw cmd still off — learn linear directions first
+            lin_vel_x = [0.0, 0.0]
+            lin_vel_y = [0.0, 0.0]
+            ang_vel_yaw = [0.0, 0.0]
 
     class rewards(GO2OmniJumpTorqueCfg.rewards):
-        projected_peak_sigma = 0.05        # widened from 0.025 to give more tolerance during cmd-conditional height learning
         zero_command_velocity_sigma = 0.25
         zero_command_yaw_sigma = 0.25
         zero_command_height_gain = 10.0
@@ -62,6 +63,8 @@ class GO2OmniJumpCurriculumTorqueCfg(GO2OmniJumpTorqueCfg):
         success_use_velocity_score = False
         task_max_height_sigma = 0.05
         height_tracking_sigma = 0.05
+        landing_stability_lin_vel_sigma = 1.0   # default 0.25 too tight (exp≈0 at ~1m/s landing); 1.0 gives meaningful gradient
+        landing_stability_ang_vel_sigma = 1.5   # default 0.5 too tight; 1.5 keeps gradient at moderate ang_vel
         tracking_linear_velocity_all_time = True
         landing_buffer_steps = 25    # was 50; shorter buffer = give policy faster credit for surviving landing
         stand_rearm_steps = 5
@@ -75,27 +78,29 @@ class GO2OmniJumpCurriculumTorqueCfg(GO2OmniJumpTorqueCfg):
 
         class scales(GO2OmniJumpTorqueCfg.rewards.scales):
             maintain_contact = 0.10            # moderate: standing anchor without dominating takeoff signal
-            peak_height_progress = 10.0        # 5.0 → 10.0: stronger cmd-conditional climbing gradient (controlled-jump phase)
-            all_feet_airborne = 2.0            # boosted (was 1.0): bigger airborne reward
-            takeoff_vertical_velocity = 10.0   # boosted (was 4.0): strong stance push signal — primary lever to break "don't jump" mode
-            projected_peak = 15.0              # 7.0 → 15.0: dominant cmd-conditional peak-tracking signal (paired with sigma 0.05 widening)
+            peak_height_progress = 5.0         # boosted (was 3.0): more dense "fly higher" gradient
+            all_feet_airborne = 6.0            # 2 → 6 (3×): dense reward for getting all 4 feet off — direct "you jumped!" signal
+            takeoff_vertical_velocity = 25.0   # 10 → 25 (2.5×): strongest dense gradient for "push up faster"; offsets smoothness penalties that suppress jumping
+            projected_peak = 7.0               # boosted (was 5.0): bigger flight-phase peak-tracking signal
             termination = -10.0                # not in OmniNet, kept for base-contact episodes
             orientation = -1.6                 # boosted (was -0.8): stronger upright pull during all phases
             collision = -3.0                   # boosted (was -1.0): kill leg-leg self-collision in air
             torques = -1e-5                    # OmniNet: -1e-5
-            action_rate = -0.03                # boosted (was -0.025 → -0.08): direct twitching penalty
-            dof_acc = -2.5e-7                  # restored to original: was over-penalizing fast (smooth) motion
-            horizontal_drift = 0.0             # disabled: conflicts with directional jump tracking (lin_vel_x/y cmds want non-zero horizontal velocity)
+            action_rate = -0.08                # 0.03 → 0.08: precise anti-jitter (Δaction² catches high-freq oscillation without suppressing jump push)
+            dof_acc = -1.0e-6                  # 2.5e-7 → 1e-6 (4×): stronger q̈ penalty to damp in-air twitching
+            horizontal_drift = -1.5            # penalize world-frame xy velocity → enforce vertical jumps
             takeoff_direction = 80.0           # boosted (was 30): signal too small to push policy; now dominant-tier weight
-            height_tracking = 5.0              # 1.0 → 5.0: 5× cmd-conditional height tracking (was dominated by non-cmd successful_jump)
+            height_tracking = 1.0              # OmniNet: 1.0
             successful_jump = 300.0            # boosted (was 200): make completion reward dominate to overcome ep-short collapse
-            tracking_linear_velocity = 2.0     # 0 → 2.0: enabled now that cmd ranges expanded to non-zero (lin_vel_x [-0.5,0.5], lin_vel_y [-0.3,0.3])
-            tracking_angular_velocity = 0.0    # still disabled: ang_vel_yaw cmd range still [0,0]
+            tracking_linear_velocity = 0.0     # disabled: vel=0 cmd creates stand-still local optimum
+            tracking_angular_velocity = 0.0    # disabled: same reason
             joint_angle_loaded = 0.0           # disabled: sigma=1.5 bug makes exp ≈ 0 always; re-enable after sigma fix
             joint_angle_extended = 0.0         # disabled: same reason
             default_pos = -0.3                 # mygo2jump weight; now spans ALL 12 joints (fix: was hip-only and 1/3 weight). Strong pose anchor toward default standing pose — critical for surviving PD=0 stand.
             default_hip_pos = 0.3              # mygo2jump-style exp keep hip joints near default (no outward/inward drift)
-            aerial_dof_acc = -1e-6             # airborne-only joint accel penalty (4× global dof_acc); targets in-air twitching/flailing observed after PD fades out
+            aerial_dof_acc = -3e-6             # 1e-6 → 3e-6 (3×): stronger airborne q̈ penalty to suppress in-air leg flailing
+            task_max_height = 12.0             # 5 → 12: prior 5 was too weak (reward 0.16/episode); larger pull to commanded peak height
+            landing_stability = 15.0           # 5 → 15: prior 5 + tight sigma made reward ~0; weight boost + sigma loosened (see config below)
             joint_angle_aerial = 0.0           # superseded by joint_angle_extended
             joint_angle_prelanding = 0.0       # superseded by joint_angle_extended
             joint_angle_landing = 0.0          # superseded by joint_angle_extended
@@ -122,6 +127,8 @@ class GO2OmniJumpCurriculumTorqueCfg(GO2OmniJumpTorqueCfg):
             "rew_takeoff_direction",
             "rew_default_pos",
             "rew_default_hip_pos",
+            "rew_task_max_height",
+            "rew_landing_stability",
             "jump_flight_rate",
             "jump_landing_rate",
             "jump_completed_cycles",
@@ -130,7 +137,9 @@ class GO2OmniJumpCurriculumTorqueCfg(GO2OmniJumpTorqueCfg):
         ]
 
     class test(GO2OmniJumpTorqueCfg.test):
-        vel = GO2OmniJumpTorqueCfg.test.vel.clone()
+        # cmd layout: [v_x, v_y, ω_yaw, jump_height, jump_command]
+        # Training has lin_vel_x=[0,0], so play must also use vx=0 (parent default vx=1.0 is wrong for in-place jump task).
+        vel = torch.tensor([0.0, 0.0, 0.0, 0.7, 1.0], dtype=torch.float32)
         single_jump_play = True    # mirror training: one jump per episode, then stand for post_jump_stand_steps
 
 
@@ -144,8 +153,8 @@ class GO2OmniJumpCurriculumTorqueCfgPPO(GO2OmniJumpTorqueCfgPPO):
     class runner(GO2OmniJumpTorqueCfgPPO.runner):
         experiment_name = "go2_omnijump_curriculum_torque"
         run_name = "auto_curriculum"
-        resume = False                       # from-scratch with positive pose rewards + new smoothness balance
+        resume = False                       # from scratch: two-target pose change (q_squat vs standing) needs full retrain
         load_run = -1
         checkpoint = -1
         resume_path = None
-        max_iterations = 5000                # 4000 PD-fade + 1000 post-fade refinement
+        max_iterations = 5000                # PD fade ends iter 4000, 1000 iter post-fade refinement

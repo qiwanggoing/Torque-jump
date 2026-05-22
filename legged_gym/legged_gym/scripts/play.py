@@ -110,7 +110,7 @@ def play(args):
     # === Play-time command override (edit the number to test different jump heights) ===
     # cmd layout: [lin_vel_x, lin_vel_y, ang_vel_yaw, jump_height, jump_command]
     # jump_height training range: [0.40, 0.70]
-    env_cfg.test.vel[3] = 0.4   # ← change this number to test other heights
+    env_cfg.test.vel[3] = 0.7  # ← change this number to test other heights
     # ============================================================================
 
     if checkpoint_iter is not None:
@@ -185,8 +185,8 @@ def play(args):
     #   post_stand→ cmd[4]=0 for POST_JUMP_STAND_SECONDS (verify landing stability)
     #   then manual reset → back to pre_idle
     PRE_JUMP_IDLE_SECONDS = 2.0
-    POST_JUMP_STAND_SECONDS = 1.0   # post-landing stand duration before triggering next jump
-    CONTINUOUS_JUMP = True           # True = re-arm next jump from current pose (no reset). False = manual reset → init pose each cycle.
+    POST_JUMP_STAND_SECONDS = 6.0   # mirror training's post_jump_stand_steps (300 × dt=0.02 = 6s)
+    CONTINUOUS_JUMP = False         # mirror training: one jump per episode → manual reset → init pose each cycle
     PRE_JUMP_IDLE_STEPS = max(int(round(PRE_JUMP_IDLE_SECONDS / env.dt)), 1)
     POST_JUMP_STAND_STEPS = max(int(round(POST_JUMP_STAND_SECONDS / env.dt)), 1)
 
