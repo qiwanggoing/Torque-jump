@@ -228,7 +228,7 @@ class GO2AtanassovJumpTorqueCfg(GO2OmniJumpTorqueCfg):
             atanassov_base_ang_vel = 0.5           # flight + 0.1·landing
             atanassov_feet_clearance = 1.0         # reduced 2 → 1: pose is secondary
             atanassov_symmetry = 2.0               # 0.2 → 2.0 (10×): force left-right symmetric joint angles to kill tilted-push exploit
-            atanassov_nominal_pose = 8.0           # 5 → 8: stronger default-pose anchor to survive PD fade
+            atanassov_nominal_pose = -1.0          # 8 → -1 (sign flip + magnitude scale): L1 form returns positive distance, NEGATIVE weight makes it penalty. Constant gradient pulls back to default pose, kills the "stay airborne during idle" drift the exp form allowed via gradient saturation.
             atanassov_maintain_contact = 5.0       # 0.5 → 5.0 (10×): strict 4-foot-contact gate; main stance stability incentive
             atanassov_takeoff_vz = 5.0             # 20 → 5: reward is now vz² with threshold 0.8; max per step = 5 × 16 = 80, balanced
 
@@ -304,6 +304,7 @@ class GO2AtanassovJumpTorqueCfg(GO2OmniJumpTorqueCfg):
 
     class test(GO2OmniJumpTorqueCfg.test):
         vel = GO2OmniJumpTorqueCfg.test.vel.clone()
+        vel[0] = 0.0   # atanassov 训练只用 lin_vel_x=[0,0]，父类默认 vx=1 会让 policy 困惑/前飘
         single_jump_play = True
 
 

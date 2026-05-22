@@ -38,6 +38,8 @@ from legged_gym.utils import get_args, export_policy_as_jit, task_registry, Logg
 
 import numpy as np
 import torch
+from isaacgym.torch_utils import get_euler_xyz
+from legged_gym.utils.math import wrap_to_pi
 
 
 def infer_checkpoint_iter(load_path):
@@ -185,14 +187,61 @@ def play(args):
     #   post_stand→ cmd[4]=0 for POST_JUMP_STAND_SECONDS (verify landing stability)
     #   then manual reset → back to pre_idle
     PRE_JUMP_IDLE_SECONDS = 2.0
-    POST_JUMP_STAND_SECONDS = 6.0   # mirror training's post_jump_stand_steps (300 × dt=0.02 = 6s)
+    POST_JUMP_STAND_SECONDS = 2.0   # short stand window; play state machine fires manual reset before atanassov landing instability triggers env collision/roll cutoff
     CONTINUOUS_JUMP = False         # mirror training: one jump per episode → manual reset → init pose each cycle
     PRE_JUMP_IDLE_STEPS = max(int(round(PRE_JUMP_IDLE_SECONDS / env.dt)), 1)
     POST_JUMP_STAND_STEPS = max(int(round(POST_JUMP_STAND_SECONDS / env.dt)), 1)
 
-    # Suppress env's own auto-reset (rewards.post_jump_stand_steps) so play state machine controls cycle timing.
+    # Suppress env's one_jump auto-reset (push env's post_jump_stand_steps beyond play's window)
+    # so the play state machine alone controls cycle timing. Env can still reset on real
+    # termination (collision/roll/time_out) — that path is intentional, indicates actual fall.
     if single_jump_play and hasattr(env.cfg.rewards, "post_jump_stand_steps"):
         env.cfg.rewards.post_jump_stand_steps = max(int(env.cfg.rewards.post_jump_stand_steps), POST_JUMP_STAND_STEPS + 200)
+
+    # Disable Reference State Init (RSI). RSI is a training bootstrap that resets envs mid-air
+    # with upward velocity + jumping_state=True. At play time it causes apparent "stuck" cycles:
+    # env auto-resets via RSI → robot crashes (collision/roll) → reset → RSI → loop. Play should
+    # always start from default standing pose.
+    if hasattr(env.cfg.rewards, "rsi_prob"):
+        env.cfg.rewards.rsi_prob = 0.0
+    if hasattr(env.cfg.rewards, "atanassov_rsi_prob"):
+        env.cfg.rewards.atanassov_rsi_prob = 0.0
+
+    # Disable atanassov's too_low termination (base_z < threshold). At play time the policy
+    # autonomously drifts into a low squat under cmd[4]=0, dropping base below the training
+    # threshold (0.12m) and resetting. Removing the floor lets the cycle continue regardless
+    # of how low the robot crouches.
+    if hasattr(env.cfg.rewards, "atanassov_terminate_base_height"):
+        env.cfg.rewards.atanassov_terminate_base_height = -1.0
+
+    # Diagnostic: wrap check_termination so we know which condition triggered each env auto-reset.
+    _orig_check_termination = env.check_termination
+    def _check_term_with_log(*args, **kwargs):
+        _orig_check_termination(*args, **kwargs)
+        if env.reset_buf[robot_index].item():
+            roll_all, pitch_all, _ = get_euler_xyz(env.base_quat)
+            roll_v = wrap_to_pi(roll_all)[robot_index].item()
+            pitch_v = wrap_to_pi(pitch_all)[robot_index].item()
+            coll_force = torch.sum(
+                torch.norm(env.contact_forces[:, env.termination_contact_indices, :], dim=-1),
+                dim=-1,
+            )[robot_index].item()
+            base_z = env.root_states[robot_index, 2].item()
+            too_low_thresh = float(getattr(env.cfg.rewards, "atanassov_terminate_base_height", 0.0))
+            ep_len = env.episode_length_buf[robot_index].item()
+            max_ep = env.max_episode_length
+            jumping = bool(env.jumping_state[robot_index].item())
+            reasons = []
+            if abs(roll_v) > 2.4: reasons.append(f"roll_cutoff(|{roll_v:.2f}|>2.4)")
+            if coll_force > 0.2: reasons.append(f"collision({coll_force:.2f}N>0.2)")
+            if ep_len > max_ep: reasons.append(f"timeout({ep_len}>{max_ep})")
+            if base_z < too_low_thresh and too_low_thresh > 0: reasons.append(f"too_low({base_z:.3f}<{too_low_thresh:.2f})")
+            print(
+                f"[TermDebug] ep_step={ep_len}: reasons={reasons or 'UNKNOWN'} | "
+                f"base_z={base_z:.3f}, roll={roll_v:.2f}, pitch={pitch_v:.2f}, "
+                f"contact_force={coll_force:.2f}N, jumping_state={jumping}"
+            )
+    env.check_termination = _check_term_with_log
 
     play_phase = "pre_idle"
     play_phase_step = 0
@@ -211,6 +260,19 @@ def play(args):
     for i in range(10 * int(env.max_episode_length)):
         actions = policy(obs.detach())
         obs, _, rews, dones, infos = env.step(actions.detach())
+        # Diagnostic state print every 50 steps + on every play_phase transition (caller prints).
+        if i % 50 == 0:
+            cmd4 = float(env.commands[robot_index, 4])
+            test_vel4 = float(env_cfg.test.vel[4])
+            base_z = float(env.root_states[robot_index, 2])
+            js = bool(env.jumping_state[robot_index].item())
+            hto = bool(env.has_taken_off[robot_index].item())
+            jcc = int(env.jump_step_counter[robot_index].item()) if hasattr(env, "jump_step_counter") else -1
+            print(
+                f"[State] step={i} phase={play_phase}(ps={play_phase_step}): "
+                f"cmd[4]={cmd4:.2f} (test.vel[4]={test_vel4:.2f}), "
+                f"base_z={base_z:.3f}, jumping={js}, taken_off={hto}, jump_step={jcc}"
+            )
         # === Play state machine ===
         if single_jump_play:
             # Auto-reset from env (termination/fall or timeout) → back to pre_idle
@@ -243,6 +305,16 @@ def play(args):
                             env.single_jump_play_done[:] = False  # unlock jump command in env
                         print(f"[Play] Step {i}: pre_idle done → jumping (cmd[4]={target_jump_cmd})")
                 elif play_phase == "jumping":
+                    # Kill cmd[4] as soon as robot is airborne. Otherwise cmd[4]=1 stays active
+                    # throughout the jumping phase, and if env-internal jumping_state ever clears
+                    # before play detects just_landed, `ready_to_jump` re-fires → second jump
+                    # (visually: "continuous jumping").
+                    if hasattr(env, "has_taken_off") and bool(env.has_taken_off[robot_index].item()):
+                        env_cfg.test.vel[4] = 0.0
+                        if env.commands.shape[1] > 4:
+                            env.commands[:, 4] = 0.0
+                        if hasattr(env, "single_jump_play_done"):
+                            env.single_jump_play_done[:] = True
                     # Detect jump cycle completion. Three exit signals:
                     #   1. just_landed: clean landing (success path)
                     #   2. single_jump_command_done: env says jump cycle ended (success OR takeoff_timeout fail)

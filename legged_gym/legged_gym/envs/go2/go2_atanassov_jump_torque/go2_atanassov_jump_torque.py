@@ -322,29 +322,41 @@ class GO2AtanassovJumpTorque(GO2OmniJumpTorque):
 
     # ---- Sparse task rewards (fire once per episode on the just_landed step) ----
     def _reward_atanassov_landing_position(self):
-        active = self.just_landed.float()
+        # Gate by cmd[4]>0.5: RSI episodes with cmd[4]=0 land airborne robots and would
+        # otherwise leak this reward into stand-episode training.
+        jump_commanded = self.commands[:, 4] > float(self.cfg.commands.jump_command_threshold)
+        active = self.just_landed.float() * jump_commanded.float()
         err = torch.sum(torch.square(self.root_states[:, :2] - self.atan_p_des[:, :2]), dim=1)
         sigma = float(self.cfg.rewards.sigma_pos_landing)
         return active * torch.exp(-err / sigma)
 
     def _reward_atanassov_landing_orientation(self):
         # q_des is identity. Use projected_gravity tilt as orientation error.
-        active = self.just_landed.float()
+        # Same cmd[4] gate as landing_position to keep stand episodes clean.
+        jump_commanded = self.commands[:, 4] > float(self.cfg.commands.jump_command_threshold)
+        active = self.just_landed.float() * jump_commanded.float()
         err = torch.sum(torch.square(self.projected_gravity[:, :2]), dim=1)
         sigma = float(self.cfg.rewards.sigma_ori_landing)
         return active * torch.exp(-err / sigma)
 
     def _reward_atanassov_max_height(self):
-        # Paper Stage 1 target: 0.9 m peak height
-        active = self.just_landed.float()
-        target = float(self.cfg.rewards.atanassov_target_peak)
+        # Bell curve around COMMANDED peak height (cmd[3]) — was fixed 0.6m which made
+        # policy learn "jump high always" regardless of cmd[3]. Also gated by cmd[4]>0.5:
+        # RSI bootstraps jumping_state=True even in cmd[4]=0 stand episodes, so without
+        # this gate the reward leaks into stand-episode training and reinforces jumping.
+        jump_commanded = self.commands[:, 4] > float(self.cfg.commands.jump_command_threshold)
+        active = self.just_landed.float() * jump_commanded.float()
+        target = self.commands[:, 3]
         err = torch.square(self.peak_base_height - target)
         sigma = float(self.cfg.rewards.sigma_pos_max)
         return active * torch.exp(-err / sigma)
 
     def _reward_atanassov_jumping_sparse(self):
-        # Paper "Jumping" sparse: 1 if the agent jumped at all this episode
-        active = self.just_landed.float()
+        # Paper "Jumping" sparse: 1 if the agent jumped at all this episode.
+        # Gated by cmd[4]>0.5: RSI bootstraps jumping_state=True with has_taken_off in cmd[4]=0
+        # episodes; without this gate the policy gets paid for "jumping" in stand episodes.
+        jump_commanded = self.commands[:, 4] > float(self.cfg.commands.jump_command_threshold)
+        active = self.just_landed.float() * jump_commanded.float()
         return active * self.has_taken_off.float()
 
     # ---- Dense phase-aware task rewards ----
@@ -441,15 +453,11 @@ class GO2AtanassovJumpTorque(GO2OmniJumpTorque):
         return torch.exp(-err / 0.5)
 
     def _reward_atanassov_nominal_pose(self):
-        # Phase-weighted pose anchor + idle (between/before/without jumps).
-        # Without the idle term, pure-stand episodes (cmd[4]=0 throughout)
-        # have all three jump phases inactive → nominal_pose contributes
-        # nothing during the 30% of episodes meant to teach standing.
-        # idle = no jump command active AND hasn't landed (covers pre-takeoff
-        # idle and the unstarted-jump portion of pure-stand episodes).
-        err = torch.sum(torch.square(self.dof_pos - self.default_dof_pos), dim=1)
-        sigma = float(self.cfg.rewards.sigma_q_nominal)
-        rew = torch.exp(-err / sigma)
+        # L1 form: constant gradient pulls policy back toward default pose no matter how
+        # far it drifts. Previous exp form saturated at large deviations (rew ≈ 0, grad ≈ 0),
+        # so policy could escape to e.g. base_z=0.7 during idle without restoring force.
+        # Returns positive joint-space distance — pair with NEGATIVE config weight for penalty.
+        err = torch.sum(torch.abs(self.dof_pos - self.default_dof_pos), dim=1)
         idle = (~self.jumping_state) & (~self.has_landed)
         weight = (
             1.0 * idle.float()
@@ -457,7 +465,7 @@ class GO2AtanassovJumpTorque(GO2OmniJumpTorque):
             + 1.0 * self._flight_mask().float()
             + 1.0 * self._landing_mask().float()
         )
-        return weight * rew
+        return weight * err
 
     def _reward_atanassov_maintain_contact(self):
         # Stance only — reward keeping ALL 4 feet in contact during pre-jump.
@@ -470,16 +478,20 @@ class GO2AtanassovJumpTorque(GO2OmniJumpTorque):
         return active * all_four
 
     def _reward_atanassov_takeoff_vz(self):
-        # Quadratic upward-velocity reward, gated on two conditions:
+        # Quadratic upward-velocity reward, gated on three conditions:
         #   1. Pre-takeoff (~has_taken_off) so it stops once airborne
         #   2. Significant vz (>0.8 m/s) — kills micro-jitter exploit
+        #   3. cmd[4]>0.5 — RSI bootstrap gives vz up to 3 m/s for free in stand
+        #      episodes (cmd[4]=0); without this gate the policy gets paid for
+        #      that bootstrap velocity it didn't earn.
         # IMPORTANT: use root_states[:, 9] (world-frame z velocity), NOT
         # base_lin_vel[:, 2] (body-frame z). With a tilted body, body-z is
         # not aligned with world-up, so pushing along body-z gives high
         # body-z velocity but only a fraction of that as world-z — this is
         # what caused the previous "tilt to side and push" exploit.
         vz_world = self.root_states[:, 9]
-        active = (~self.has_taken_off) & (vz_world > 0.8)
+        jump_commanded = self.commands[:, 4] > float(self.cfg.commands.jump_command_threshold)
+        active = (~self.has_taken_off) & (vz_world > 0.8) & jump_commanded
         clipped_vz = torch.clamp(vz_world, min=0.0, max=4.0)
         return active.float() * torch.square(clipped_vz)
 
