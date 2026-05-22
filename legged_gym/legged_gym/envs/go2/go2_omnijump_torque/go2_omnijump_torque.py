@@ -764,15 +764,25 @@ class GO2OmniJumpTorque(GO2Torque):
         return active * air_ratio * self._get_height_progress(self.peak_base_height)
 
     def _reward_task_max_height(self):
+        # Olsen 2025 jump-height reward shape: φ_σg(err) + 3·ψ_σl(err)
+        #   φ_σg = exp(-err²/σg²)  Gaussian, sharp peak at err=0
+        #   ψ_σl = exp(-|err|/σl)  Laplacian, exp-decay (gradient survives at large |err|)
+        # Pure Gaussian saturates at |err| > 2σ → policy peaks at 0.35 vs cmd 0.7 had reward ≈ 0,
+        # no gradient toward higher jumps. Laplacian adds constant-rate signal that keeps pulling
+        # policy upward even when far below target.
         target_height = self.commands[:, 3]
         height_error = self.peak_base_height - target_height
-        sigma = max(float(getattr(self.cfg.rewards, "task_max_height_sigma", 0.05)), 1e-3)
+        sigma_gauss = max(float(getattr(self.cfg.rewards, "task_max_height_sigma", 0.05)), 1e-3)
+        sigma_lap = max(float(getattr(self.cfg.rewards, "task_max_height_sigma_lap", 0.10)), 1e-3)
+        lap_weight = float(getattr(self.cfg.rewards, "task_max_height_lap_weight", 3.0))
         jump_height_commanded = target_height >= 0.38
         if self.cfg.commands.num_commands > 4:
             jump_command_active = self.commands[:, 4] > float(self.cfg.commands.jump_command_threshold)
         else:
             jump_command_active = torch.ones(self.num_envs, dtype=torch.bool, device=self.device)
-        reward = torch.exp(-torch.square(height_error) / sigma)
+        gauss = torch.exp(-torch.square(height_error) / sigma_gauss)
+        laplacian = torch.exp(-torch.abs(height_error) / sigma_lap)
+        reward = gauss + lap_weight * laplacian
         active_jump = self.jumping_state & self.has_taken_off
         return active_jump.float() * jump_command_active.float() * jump_height_commanded.float() * reward
 
@@ -802,9 +812,12 @@ class GO2OmniJumpTorque(GO2Torque):
         return ascending.float() * upward_velocity
 
     def _reward_projected_peak(self):
-        # Olsen 2025: project peak height from current state (h + vz^2/2g) and reward closeness to target.
-        # Gated on has_taken_off: ballistic formula h+vz²/2g only holds in free flight; allowing it in
+        # Olsen 2025 "Est jump height" reward — projects expected peak via h + vz²/(2g) and
+        # rewards closeness to target at every ascent step (densifies the sparse landing reward).
+        # Gated on has_taken_off: ballistic formula only holds in free flight; allowing it in
         # stance lets policy game by spiking vz while feet still push the ground (no real liftoff).
+        # Reward shape: φ_σg + 3·ψ_σl (Gaussian + Laplacian mix) — Laplacian keeps gradient alive
+        # when projected peak is far below target; pure Gaussian saturates and policy stagnates.
         base_height = self.root_states[:, 2]
         min_height = float(getattr(self.cfg.rewards, "ascending_min_base_height", 0.18))
         vz = self.root_states[:, 9]
@@ -817,8 +830,13 @@ class GO2OmniJumpTorque(GO2Torque):
         )
         projected = base_height + torch.clamp(vz, min=0.0) ** 2 / (2.0 * 9.81)
         target = self.commands[:, 3]
-        sigma = max(float(getattr(self.cfg.rewards, "projected_peak_sigma", 0.05)), 1e-4)
-        reward = torch.exp(-torch.square(projected - target) / sigma)
+        err = projected - target
+        sigma_gauss = max(float(getattr(self.cfg.rewards, "projected_peak_sigma", 0.05)), 1e-4)
+        sigma_lap = max(float(getattr(self.cfg.rewards, "projected_peak_sigma_lap", 0.10)), 1e-4)
+        lap_weight = float(getattr(self.cfg.rewards, "projected_peak_lap_weight", 3.0))
+        gauss = torch.exp(-torch.square(err) / sigma_gauss)
+        laplacian = torch.exp(-torch.abs(err) / sigma_lap)
+        reward = gauss + lap_weight * laplacian
         return ascending.float() * reward
 
     def _reward_takeoff_impulse(self):
