@@ -121,7 +121,7 @@ class GO2AtanassovJumpTorqueCfg(GO2OmniJumpTorqueCfg):
         atanassov_terminate_landing_error = 0.15 # m (landing position)
 
         # ---------- Reward kernel sigmas (Table 1 σ_X) ----------
-        sigma_pz_stance = 0.05     # widened from 0.01 — give continuous gradient toward squat (was step-function tight)
+        sigma_pz_stance = 0.01     # 0.05 → 0.01 (5× sharper): wide bell at 0.05 made any base_z ∈ [0.10, 0.30] nearly max-reward, letting policy "crouch and stay" without pushing back up. Tight bell makes only exact 0.20m squat highly rewarded — base=0.13m drops from 0.91 → 0.61 reward.
         sigma_pz_flight = 0.05     # broader for peak target
         sigma_pos_landing = 0.05   # landing xy position
         sigma_pos_max = 0.05       # max height
@@ -228,9 +228,9 @@ class GO2AtanassovJumpTorqueCfg(GO2OmniJumpTorqueCfg):
             atanassov_base_ang_vel = 0.5           # flight + 0.1·landing
             atanassov_feet_clearance = 1.0         # reduced 2 → 1: pose is secondary
             atanassov_symmetry = 2.0               # 0.2 → 2.0 (10×): force left-right symmetric joint angles to kill tilted-push exploit
-            atanassov_nominal_pose = -1.0          # 8 → -1 (sign flip + magnitude scale): L1 form returns positive distance, NEGATIVE weight makes it penalty. Constant gradient pulls back to default pose, kills the "stay airborne during idle" drift the exp form allowed via gradient saturation.
+            atanassov_nominal_pose = -3.0          # -1 → -3 (3×): previous magnitude not enough to hold default pose at play time when PD prior is fully faded — policy was drifting into deep squat under cmd[4]=0. Stronger constant L1 gradient makes default standing pose the local optimum even without PD support.
             atanassov_maintain_contact = 5.0       # 0.5 → 5.0 (10×): strict 4-foot-contact gate; main stance stability incentive
-            atanassov_takeoff_vz = 5.0             # 20 → 5: reward is now vz² with threshold 0.8; max per step = 5 × 16 = 80, balanced
+            atanassov_takeoff_vz = 15.0             # 20 → 15: paired with new linear-normalized impl (vz/2.5, clamp [0,1]). Max per step = 15 (was 320 with vz² × weight 20). Smooth gradient from vz=0 — no 0.8 cliff that made weight 5 give 0 reward.
 
             # =====================================================================
             # Regularization rewards (negative weights → multiplicative penalty)
@@ -239,21 +239,21 @@ class GO2AtanassovJumpTorqueCfg(GO2OmniJumpTorqueCfg):
             atanassov_base_acceleration = -1e-3
             atanassov_contact_change = -0.1
             atanassov_contact_forces = -1e-3       # flight only
-            action_rate = -0.01
-            dof_acc = -2.5e-7
+            action_rate = -0.08            # -0.01 → -0.08 (8×, match curriculum): kill the high-freq leg-shake exploit policy used to fire takeoff_vz without real liftoff
+            dof_acc = -1e-6                # -2.5e-7 → -1e-6 (4×, match curriculum): suppress joint-acc jitter that enables the same exploit
             atanassov_joint_limits = -1.0
 
             # =====================================================================
             # Disable everything else from the SATA / OmniJump infrastructure
             # =====================================================================
-            termination = 0.0
+            termination = -20.0           # 0 → -20: penalty for non-timeout episode termination (collision/roll/too_low). Stops the "crash for reward" trade-off where policy was profitably maximizing takeoff_vz even if episodes ended in 1 step.
             maintain_contact = 0.0
             peak_height_progress = 0.0
             all_feet_airborne = 0.0
             takeoff_vertical_velocity = 0.0
             projected_peak = 0.0
             orientation = -1.6            # curriculum-style raw form (sum(square(projected_gravity_xy))); no exp saturation — pitch/roll penalty grows continuously with tilt
-            collision = -1.0              # paper Table 1 "Collisions": penalty for non-foot body contact (hip/thigh/calf via penalize_contacts_on)
+            collision = -3.0              # -1 → -3: stronger penalty per body-part contact-step; pairs with new termination=-20 to make crash-for-reward trade-off unprofitable
             torques = 0.0
             horizontal_drift = 0.0
             takeoff_direction = 0.0

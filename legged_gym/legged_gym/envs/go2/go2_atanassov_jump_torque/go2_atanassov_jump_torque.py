@@ -478,22 +478,31 @@ class GO2AtanassovJumpTorque(GO2OmniJumpTorque):
         return active * all_four
 
     def _reward_atanassov_takeoff_vz(self):
-        # Quadratic upward-velocity reward, gated on three conditions:
-        #   1. Pre-takeoff (~has_taken_off) so it stops once airborne
-        #   2. Significant vz (>0.8 m/s) — kills micro-jitter exploit
-        #   3. cmd[4]>0.5 — RSI bootstrap gives vz up to 3 m/s for free in stand
-        #      episodes (cmd[4]=0); without this gate the policy gets paid for
-        #      that bootstrap velocity it didn't earn.
-        # IMPORTANT: use root_states[:, 9] (world-frame z velocity), NOT
-        # base_lin_vel[:, 2] (body-frame z). With a tilted body, body-z is
-        # not aligned with world-up, so pushing along body-z gives high
-        # body-z velocity but only a fraction of that as world-z — this is
-        # what caused the previous "tilt to side and push" exploit.
-        vz_world = self.root_states[:, 9]
+        # Linear normalized — mirrors curriculum's `_reward_takeoff_vertical_velocity`.
+        # Replaces the old quadratic-with-cliff form that caused two failure modes:
+        #   - weight 5 + vz²-clamped + threshold 0.8: cliff at 0.8 m/s, vz=0.77 got nothing,
+        #     policy got no smooth gradient to push past 0.8 → reward stuck at 0.
+        #   - weight 20 + vz²: max per step jumped to 320 (16 squared × 20). Policy went
+        #     all-in on max vz, ignoring landing → noise blowup, ep collapse.
+        # This form: vz from 0+ gives reward (no cliff), capped at target_vel (no exploit),
+        # base_height > 0.18 floor blocks "flop and twitch" exploit.
+        # cmd[4]>0.5 gate stops RSI episodes (cmd[4]=0, bootstrap with vz up to 3 m/s)
+        # from paying the policy for unearned bootstrap velocity.
+        # World-frame vz (root_states[:, 9]) — body-frame would let tilted-push exploit grow.
         jump_commanded = self.commands[:, 4] > float(self.cfg.commands.jump_command_threshold)
-        active = (~self.has_taken_off) & (vz_world > 0.8) & jump_commanded
-        clipped_vz = torch.clamp(vz_world, min=0.0, max=4.0)
-        return active.float() * torch.square(clipped_vz)
+        base_height = self.root_states[:, 2]
+        min_height = float(getattr(self.cfg.rewards, "ascending_min_base_height", 0.18))
+        vz_world = self.root_states[:, 9]
+        ascending = (
+            self.jumping_state
+            & (~self.has_taken_off)
+            & (vz_world > 0.0)
+            & (base_height > min_height)
+            & jump_commanded
+        )
+        target_vel = max(float(getattr(self.cfg.rewards, "takeoff_velocity_target", 2.5)), 1e-3)
+        upward_velocity = torch.clamp(vz_world / target_vel, min=0.0, max=1.0)
+        return ascending.float() * upward_velocity
 
     # ---- Regularization rewards (negative scale; squared into r^-) ----
     def _reward_atanassov_energy(self):
