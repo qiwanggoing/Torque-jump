@@ -136,7 +136,7 @@ class GO2AtanassovJumpTorqueCfg(GO2OmniJumpTorqueCfg):
         sigma_reg = 5.0
 
         # ---------- Modified RSI (Atanassov §STAGE 1) ----------
-        atanassov_rsi_prob = 0.5                 # 50% episodes use RSI
+        atanassov_rsi_prob = 0.0                 # 0.5 → 0.0: RSI bootstrapped robot mid-air in 50% of episodes → most of those crashed → bombardment of termination penalties early → policy collapsed. All episodes now start from default standing — slower jump bootstrap but stable training.
         atanassov_rsi_height_min = 0.30          # m above ground
         atanassov_rsi_height_max = 0.90          # m above ground
         atanassov_rsi_vel_z_min = 0.0            # m/s
@@ -246,7 +246,7 @@ class GO2AtanassovJumpTorqueCfg(GO2OmniJumpTorqueCfg):
             # =====================================================================
             # Disable everything else from the SATA / OmniJump infrastructure
             # =====================================================================
-            termination = -20.0           # 0 → -20: penalty for non-timeout episode termination (collision/roll/too_low). Stops the "crash for reward" trade-off where policy was profitably maximizing takeoff_vz even if episodes ended in 1 step.
+            termination = -5.0            # -20 → -5: previous -20 was too harsh in early training — RSI episodes + random init policy → frequent terminations → policy saw huge negative advantage → noise collapsed to 0.15 and ep_len stuck at 59 by iter 431. -5 keeps the directional signal (terminating is bad) without crushing exploration.
             maintain_contact = 0.0
             peak_height_progress = 0.0
             all_feet_airborne = 0.0
