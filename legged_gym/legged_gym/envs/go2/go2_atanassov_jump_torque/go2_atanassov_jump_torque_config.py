@@ -121,7 +121,7 @@ class GO2AtanassovJumpTorqueCfg(GO2OmniJumpTorqueCfg):
         atanassov_terminate_landing_error = 0.15 # m (landing position)
 
         # ---------- Reward kernel sigmas (Table 1 σ_X) ----------
-        sigma_pz_stance = 0.01     # 0.05 → 0.01 (5× sharper): wide bell at 0.05 made any base_z ∈ [0.10, 0.30] nearly max-reward, letting policy "crouch and stay" without pushing back up. Tight bell makes only exact 0.20m squat highly rewarded — base=0.13m drops from 0.91 → 0.61 reward.
+        sigma_pz_stance = 0.05     # restored original wide bell
         sigma_pz_flight = 0.05     # broader for peak target
         sigma_pos_landing = 0.05   # landing xy position
         sigma_pos_max = 0.05       # max height
@@ -136,7 +136,7 @@ class GO2AtanassovJumpTorqueCfg(GO2OmniJumpTorqueCfg):
         sigma_reg = 5.0
 
         # ---------- Modified RSI (Atanassov §STAGE 1) ----------
-        atanassov_rsi_prob = 0.0                 # 0.5 → 0.0: RSI bootstrapped robot mid-air in 50% of episodes → most of those crashed → bombardment of termination penalties early → policy collapsed. All episodes now start from default standing — slower jump bootstrap but stable training.
+        atanassov_rsi_prob = 0.5                 # restored original: 50% episodes use Reference State Init (mid-air bootstrap) per paper Stage 1
         atanassov_rsi_height_min = 0.30          # m above ground
         atanassov_rsi_height_max = 0.90          # m above ground
         atanassov_rsi_vel_z_min = 0.0            # m/s
@@ -228,9 +228,9 @@ class GO2AtanassovJumpTorqueCfg(GO2OmniJumpTorqueCfg):
             atanassov_base_ang_vel = 0.5           # flight + 0.1·landing
             atanassov_feet_clearance = 1.0         # reduced 2 → 1: pose is secondary
             atanassov_symmetry = 2.0               # 0.2 → 2.0 (10×): force left-right symmetric joint angles to kill tilted-push exploit
-            atanassov_nominal_pose = -3.0          # -1 → -3 (3×): previous magnitude not enough to hold default pose at play time when PD prior is fully faded — policy was drifting into deep squat under cmd[4]=0. Stronger constant L1 gradient makes default standing pose the local optimum even without PD support.
+            atanassov_nominal_pose = 8.0           # restored original: positive bell-curve exp(-||q-q_default||²/σ) bonus, phase-weighted (1.0×idle + 0.5×stance + 1.0×flight + 1.0×landing). Reverted from L1 penalty form which broke jumping in combination with other strict penalties.
             atanassov_maintain_contact = 5.0       # 0.5 → 5.0 (10×): strict 4-foot-contact gate; main stance stability incentive
-            atanassov_takeoff_vz = 15.0             # 20 → 15: paired with new linear-normalized impl (vz/2.5, clamp [0,1]). Max per step = 15 (was 320 with vz² × weight 20). Smooth gradient from vz=0 — no 0.8 cliff that made weight 5 give 0 reward.
+            atanassov_takeoff_vz = 5.0              # restored original: vz² clamp [0,4] with 0.8 m/s threshold gate. Reward fires only after policy pushes hard enough to overcome the cliff — works in original setup where other rewards (max_height, base_position flight) drive the jump.
 
             # =====================================================================
             # Regularization rewards (negative weights → multiplicative penalty)
@@ -239,21 +239,21 @@ class GO2AtanassovJumpTorqueCfg(GO2OmniJumpTorqueCfg):
             atanassov_base_acceleration = -1e-3
             atanassov_contact_change = -0.1
             atanassov_contact_forces = -1e-3       # flight only
-            action_rate = -0.08            # -0.01 → -0.08 (8×, match curriculum): kill the high-freq leg-shake exploit policy used to fire takeoff_vz without real liftoff
-            dof_acc = -1e-6                # -2.5e-7 → -1e-6 (4×, match curriculum): suppress joint-acc jitter that enables the same exploit
+            action_rate = -0.01            # restored original
+            dof_acc = -2.5e-7              # restored original
             atanassov_joint_limits = -1.0
 
             # =====================================================================
             # Disable everything else from the SATA / OmniJump infrastructure
             # =====================================================================
-            termination = -5.0            # -20 → -5: previous -20 was too harsh in early training — RSI episodes + random init policy → frequent terminations → policy saw huge negative advantage → noise collapsed to 0.15 and ep_len stuck at 59 by iter 431. -5 keeps the directional signal (terminating is bad) without crushing exploration.
+            termination = 0.0             # restored original: no explicit termination penalty (relies on lost reward from short episodes as implicit penalty)
             maintain_contact = 0.0
             peak_height_progress = 0.0
             all_feet_airborne = 0.0
             takeoff_vertical_velocity = 0.0
             projected_peak = 0.0
             orientation = -1.6            # curriculum-style raw form (sum(square(projected_gravity_xy))); no exp saturation — pitch/roll penalty grows continuously with tilt
-            collision = -3.0              # -1 → -3: stronger penalty per body-part contact-step; pairs with new termination=-20 to make crash-for-reward trade-off unprofitable
+            collision = -1.0              # restored original: paper Table 1 "Collisions" weight
             torques = 0.0
             horizontal_drift = 0.0
             takeoff_direction = 0.0

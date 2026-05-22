@@ -340,13 +340,12 @@ class GO2AtanassovJumpTorque(GO2OmniJumpTorque):
         return active * torch.exp(-err / sigma)
 
     def _reward_atanassov_max_height(self):
-        # Bell curve around COMMANDED peak height (cmd[3]) — was fixed 0.6m which made
-        # policy learn "jump high always" regardless of cmd[3]. Also gated by cmd[4]>0.5:
-        # RSI bootstraps jumping_state=True even in cmd[4]=0 stand episodes, so without
-        # this gate the reward leaks into stand-episode training and reinforces jumping.
+        # Paper Stage 1 target: fixed peak height (atanassov_target_peak, currently 0.6m).
+        # cmd[4]>0.5 gate stops RSI episodes (cmd[4]=0, jumping_state bootstrapped airborne)
+        # from leaking jump reward into stand-episode training.
         jump_commanded = self.commands[:, 4] > float(self.cfg.commands.jump_command_threshold)
         active = self.just_landed.float() * jump_commanded.float()
-        target = self.commands[:, 3]
+        target = float(self.cfg.rewards.atanassov_target_peak)
         err = torch.square(self.peak_base_height - target)
         sigma = float(self.cfg.rewards.sigma_pos_max)
         return active * torch.exp(-err / sigma)
@@ -453,11 +452,11 @@ class GO2AtanassovJumpTorque(GO2OmniJumpTorque):
         return torch.exp(-err / 0.5)
 
     def _reward_atanassov_nominal_pose(self):
-        # L1 form: constant gradient pulls policy back toward default pose no matter how
-        # far it drifts. Previous exp form saturated at large deviations (rew ≈ 0, grad ≈ 0),
-        # so policy could escape to e.g. base_z=0.7 during idle without restoring force.
-        # Returns positive joint-space distance — pair with NEGATIVE config weight for penalty.
-        err = torch.sum(torch.abs(self.dof_pos - self.default_dof_pos), dim=1)
+        # Phase-weighted pose anchor + idle term (covers pure-stand episodes where
+        # all jump phase masks are False). exp(-||q - q_default||²/sigma) form.
+        err = torch.sum(torch.square(self.dof_pos - self.default_dof_pos), dim=1)
+        sigma = float(self.cfg.rewards.sigma_q_nominal)
+        rew = torch.exp(-err / sigma)
         idle = (~self.jumping_state) & (~self.has_landed)
         weight = (
             1.0 * idle.float()
@@ -465,7 +464,7 @@ class GO2AtanassovJumpTorque(GO2OmniJumpTorque):
             + 1.0 * self._flight_mask().float()
             + 1.0 * self._landing_mask().float()
         )
-        return weight * err
+        return weight * rew
 
     def _reward_atanassov_maintain_contact(self):
         # Stance only — reward keeping ALL 4 feet in contact during pre-jump.
@@ -478,31 +477,18 @@ class GO2AtanassovJumpTorque(GO2OmniJumpTorque):
         return active * all_four
 
     def _reward_atanassov_takeoff_vz(self):
-        # Linear normalized — mirrors curriculum's `_reward_takeoff_vertical_velocity`.
-        # Replaces the old quadratic-with-cliff form that caused two failure modes:
-        #   - weight 5 + vz²-clamped + threshold 0.8: cliff at 0.8 m/s, vz=0.77 got nothing,
-        #     policy got no smooth gradient to push past 0.8 → reward stuck at 0.
-        #   - weight 20 + vz²: max per step jumped to 320 (16 squared × 20). Policy went
-        #     all-in on max vz, ignoring landing → noise blowup, ep collapse.
-        # This form: vz from 0+ gives reward (no cliff), capped at target_vel (no exploit),
-        # base_height > 0.18 floor blocks "flop and twitch" exploit.
-        # cmd[4]>0.5 gate stops RSI episodes (cmd[4]=0, bootstrap with vz up to 3 m/s)
-        # from paying the policy for unearned bootstrap velocity.
+        # Quadratic upward-velocity reward, gated on three conditions:
+        #   1. Pre-takeoff (~has_taken_off) so it stops once airborne
+        #   2. Significant vz (>0.8 m/s) — kills micro-jitter exploit
+        #   3. cmd[4]>0.5 — RSI bootstrap gives vz up to 3 m/s for free in stand
+        #      episodes (cmd[4]=0); without this gate the policy gets paid for
+        #      that bootstrap velocity it didn't earn.
         # World-frame vz (root_states[:, 9]) — body-frame would let tilted-push exploit grow.
-        jump_commanded = self.commands[:, 4] > float(self.cfg.commands.jump_command_threshold)
-        base_height = self.root_states[:, 2]
-        min_height = float(getattr(self.cfg.rewards, "ascending_min_base_height", 0.18))
         vz_world = self.root_states[:, 9]
-        ascending = (
-            self.jumping_state
-            & (~self.has_taken_off)
-            & (vz_world > 0.0)
-            & (base_height > min_height)
-            & jump_commanded
-        )
-        target_vel = max(float(getattr(self.cfg.rewards, "takeoff_velocity_target", 2.5)), 1e-3)
-        upward_velocity = torch.clamp(vz_world / target_vel, min=0.0, max=1.0)
-        return ascending.float() * upward_velocity
+        jump_commanded = self.commands[:, 4] > float(self.cfg.commands.jump_command_threshold)
+        active = (~self.has_taken_off) & (vz_world > 0.8) & jump_commanded
+        clipped_vz = torch.clamp(vz_world, min=0.0, max=4.0)
+        return active.float() * torch.square(clipped_vz)
 
     # ---- Regularization rewards (negative scale; squared into r^-) ----
     def _reward_atanassov_energy(self):
