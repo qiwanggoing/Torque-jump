@@ -61,7 +61,7 @@ class GO2OmniJumpCurriculumTorqueCfg(GO2OmniJumpTorqueCfg):
         success_use_velocity_score = False
         task_max_height_sigma = 0.05
         height_tracking_sigma = 0.05
-        tracking_linear_velocity_all_time = True
+        tracking_linear_velocity_all_time = False    # gated 模式：只在 takeoff + airborne 时 active，避免 standing 时的 stand-still optimum
         landing_buffer_steps = 25    # was 50; shorter buffer = give policy faster credit for surviving landing
         stand_rearm_steps = 5
         one_jump_reward_per_episode = True
@@ -88,8 +88,8 @@ class GO2OmniJumpCurriculumTorqueCfg(GO2OmniJumpTorqueCfg):
             takeoff_direction = 80.0           # boosted (was 30): signal too small to push policy; now dominant-tier weight
             height_tracking = 1.0              # OmniNet: 1.0
             successful_jump = 300.0            # boosted (was 200): make completion reward dominate to overcome ep-short collapse
-            tracking_linear_velocity = 0.0     # disabled: vel=0 cmd creates stand-still local optimum
-            tracking_angular_velocity = 0.0    # disabled: same reason
+            tracking_linear_velocity = 0.5     # 0 → 0.5: cmd-aware xy 速度跟踪（gated 模式，只飞行时 active）。cmd[0:2]=0 时罚漂移确保原地跳。weight 0.5 远小于 successful_jump 300，每 cycle 贡献 ~0.07 reward，~5% of successful_jump magnitude，绝对不会盖过 jump 核心信号。
+            tracking_angular_velocity = 0.0    # 保持 0：cmd[2]=0 yaw 命令，先不动
             joint_angle_loaded = 0.0           # disabled: sigma=1.5 bug makes exp ≈ 0 always; re-enable after sigma fix
             joint_angle_extended = 0.0         # disabled: same reason
             default_pos = -0.3                 # mygo2jump weight; now spans ALL 12 joints (fix: was hip-only and 1/3 weight). Strong pose anchor toward default standing pose — critical for surviving PD=0 stand.
@@ -147,4 +147,4 @@ class GO2OmniJumpCurriculumTorqueCfgPPO(GO2OmniJumpTorqueCfgPPO):
         load_run = -1
         checkpoint = -1
         resume_path = None
-        max_iterations = 5000                # 4000 PD-fade + 1000 post-fade refinement
+        max_iterations = 6000                # iter 5500 ≈ PD fully faded (per measured schedule); +500 post-fade refinement for pure-torque adaptation
