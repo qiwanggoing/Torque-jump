@@ -88,19 +88,19 @@ class GO2OmniJumpCurriculumTorqueCfg(GO2OmniJumpTorqueCfg):
             torques = -1e-5                    # OmniNet: -1e-5
             action_rate = -0.08                # 0.03 → 0.08: precise anti-jitter (Δaction² catches high-freq oscillation without suppressing jump push)
             dof_acc = -1.0e-6                  # 2.5e-7 → 1e-6 (4×): stronger q̈ penalty to damp in-air twitching
-            horizontal_drift = -1.5            # penalize world-frame xy velocity → enforce vertical jumps
-            takeoff_direction = 80.0           # boosted (was 30): signal too small to push policy; now dominant-tier weight
+            horizontal_drift = 0.0             # -1.5 → 0: replaced by cmd-aware tracking_linear_velocity below. horizontal_drift only penalized absolute xy velocity (no cmd awareness), so future directional jumps would be impossible without rewrite.
+            takeoff_direction = 120.0          # 80 → 120: stronger pull toward pure-vertical takeoff to fix the play-time "jumps backward" issue. vz/||v|| reward at just_took_off — small per-episode magnitude but very directional.
             height_tracking = 1.0              # OmniNet: 1.0
             successful_jump = 300.0            # boosted (was 200): make completion reward dominate to overcome ep-short collapse
-            tracking_linear_velocity = 0.0     # disabled: vel=0 cmd creates stand-still local optimum
-            tracking_angular_velocity = 0.0    # disabled: same reason
+            tracking_linear_velocity = 1.5     # 0 → 1.5 (OmniNet weight): cmd-aware xy velocity tracking. exp(-||v_xy - cmd_xy||²/σ). With cmd=[0,0] this rewards staying still in xy — kills the "jumps backward" play behavior. Future-proof for directional jumps (just change cmd).
+            tracking_angular_velocity = 0.6    # 0 → 0.6 (OmniNet weight): same idea for yaw rate. Gates on cmd[2] > min_command so when not commanded, doesn't penalize.
             joint_angle_loaded = 0.0           # disabled: sigma=1.5 bug makes exp ≈ 0 always; re-enable after sigma fix
             joint_angle_extended = 0.0         # disabled: same reason
             default_pos = -3.0                 # -0.3 → -3.0 (10×): policy started lying belly-flat (base 0.087m) to exploit Laplacian task_max_height; 10× stronger pose anchor makes lying flat too expensive vs jumping cleanly from default standing.
             default_hip_pos = 0.3              # mygo2jump-style exp keep hip joints near default (no outward/inward drift)
-            aerial_dof_acc = -3e-6             # 1e-6 → 3e-6 (3×): stronger airborne q̈ penalty to suppress in-air leg flailing
+            aerial_dof_acc = -1e-5             # -3e-6 → -1e-5 (3×): play showed visible in-air leg sway. Stronger q̈ penalty during airborne phase to suppress leg flailing during ascent/flight/landing approach.
             task_max_height = 20.0             # 12 → 20: with new Olsen φ+3ψ shape, boost to dominate. Policy needs strong signal to push peak past 0.20m plateau.
-            landing_stability = 15.0           # 5 → 15: prior 5 + tight sigma made reward ~0; weight boost + sigma loosened (see config below)
+            landing_stability = 30.0           # 15 → 30 (2×): play showed unstable landing. Stronger reward for low base velocity during landing observation window (exp(-vel²)).
             joint_angle_aerial = 0.0           # superseded by joint_angle_extended
             joint_angle_prelanding = 0.0       # superseded by joint_angle_extended
             joint_angle_landing = 0.0          # superseded by joint_angle_extended
@@ -129,6 +129,7 @@ class GO2OmniJumpCurriculumTorqueCfg(GO2OmniJumpTorqueCfg):
             "rew_default_hip_pos",
             "rew_task_max_height",
             "rew_landing_stability",
+            "rew_tracking_linear_velocity",
             "jump_flight_rate",
             "jump_landing_rate",
             "jump_completed_cycles",
