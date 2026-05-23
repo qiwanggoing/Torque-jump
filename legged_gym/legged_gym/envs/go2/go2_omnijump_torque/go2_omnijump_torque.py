@@ -433,15 +433,10 @@ class GO2OmniJumpTorque(GO2Torque):
         start_ids = ready_to_jump.nonzero(as_tuple=False).flatten()
         self._start_jump(start_ids)
 
-        # Real-takeoff gate: require upward velocity > 0.3 m/s.
-        # Contact filter alone fires falsely during squat-down (feet briefly lift while base
-        # is descending), making takeoff_direction reward measure vz/||v|| at vz<0 → negative.
-        # Adding vz gate ensures just_took_off only fires when robot is actually leaving the ground upward.
         self.just_took_off = (
             self.jumping_state
             & (~self.has_taken_off)
             & torch.all(~contact_filt, dim=1)
-            & (self.root_states[:, 9] > 0.3)
         )
         self.has_taken_off |= self.just_took_off
         self.airborne = self.jumping_state & self.has_taken_off & (~self.has_landed) & (~any_foot_contact)
@@ -695,13 +690,18 @@ class GO2OmniJumpTorque(GO2Torque):
         return self.torques
 
     def _update_default_joint_pd_target(self):
-        # Two-target PD prior, mirroring _reward_default_pos:
-        #   phase_loaded (squat-down) → q_squat_target (deep squat)
-        #   everything else → default_dof_pos (standing)
-        # Removes the q_ground intermediate target that produced ambiguous mid-poses
-        # during pushoff/flight/landing.
-        self.default_joint_pd_target[:] = self.default_dof_pos.expand(self.num_envs, -1)
+        # Two-phase PD prior matching the reward design:
+        #   loaded → q_squat (fold legs during squat-down / pre-pushoff)
+        #   extended → q_ground (straight legs through pushoff / flight / landing)
+        #   non-jumping → default_dof_pos (idle standing)
+        self.default_joint_pd_target[:] = self.q_ground_target.unsqueeze(0)
         self.default_joint_pd_target[self.phase_loaded] = self.q_squat_target.unsqueeze(0)
+
+        use_default_pose = (~self.jumping_state) & (self.jump_starts <= 0.0)
+        if self.cfg.commands.num_commands > 4:
+            jump_command_active = self.commands[:, 4] > float(self.cfg.commands.jump_command_threshold)
+            use_default_pose |= (~self.jumping_state) & (~jump_command_active)
+        self.default_joint_pd_target[use_default_pose] = self.default_dof_pos.expand(self.num_envs, -1)[use_default_pose]
 
     def check_termination(self):
         self.reset_buf = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
@@ -764,25 +764,15 @@ class GO2OmniJumpTorque(GO2Torque):
         return active * air_ratio * self._get_height_progress(self.peak_base_height)
 
     def _reward_task_max_height(self):
-        # Olsen 2025 jump-height reward shape: φ_σg(err) + 3·ψ_σl(err)
-        #   φ_σg = exp(-err²/σg²)  Gaussian, sharp peak at err=0
-        #   ψ_σl = exp(-|err|/σl)  Laplacian, exp-decay (gradient survives at large |err|)
-        # Pure Gaussian saturates at |err| > 2σ → policy peaks at 0.35 vs cmd 0.7 had reward ≈ 0,
-        # no gradient toward higher jumps. Laplacian adds constant-rate signal that keeps pulling
-        # policy upward even when far below target.
         target_height = self.commands[:, 3]
         height_error = self.peak_base_height - target_height
-        sigma_gauss = max(float(getattr(self.cfg.rewards, "task_max_height_sigma", 0.05)), 1e-3)
-        sigma_lap = max(float(getattr(self.cfg.rewards, "task_max_height_sigma_lap", 0.10)), 1e-3)
-        lap_weight = float(getattr(self.cfg.rewards, "task_max_height_lap_weight", 3.0))
+        sigma = max(float(getattr(self.cfg.rewards, "task_max_height_sigma", 0.05)), 1e-3)
         jump_height_commanded = target_height >= 0.38
         if self.cfg.commands.num_commands > 4:
             jump_command_active = self.commands[:, 4] > float(self.cfg.commands.jump_command_threshold)
         else:
             jump_command_active = torch.ones(self.num_envs, dtype=torch.bool, device=self.device)
-        gauss = torch.exp(-torch.square(height_error) / sigma_gauss)
-        laplacian = torch.exp(-torch.abs(height_error) / sigma_lap)
-        reward = gauss + lap_weight * laplacian
+        reward = torch.exp(-torch.square(height_error) / sigma)
         active_jump = self.jumping_state & self.has_taken_off
         return active_jump.float() * jump_command_active.float() * jump_height_commanded.float() * reward
 
@@ -812,12 +802,9 @@ class GO2OmniJumpTorque(GO2Torque):
         return ascending.float() * upward_velocity
 
     def _reward_projected_peak(self):
-        # Olsen 2025 "Est jump height" reward — projects expected peak via h + vz²/(2g) and
-        # rewards closeness to target at every ascent step (densifies the sparse landing reward).
-        # Gated on has_taken_off: ballistic formula only holds in free flight; allowing it in
+        # Olsen 2025: project peak height from current state (h + vz^2/2g) and reward closeness to target.
+        # Gated on has_taken_off: ballistic formula h+vz²/2g only holds in free flight; allowing it in
         # stance lets policy game by spiking vz while feet still push the ground (no real liftoff).
-        # Reward shape: φ_σg + 3·ψ_σl (Gaussian + Laplacian mix) — Laplacian keeps gradient alive
-        # when projected peak is far below target; pure Gaussian saturates and policy stagnates.
         base_height = self.root_states[:, 2]
         min_height = float(getattr(self.cfg.rewards, "ascending_min_base_height", 0.18))
         vz = self.root_states[:, 9]
@@ -830,13 +817,8 @@ class GO2OmniJumpTorque(GO2Torque):
         )
         projected = base_height + torch.clamp(vz, min=0.0) ** 2 / (2.0 * 9.81)
         target = self.commands[:, 3]
-        err = projected - target
-        sigma_gauss = max(float(getattr(self.cfg.rewards, "projected_peak_sigma", 0.05)), 1e-4)
-        sigma_lap = max(float(getattr(self.cfg.rewards, "projected_peak_sigma_lap", 0.10)), 1e-4)
-        lap_weight = float(getattr(self.cfg.rewards, "projected_peak_lap_weight", 3.0))
-        gauss = torch.exp(-torch.square(err) / sigma_gauss)
-        laplacian = torch.exp(-torch.abs(err) / sigma_lap)
-        reward = gauss + lap_weight * laplacian
+        sigma = max(float(getattr(self.cfg.rewards, "projected_peak_sigma", 0.05)), 1e-4)
+        reward = torch.exp(-torch.square(projected - target) / sigma)
         return ascending.float() * reward
 
     def _reward_takeoff_impulse(self):
@@ -1012,52 +994,33 @@ class GO2OmniJumpTorque(GO2Torque):
         return active.float() * horizontal_vel_sq
 
     def _reward_default_pos(self):
-        # Two-target pose anchor:
-        #   phase_loaded (squat-down before pushoff) → q_squat_target (deep squat)
-        #   everything else (idle, pushoff, flight, landing, post-landing) → default_dof_pos (standing)
-        # Cleaner than the old q_ground intermediate target that produced ambiguous mid-poses.
-        squat_expand = self.q_squat_target.unsqueeze(0).expand_as(self.dof_pos)
-        standing_expand = self.default_dof_pos.expand_as(self.dof_pos)
-        target = torch.where(
-            self.phase_loaded.unsqueeze(-1),
-            squat_expand,
-            standing_expand,
-        )
-        joint_diff = torch.sum(torch.abs(self.dof_pos - target), dim=1)
+        # mygo2jump-style L1 penalty toward q_squat (we want robot to bias toward squat posture).
+        # Active throughout episode — small weight because push/flight legitimately deviates.
+        joint_diff = torch.sum(torch.abs(self.dof_pos - self.q_squat_target.unsqueeze(0)), dim=1)
         return joint_diff
 
     def _reward_default_hip_pos(self):
         # mygo2jump-style: exp reward keeping 4 hip joints near their default values (no outward/inward drift).
         hip_indices = [0, 3, 6, 9]
         hip_diff = torch.sum(
-            torch.abs(self.dof_pos[:, hip_indices] - self.default_dof_pos[:, hip_indices]),
+            torch.abs(self.dof_pos[:, hip_indices] - self.default_dof_pos[hip_indices].unsqueeze(0)),
             dim=1,
         )
         return torch.exp(-hip_diff * 4.0)
 
     def _reward_takeoff_direction(self):
-        # One-shot reward fired at just_took_off: cosine angle between actual takeoff velocity
-        # and the cmd-implied desired velocity. cmd[:2] gives desired xy velocity; vz_des is
-        # back-computed from cmd[3] (jump_height) via ballistic formula sqrt(2g·h).
-        # Range [-1, 1]: 1=actual aligned with desired, 0=perpendicular, -1=opposite.
-        # For cmd_xy=0 task this reduces exactly to vz/||v|| (pure-vertical reward), so it's
-        # backward-compatible with the original non-cmd-aware implementation.
-        # For future directional cmd (cmd_xy ≠ 0) it correctly rewards the commanded direction
-        # instead of fighting it.
-        v_des_z = torch.sqrt(torch.clamp(2.0 * 9.81 * self.commands[:, 3], min=0.0))
-        v_des = torch.stack([self.commands[:, 0], self.commands[:, 1], v_des_z], dim=1)
-        v_actual = self.root_states[:, 7:10]
-        des_norm = torch.norm(v_des, dim=1).clamp(min=0.1)
-        actual_norm = torch.norm(v_actual, dim=1).clamp(min=0.1)
-        cos_angle = torch.sum(v_des * v_actual, dim=1) / (des_norm * actual_norm)
-        # When actual velocity is essentially zero, vertical_frac was 0 in the old form;
-        # clamp here is a safety guard against the cmd|actual≈0 degenerate case.
-        cos_angle = torch.where(
-            torch.norm(v_actual, dim=1) > 0.1,
-            cos_angle,
-            torch.zeros_like(cos_angle),
+        # One-shot reward fired at just_took_off: vz / ||v|| measures how vertical the takeoff momentum is.
+        # Range [-1, 1]: 1=pure vertical, 0=pure horizontal, -1=downward. Robot cannot cheat from the ground
+        # because just_took_off fires once per episode at the moment all feet leave the ground.
+        takeoff_vel = self.root_states[:, 7:10]
+        vel_norm = torch.norm(takeoff_vel, dim=1)
+        safe_norm = vel_norm.clamp(min=0.1)
+        vertical_frac = torch.where(
+            vel_norm > 0.1,
+            takeoff_vel[:, 2] / safe_norm,
+            torch.zeros_like(vel_norm),
         )
-        return self.just_took_off.float() * cos_angle
+        return self.just_took_off.float() * vertical_frac
 
     def _reward_joint_angle_loaded(self):
         # Phase 1: fold legs during squat-down + pre-pushoff (loaded/spring-loaded posture).
@@ -1090,15 +1053,11 @@ class GO2OmniJumpTorque(GO2Torque):
         return active * pose_error
 
     def _reward_landing_stability(self):
-        # Positive reward for low velocity during the landing observation window.
-        # Sigmas configurable so kernel width matches actual landing velocity magnitude
-        # (default 0.25 was too tight — exp ≈ 0 when robot lands at ~1 m/s, gradient too small).
+        # Penalty for velocity during the landing observation period
         active = self.landing.float()
         lin_vel_error = torch.sum(torch.square(self.base_lin_vel), dim=1)
         ang_vel_error = torch.sum(torch.square(self.base_ang_vel[:, :2]), dim=1)
-        lin_sigma = float(getattr(self.cfg.rewards, "landing_stability_lin_vel_sigma", 0.25))
-        ang_sigma = float(getattr(self.cfg.rewards, "landing_stability_ang_vel_sigma", 0.5))
         return active * (
-            torch.exp(-lin_vel_error / lin_sigma) * torch.exp(-ang_vel_error / ang_sigma)
+            torch.exp(-lin_vel_error / 0.25) * torch.exp(-ang_vel_error / 0.5)
         )
 

@@ -1,5 +1,3 @@
-import torch
-
 from legged_gym.envs.go2.go2_omnijump_torque.go2_omnijump_torque_config import (
     GO2OmniJumpTorqueCfg,
     GO2OmniJumpTorqueCfgPPO,
@@ -10,8 +8,8 @@ class GO2OmniJumpCurriculumTorqueCfg(GO2OmniJumpTorqueCfg):
     class growth(GO2OmniJumpTorqueCfg.growth):
         start_torque_scale = 1.0   # disable cur_scale ramp; RL effective scale ramp reduced from 4× (5.875→23.5) to 2× (11.75→23.5) — matches mygo2jump 2.35× shape and gives RL ~12Nm authority from iter 0
         k = 0.0001                 # unused under linear schedule (kept for compatibility)
-        warmup_steps = 96000       # PD locked at 0.5 until step_count ≥ 96000 (~iter 1000). Re-enable fade for fresh from-scratch train.
-        x0 = 384000                # general_scale linearly 0→1 from iter 1000 to iter 4000 → pure-torque iter 4000+
+        warmup_steps = 96000       # PD stays at full 0.5 until step_count ≥ 96000 (~iter 1000 at freq=100). Lets RL bootstrap with PD support before fade starts.
+        x0 = 384000                # linear-fade end: general_scale=1, pd_alpha=0 at step_count=384000 (~iter 4000 at ~96 step/iter). 3000-iter slow ramp; ~1.67pp PD drop per 100 iter (was 2.5pp).
 
     class curriculum:
         enabled = False
@@ -63,8 +61,6 @@ class GO2OmniJumpCurriculumTorqueCfg(GO2OmniJumpTorqueCfg):
         success_use_velocity_score = False
         task_max_height_sigma = 0.05
         height_tracking_sigma = 0.05
-        landing_stability_lin_vel_sigma = 1.0   # default 0.25 too tight (exp≈0 at ~1m/s landing); 1.0 gives meaningful gradient
-        landing_stability_ang_vel_sigma = 1.5   # default 0.5 too tight; 1.5 keeps gradient at moderate ang_vel
         tracking_linear_velocity_all_time = True
         landing_buffer_steps = 25    # was 50; shorter buffer = give policy faster credit for surviving landing
         stand_rearm_steps = 5
@@ -79,28 +75,26 @@ class GO2OmniJumpCurriculumTorqueCfg(GO2OmniJumpTorqueCfg):
         class scales(GO2OmniJumpTorqueCfg.rewards.scales):
             maintain_contact = 0.10            # moderate: standing anchor without dominating takeoff signal
             peak_height_progress = 5.0         # boosted (was 3.0): more dense "fly higher" gradient
-            all_feet_airborne = 10.0           # 6 → 10: stronger "you jumped!" signal to push policy past flat-jump plateau (mean_peak stuck at 0.19)
-            takeoff_vertical_velocity = 32.0   # 25 → 32: stronger push-up gradient
-            projected_peak = 14.0              # 7 → 14: with new Olsen φ+3ψ shape, doubling weight maintains relative dominance after Laplacian increased magnitude
+            all_feet_airborne = 2.0            # boosted (was 1.0): bigger airborne reward
+            takeoff_vertical_velocity = 10.0   # boosted (was 4.0): strong stance push signal — primary lever to break "don't jump" mode
+            projected_peak = 7.0               # boosted (was 5.0): bigger flight-phase peak-tracking signal
             termination = -10.0                # not in OmniNet, kept for base-contact episodes
             orientation = -1.6                 # boosted (was -0.8): stronger upright pull during all phases
             collision = -3.0                   # boosted (was -1.0): kill leg-leg self-collision in air
             torques = -1e-5                    # OmniNet: -1e-5
-            action_rate = -0.08                # 0.03 → 0.08: precise anti-jitter (Δaction² catches high-freq oscillation without suppressing jump push)
-            dof_acc = -1.0e-6                  # 2.5e-7 → 1e-6 (4×): stronger q̈ penalty to damp in-air twitching
+            action_rate = -0.03                # boosted (was -0.025 → -0.08): direct twitching penalty
+            dof_acc = -2.5e-7                  # restored to original: was over-penalizing fast (smooth) motion
             horizontal_drift = -1.5            # penalize world-frame xy velocity → enforce vertical jumps
-            takeoff_direction = 120.0          # 80 → 120 (1.5×): play showed "jumps backward" despite weight 80; stronger signal to enforce cmd-aligned takeoff. Paired with new cmd-aware impl (cos angle between actual vel and cmd-implied desired vel; equivalent to vz/||v|| when cmd_xy=0).
+            takeoff_direction = 80.0           # boosted (was 30): signal too small to push policy; now dominant-tier weight
             height_tracking = 1.0              # OmniNet: 1.0
             successful_jump = 300.0            # boosted (was 200): make completion reward dominate to overcome ep-short collapse
             tracking_linear_velocity = 0.0     # disabled: vel=0 cmd creates stand-still local optimum
             tracking_angular_velocity = 0.0    # disabled: same reason
             joint_angle_loaded = 0.0           # disabled: sigma=1.5 bug makes exp ≈ 0 always; re-enable after sigma fix
             joint_angle_extended = 0.0         # disabled: same reason
-            default_pos = -3.0                 # -0.3 → -3.0 (10×): policy started lying belly-flat (base 0.087m) to exploit Laplacian task_max_height; 10× stronger pose anchor makes lying flat too expensive vs jumping cleanly from default standing.
+            default_pos = -0.3                 # mygo2jump weight; now spans ALL 12 joints (fix: was hip-only and 1/3 weight). Strong pose anchor toward default standing pose — critical for surviving PD=0 stand.
             default_hip_pos = 0.3              # mygo2jump-style exp keep hip joints near default (no outward/inward drift)
-            aerial_dof_acc = -3e-6             # reverted to May23 baseline value. -1e-5 was too aggressive — penalized the leg-retract motion needed for high jumps via momentum conservation. mean_peak crashed 0.50 → 0.14 with -1e-5.
-            task_max_height = 20.0             # 12 → 20: with new Olsen φ+3ψ shape, boost to dominate. Policy needs strong signal to push peak past 0.20m plateau.
-            landing_stability = 15.0           # 5 → 15: prior 5 + tight sigma made reward ~0; weight boost + sigma loosened (see config below)
+            aerial_dof_acc = -1e-6             # airborne-only joint accel penalty (4× global dof_acc); targets in-air twitching/flailing observed after PD fades out
             joint_angle_aerial = 0.0           # superseded by joint_angle_extended
             joint_angle_prelanding = 0.0       # superseded by joint_angle_extended
             joint_angle_landing = 0.0          # superseded by joint_angle_extended
@@ -127,8 +121,6 @@ class GO2OmniJumpCurriculumTorqueCfg(GO2OmniJumpTorqueCfg):
             "rew_takeoff_direction",
             "rew_default_pos",
             "rew_default_hip_pos",
-            "rew_task_max_height",
-            "rew_landing_stability",
             "jump_flight_rate",
             "jump_landing_rate",
             "jump_completed_cycles",
@@ -137,9 +129,7 @@ class GO2OmniJumpCurriculumTorqueCfg(GO2OmniJumpTorqueCfg):
         ]
 
     class test(GO2OmniJumpTorqueCfg.test):
-        # cmd layout: [v_x, v_y, ω_yaw, jump_height, jump_command]
-        # Training has lin_vel_x=[0,0], so play must also use vx=0 (parent default vx=1.0 is wrong for in-place jump task).
-        vel = torch.tensor([0.0, 0.0, 0.0, 0.7, 1.0], dtype=torch.float32)
+        vel = GO2OmniJumpTorqueCfg.test.vel.clone()
         single_jump_play = True    # mirror training: one jump per episode, then stand for post_jump_stand_steps
 
 
@@ -153,8 +143,8 @@ class GO2OmniJumpCurriculumTorqueCfgPPO(GO2OmniJumpTorqueCfgPPO):
     class runner(GO2OmniJumpTorqueCfgPPO.runner):
         experiment_name = "go2_omnijump_curriculum_torque"
         run_name = "auto_curriculum"
-        resume = True                        # resume from May23_01-45-50/model_5000.pt (peak 0.50 baseline) to refine with cmd-aware takeoff_direction (weight 120) — only directional fix, all other rewards reverted to baseline values.
-        load_run = "May23_01-45-50_auto_curriculum"   # explicit — load_run=-1 would grab the most recent (bad) run instead of the working May23 baseline
-        checkpoint = -1                       # latest checkpoint in that run (= model_5000.pt)
+        resume = False                       # from-scratch with positive pose rewards + new smoothness balance
+        load_run = -1
+        checkpoint = -1
         resume_path = None
-        max_iterations = 7000                # +2000 iter resume budget on top of baseline 5000
+        max_iterations = 5000                # 4000 PD-fade + 1000 post-fade refinement
