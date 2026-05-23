@@ -98,7 +98,7 @@ class GO2OmniJumpCurriculumTorqueCfg(GO2OmniJumpTorqueCfg):
             joint_angle_extended = 0.0         # disabled: same reason
             default_pos = -3.0                 # -0.3 → -3.0 (10×): policy started lying belly-flat (base 0.087m) to exploit Laplacian task_max_height; 10× stronger pose anchor makes lying flat too expensive vs jumping cleanly from default standing.
             default_hip_pos = 0.3              # mygo2jump-style exp keep hip joints near default (no outward/inward drift)
-            aerial_dof_acc = -1e-5             # -3e-6 → -1e-5 (3.3×): play with iter 5000 showed visible in-air leg sway; stronger q̈ penalty during airborne phase suppresses high-freq leg flailing.
+            aerial_dof_acc = -3e-6             # reverted to May23 baseline value. -1e-5 was too aggressive — penalized the leg-retract motion needed for high jumps via momentum conservation. mean_peak crashed 0.50 → 0.14 with -1e-5.
             task_max_height = 20.0             # 12 → 20: with new Olsen φ+3ψ shape, boost to dominate. Policy needs strong signal to push peak past 0.20m plateau.
             landing_stability = 15.0           # 5 → 15: prior 5 + tight sigma made reward ~0; weight boost + sigma loosened (see config below)
             joint_angle_aerial = 0.0           # superseded by joint_angle_extended
@@ -153,8 +153,8 @@ class GO2OmniJumpCurriculumTorqueCfgPPO(GO2OmniJumpTorqueCfgPPO):
     class runner(GO2OmniJumpTorqueCfgPPO.runner):
         experiment_name = "go2_omnijump_curriculum_torque"
         run_name = "auto_curriculum"
-        resume = False                       # from scratch: two-target pose change (q_squat vs standing) needs full retrain
-        load_run = -1
-        checkpoint = -1
+        resume = True                        # resume from May23_01-45-50/model_5000.pt (peak 0.50 baseline) to refine with cmd-aware takeoff_direction (weight 120) — only directional fix, all other rewards reverted to baseline values.
+        load_run = "May23_01-45-50_auto_curriculum"   # explicit — load_run=-1 would grab the most recent (bad) run instead of the working May23 baseline
+        checkpoint = -1                       # latest checkpoint in that run (= model_5000.pt)
         resume_path = None
-        max_iterations = 5000                # PD fade ends iter 4000, 1000 iter post-fade refinement
+        max_iterations = 7000                # +2000 iter resume budget on top of baseline 5000
