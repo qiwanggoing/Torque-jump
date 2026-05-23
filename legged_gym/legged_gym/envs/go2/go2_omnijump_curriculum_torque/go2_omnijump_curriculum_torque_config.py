@@ -65,7 +65,7 @@ class GO2OmniJumpCurriculumTorqueCfg(GO2OmniJumpTorqueCfg):
         height_tracking_sigma = 0.05
         landing_stability_lin_vel_sigma = 1.0   # default 0.25 too tight (exp≈0 at ~1m/s landing); 1.0 gives meaningful gradient
         landing_stability_ang_vel_sigma = 1.5   # default 0.5 too tight; 1.5 keeps gradient at moderate ang_vel
-        tracking_linear_velocity_all_time = True
+        tracking_linear_velocity_all_time = False    # True → False: all-time mode gave +1.5/step baseline reward for standing still → policy converged to "don't jump" local optimum (iter 1790: mean_peak 0.085). Gated mode only fires during takeoff/airborne, so standing still gives 0 reward — task_max_height becomes the dominant signal again, but cmd-aware xy tracking still active during flight to prevent backward drift.
         landing_buffer_steps = 25    # was 50; shorter buffer = give policy faster credit for surviving landing
         stand_rearm_steps = 5
         one_jump_reward_per_episode = True
