@@ -90,13 +90,13 @@ class GO2OmniJumpCurriculumTorqueCfg(GO2OmniJumpTorqueCfg):
             successful_jump = 300.0            # boosted (was 200): make completion reward dominate to overcome ep-short collapse
             tracking_linear_velocity = 0.5     # 0 → 0.5: cmd-aware xy 速度跟踪（gated 模式，只飞行时 active）。cmd[0:2]=0 时罚漂移确保原地跳。weight 0.5 远小于 successful_jump 300，每 cycle 贡献 ~0.07 reward，~5% of successful_jump magnitude，绝对不会盖过 jump 核心信号。
             tracking_angular_velocity = 0.0    # 保持 0：cmd[2]=0 yaw 命令，先不动
-            joint_angle_loaded = 0.0           # disabled: sigma=1.5 bug makes exp ≈ 0 always; re-enable after sigma fix
-            joint_angle_extended = 0.0         # disabled: same reason
+            joint_angle_loaded = 0.4           # re-enabled: provides positive bell-curve reward for squatting
+            joint_angle_extended = 0.4         # re-enabled: positive bell-curve reward for takeoff extension
             default_pos = -0.3                 # mygo2jump weight; now spans ALL 12 joints (fix: was hip-only and 1/3 weight). Strong pose anchor toward default standing pose — critical for surviving PD=0 stand.
             default_hip_pos = 0.3              # mygo2jump-style exp keep hip joints near default (no outward/inward drift)
             aerial_dof_acc = -1e-6             # airborne-only joint accel penalty (4× global dof_acc); targets in-air twitching/flailing observed after PD fades out
-            joint_angle_aerial = 0.0           # superseded by joint_angle_extended
-            joint_angle_prelanding = 0.0       # superseded by joint_angle_extended
+            joint_angle_aerial = 0.4           # airborne pose guidance
+            joint_angle_prelanding = 0.4       # Prelanding pose guidance
             joint_angle_landing = 0.0          # superseded by joint_angle_extended
 
     class logging(GO2OmniJumpTorqueCfg.logging):

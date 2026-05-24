@@ -126,7 +126,7 @@ class GO2OmniJumpTorqueCfg(GO2TorqueCfg):
         ascending_min_base_height = 0.18   # block ascending-reward farming when robot is flopped/sideways
         successful_jump_min_peak_height = 0.30  # successful_jump only counts when peak actually cleared squat by ≥10cm
         success_fallover_tilt = 0.7        # ~46°; only true fallovers cancel a pending success during landing buffer
-        pose_guidance_sigma = 1.5          # bell-curve width for joint_angle_loaded/extended rewards
+        pose_guidance_sigma = 5.0          # bell-curve width for joint_angle_loaded/extended rewards
         lin_vel_takeoff_min_z_vel = 0.05
         first_jump_delay_steps = 55
         first_jump_min_base_height = 0.24

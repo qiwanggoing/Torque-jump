@@ -434,10 +434,9 @@ class GO2OmniJumpCurriculumTorque(GO2OmniJumpTorque):
         return torch.exp(-self.cfg.rewards.default_hip_pos_gain * hip_error)
 
     def _reward_default_pos(self):
-        # mygo2jump-style L1 over ALL 12 joints (was hip-only — left thigh/calf
-        # with no reward-side anchor, so RL never learned to hold standing pose
-        # without PD).
-        return torch.sum(torch.abs(self.dof_pos - self.default_dof_pos), dim=1)
+        # 动态追踪三阶段姿态目标 (stand -> squat -> extend)
+        # 与 PD prior 目标保持绝对一致，提供全周期的稳定姿态锚点，彻底消除与 PD 控制器的策略对抗。
+        return torch.sum(torch.abs(self.dof_pos - self.default_joint_pd_target), dim=1)
 
     def _reward_aerial_dof_acc(self):
         # Airborne-only joint acceleration penalty. Global dof_acc covers full
