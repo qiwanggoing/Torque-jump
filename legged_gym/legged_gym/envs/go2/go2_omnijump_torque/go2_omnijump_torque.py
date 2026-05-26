@@ -501,21 +501,21 @@ class GO2OmniJumpTorque(GO2Torque):
             self.jump_evaluations += self.just_landed.float()
             self.peak_height_error_sum += peak_err * self.just_landed.float()
             self.peak_height_sum += self.peak_base_height * self.just_landed.float()
-            # Simplified: any real jump (peak above min) qualifies at impact.
-            # Target-height tracking is handled by projected_peak (continuous reward), not here.
             min_peak = float(getattr(self.cfg.rewards, "successful_jump_min_peak_height", 0.30))
             real_jump = self.peak_base_height >= min_peak
             jump_height_commanded = self.commands[:, 3] >= 0.28
             success_at_impact = self.just_landed & real_jump & jump_height_commanded
             self.pending_success |= success_at_impact
-            
+
+            height_score = torch.clamp(self.peak_base_height / self.commands[:, 3].clamp(min=0.1), 0.0, 1.0)
             success_velocity_score = self._get_successful_jump_velocity_score()
             if not getattr(self.cfg.rewards, "success_use_velocity_score", False):
                 success_velocity_score = torch.ones_like(success_velocity_score)
-            
+            combined_score = height_score * success_velocity_score
+
             self.pending_velocity_score = torch.where(
                 success_at_impact,
-                success_velocity_score,
+                combined_score,
                 self.pending_velocity_score,
             )
 
