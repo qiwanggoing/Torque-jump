@@ -1040,17 +1040,20 @@ class GO2OmniJumpTorque(GO2Torque):
     def _reward_joint_angle_aerial(self):
         active = (self.airborne & (~self.prelanding)).float()
         pose_error = torch.sum(torch.abs(self.dof_pos - self.q_air_target.unsqueeze(0)), dim=1)
-        return active * pose_error
+        sigma = max(float(getattr(self.cfg.rewards, "pose_guidance_sigma", 1.5)), 1e-3)
+        return active * torch.exp(-pose_error / sigma)
 
     def _reward_joint_angle_prelanding(self):
         active = self.prelanding.float()
         pose_error = torch.sum(torch.abs(self.dof_pos - self.q_pre_target.unsqueeze(0)), dim=1)
-        return active * pose_error
+        sigma = max(float(getattr(self.cfg.rewards, "pose_guidance_sigma", 1.5)), 1e-3)
+        return active * torch.exp(-pose_error / sigma)
 
     def _reward_joint_angle_landing(self):
         active = self.landing.float()
         pose_error = torch.sum(torch.abs(self.dof_pos - self.q_ground_target.unsqueeze(0)), dim=1)
-        return active * pose_error
+        sigma = max(float(getattr(self.cfg.rewards, "pose_guidance_sigma", 1.5)), 1e-3)
+        return active * torch.exp(-pose_error / sigma)
 
     def _reward_landing_stability(self):
         # Penalty for velocity during the landing observation period
