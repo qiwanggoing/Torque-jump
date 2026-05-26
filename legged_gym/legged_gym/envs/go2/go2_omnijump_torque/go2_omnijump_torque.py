@@ -1009,18 +1009,19 @@ class GO2OmniJumpTorque(GO2Torque):
         return torch.exp(-hip_diff * 4.0)
 
     def _reward_takeoff_direction(self):
-        # One-shot reward fired at just_took_off: vz / ||v|| measures how vertical the takeoff momentum is.
-        # Range [-1, 1]: 1=pure vertical, 0=pure horizontal, -1=downward. Robot cannot cheat from the ground
-        # because just_took_off fires once per episode at the moment all feet leave the ground.
-        takeoff_vel = self.root_states[:, 7:10]
-        vel_norm = torch.norm(takeoff_vel, dim=1)
+        vel = self.root_states[:, 7:10]
+        vz = vel[:, 2]
+        vel_norm = torch.norm(vel, dim=1)
         safe_norm = vel_norm.clamp(min=0.1)
         vertical_frac = torch.where(
             vel_norm > 0.1,
-            takeoff_vel[:, 2] / safe_norm,
+            vz / safe_norm,
             torch.zeros_like(vel_norm),
         )
-        return self.just_took_off.float() * vertical_frac
+        base_height = self.root_states[:, 2]
+        min_height = float(getattr(self.cfg.rewards, "ascending_min_base_height", 0.18))
+        ascending = self.jumping_state & (~self.has_landed) & (vz > 0) & (base_height > min_height)
+        return ascending.float() * vertical_frac
 
     def _reward_joint_angle_loaded(self):
         # Phase 1: fold legs during squat-down + pre-pushoff (loaded/spring-loaded posture).

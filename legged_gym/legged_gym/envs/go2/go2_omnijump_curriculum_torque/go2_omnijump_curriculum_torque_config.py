@@ -74,19 +74,19 @@ class GO2OmniJumpCurriculumTorqueCfg(GO2OmniJumpTorqueCfg):
 
         class scales(GO2OmniJumpTorqueCfg.rewards.scales):
             maintain_contact = 0.10            # moderate: standing anchor without dominating takeoff signal
-            peak_height_progress = 5.0         # boosted (was 3.0): more dense "fly higher" gradient
+            peak_height_progress = 0.0         # disabled: projected_peak subsumes this
             all_feet_airborne = 2.0            # boosted (was 1.0): bigger airborne reward
             takeoff_vertical_velocity = 10.0   # boosted (was 4.0): strong stance push signal — primary lever to break "don't jump" mode
-            projected_peak = 7.0               # boosted (was 5.0): bigger flight-phase peak-tracking signal
+            projected_peak = 15.0              # sole height tracker: compensates for disabled height_tracking + peak_height_progress
             termination = -10.0                # not in OmniNet, kept for base-contact episodes
             orientation = -1.6                 # boosted (was -0.8): stronger upright pull during all phases
             collision = -3.0                   # boosted (was -1.0): kill leg-leg self-collision in air
             torques = -1e-5                    # OmniNet: -1e-5
             action_rate = -0.03                # boosted (was -0.025 → -0.08): direct twitching penalty
             dof_acc = -2.5e-7                  # restored to original: was over-penalizing fast (smooth) motion
-            horizontal_drift = -1.5            # penalize world-frame xy velocity → enforce vertical jumps
-            takeoff_direction = 80.0           # boosted (was 30): signal too small to push policy; now dominant-tier weight
-            height_tracking = 1.0              # OmniNet: 1.0
+            horizontal_drift = 0.0            # disabled: dense takeoff_direction subsumes this
+            takeoff_direction = 3.0            # dense ascending vz/||v|| (was 80 one-shot; ~40 steps × 3.0 × 0.85 ≈ equivalent total)
+            height_tracking = 0.0              # disabled: projected_peak subsumes this
             successful_jump = 300.0            # boosted (was 200): make completion reward dominate to overcome ep-short collapse
             tracking_linear_velocity = 0.5
             tracking_angular_velocity = 0.0
