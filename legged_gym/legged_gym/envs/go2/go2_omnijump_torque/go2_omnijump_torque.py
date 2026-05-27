@@ -984,6 +984,10 @@ class GO2OmniJumpTorque(GO2Torque):
             * (0.20 + 0.80 * height_gate)
         )
 
+    def _reward_orientation(self):
+        orientation_error = torch.sum(torch.square(self.projected_gravity[:, :2]), dim=1)
+        return torch.exp(-6.0 * orientation_error)
+
     def _reward_horizontal_drift(self):
         # Penalize world-frame horizontal velocity through the entire jump cycle (before landing).
         # Goal: keep jumps vertical when xy velocity command is zero.
