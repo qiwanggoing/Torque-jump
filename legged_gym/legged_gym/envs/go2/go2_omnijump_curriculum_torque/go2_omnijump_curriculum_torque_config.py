@@ -44,7 +44,7 @@ class GO2OmniJumpCurriculumTorqueCfg(GO2OmniJumpTorqueCfg):
     class commands(GO2OmniJumpTorqueCfg.commands):
         single_jump_command_prob = 1.0
         class ranges(GO2OmniJumpTorqueCfg.commands.ranges):
-            jump_height = [0.55, 0.70]
+            jump_height = [0.40, 0.70]
             lin_vel_x = [0.0, 0.0]
             lin_vel_y = [0.0, 0.0]
             ang_vel_yaw = [0.0, 0.0]
@@ -81,7 +81,7 @@ class GO2OmniJumpCurriculumTorqueCfg(GO2OmniJumpTorqueCfg):
             takeoff_vertical_velocity = 0.0    # disabled: projected_peak now covers stance+flight
             projected_peak = 20.0
             termination = -10.0
-            orientation = 1.5
+            orientation = 0.8
             collision = -3.0                   # boosted (was -1.0): kill leg-leg self-collision in air
             torques = -1e-5                    # OmniNet: -1e-5
             action_rate = -0.06
@@ -94,9 +94,9 @@ class GO2OmniJumpCurriculumTorqueCfg(GO2OmniJumpTorqueCfg):
             tracking_angular_velocity = 0.0
             joint_angle_loaded = 0.4
             joint_angle_extended = 0.0
-            default_pos = -0.3                 # mygo2jump weight; now spans ALL 12 joints (fix: was hip-only and 1/3 weight). Strong pose anchor toward default standing pose — critical for surviving PD=0 stand.
+            default_pos = 0.3
             default_hip_pos = 0.3              # mygo2jump-style exp keep hip joints near default (no outward/inward drift)
-            aerial_dof_acc = -5e-6
+            aerial_dof_acc = -1e-6
             joint_angle_aerial = 0.4
             joint_angle_prelanding = 0.4
             joint_angle_landing = 0.0          # superseded by joint_angle_extended

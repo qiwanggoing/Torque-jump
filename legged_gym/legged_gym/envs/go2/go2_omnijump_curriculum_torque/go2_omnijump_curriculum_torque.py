@@ -434,7 +434,8 @@ class GO2OmniJumpCurriculumTorque(GO2OmniJumpTorque):
         return torch.exp(-self.cfg.rewards.default_hip_pos_gain * hip_error)
 
     def _reward_default_pos(self):
-        return torch.sum(torch.abs(self.dof_pos - self.default_joint_pd_target), dim=1)
+        joint_diff = torch.sum(torch.abs(self.dof_pos - self.default_joint_pd_target), dim=1)
+        return torch.exp(-joint_diff / 3.0)
 
     def _reward_aerial_dof_acc(self):
         # Airborne-only joint acceleration penalty. Global dof_acc covers full
