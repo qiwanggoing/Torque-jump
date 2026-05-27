@@ -60,6 +60,7 @@ class GO2OmniJumpCurriculumTorqueCfg(GO2OmniJumpTorqueCfg):
         successful_jump_min_peak_height = 0.40
         success_height_tolerance = 0.10
         success_use_velocity_score = False
+        projected_peak_sigma = 0.10
         task_max_height_sigma = 0.05
         height_tracking_sigma = 0.05
         tracking_linear_velocity_all_time = False
@@ -78,7 +79,7 @@ class GO2OmniJumpCurriculumTorqueCfg(GO2OmniJumpTorqueCfg):
             peak_height_progress = 0.0         # disabled: projected_peak subsumes this
             all_feet_airborne = 6.0
             takeoff_vertical_velocity = 0.0    # disabled: projected_peak now covers stance+flight
-            projected_peak = 15.0
+            projected_peak = 20.0
             termination = -10.0
             orientation = 1.5
             collision = -3.0                   # boosted (was -1.0): kill leg-leg self-collision in air
