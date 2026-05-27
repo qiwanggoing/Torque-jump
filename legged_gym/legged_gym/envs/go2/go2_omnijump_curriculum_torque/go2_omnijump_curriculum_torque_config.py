@@ -77,11 +77,11 @@ class GO2OmniJumpCurriculumTorqueCfg(GO2OmniJumpTorqueCfg):
         class scales(GO2OmniJumpTorqueCfg.rewards.scales):
             maintain_contact = 0.10            # moderate: standing anchor without dominating takeoff signal
             peak_height_progress = 0.0         # disabled: projected_peak subsumes this
-            all_feet_airborne = 6.0
+            all_feet_airborne = 0.0
             takeoff_vertical_velocity = 0.0    # disabled: projected_peak now covers stance+flight
             projected_peak = 20.0
             termination = -10.0
-            orientation = 0.8
+            orientation = 0.4
             collision = -3.0                   # boosted (was -1.0): kill leg-leg self-collision in air
             torques = -1e-5                    # OmniNet: -1e-5
             action_rate = -0.03
