@@ -77,10 +77,10 @@ class GO2OmniJumpCurriculumTorqueCfg(GO2OmniJumpTorqueCfg):
             maintain_contact = 0.10            # moderate: standing anchor without dominating takeoff signal
             peak_height_progress = 0.0         # disabled: projected_peak subsumes this
             all_feet_airborne = 6.0
-            takeoff_vertical_velocity = 10.0   # boosted (was 4.0): strong stance push signal — primary lever to break "don't jump" mode
-            projected_peak = 15.0              # sole height tracker: compensates for disabled height_tracking + peak_height_progress
-            termination = -10.0                # not in OmniNet, kept for base-contact episodes
-            orientation = 2.5
+            takeoff_vertical_velocity = 0.0    # disabled: projected_peak now covers stance+flight
+            projected_peak = 15.0
+            termination = -10.0
+            orientation = 1.5
             collision = -3.0                   # boosted (was -1.0): kill leg-leg self-collision in air
             torques = -1e-5                    # OmniNet: -1e-5
             action_rate = -0.03                # boosted (was -0.025 → -0.08): direct twitching penalty

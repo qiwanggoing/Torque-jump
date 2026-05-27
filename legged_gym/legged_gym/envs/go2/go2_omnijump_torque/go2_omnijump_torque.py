@@ -802,15 +802,11 @@ class GO2OmniJumpTorque(GO2Torque):
         return ascending.float() * upward_velocity
 
     def _reward_projected_peak(self):
-        # Olsen 2025: project peak height from current state (h + vz^2/2g) and reward closeness to target.
-        # Gated on has_taken_off: ballistic formula h+vz²/2g only holds in free flight; allowing it in
-        # stance lets policy game by spiking vz while feet still push the ground (no real liftoff).
         base_height = self.root_states[:, 2]
         min_height = float(getattr(self.cfg.rewards, "ascending_min_base_height", 0.18))
         vz = self.root_states[:, 9]
         ascending = (
             self.jumping_state
-            & self.has_taken_off
             & (vz > 0)
             & (~self.has_landed)
             & (base_height > min_height)
@@ -838,8 +834,7 @@ class GO2OmniJumpTorque(GO2Torque):
         return active.float() * support * (0.5 * force_reward + 0.5 * vertical_acc)
 
     def _reward_all_feet_airborne(self):
-        height_progress = self._get_height_progress()
-        return self.airborne.float() * (0.25 + 0.75 * height_progress)
+        return self.airborne.float()
 
     def _get_successful_jump_velocity_score(self):
         min_time = max(float(getattr(self.cfg.rewards, "success_velocity_min_airborne_time", 0.08)), 1e-3)
