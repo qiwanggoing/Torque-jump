@@ -813,8 +813,7 @@ class GO2OmniJumpTorque(GO2Torque):
         )
         projected = base_height + torch.clamp(vz, min=0.0) ** 2 / (2.0 * 9.81)
         target = self.commands[:, 3].clamp(min=0.1)
-        floor = float(self.cfg.rewards.height_progress_floor)
-        progress = torch.clamp((projected - floor) / (target - floor).clamp(min=0.01), 0.0, 1.0)
+        progress = torch.clamp(projected / target, 0.0, 1.0)
         reward = progress ** 2
         return ascending.float() * reward
 
