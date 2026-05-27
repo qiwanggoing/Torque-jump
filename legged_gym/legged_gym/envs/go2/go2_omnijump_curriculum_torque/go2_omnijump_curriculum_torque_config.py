@@ -76,9 +76,9 @@ class GO2OmniJumpCurriculumTorqueCfg(GO2OmniJumpTorqueCfg):
 
         class scales(GO2OmniJumpTorqueCfg.rewards.scales):
             maintain_contact = 0.0
-            peak_height_progress = 0.0         # disabled: projected_peak subsumes this
+            peak_height_progress = 5.0
             all_feet_airborne = 0.0
-            takeoff_vertical_velocity = 0.0    # disabled: projected_peak now covers stance+flight
+            takeoff_vertical_velocity = 10.0
             projected_peak = 20.0
             termination = -10.0
             orientation = 0.4
@@ -94,7 +94,7 @@ class GO2OmniJumpCurriculumTorqueCfg(GO2OmniJumpTorqueCfg):
             tracking_angular_velocity = 0.0
             joint_angle_loaded = 0.4
             joint_angle_extended = 0.0
-            default_pos = 0.1
+            default_pos = -0.3
             default_hip_pos = 0.1
             aerial_dof_acc = -1e-6
             joint_angle_aerial = 0.4
