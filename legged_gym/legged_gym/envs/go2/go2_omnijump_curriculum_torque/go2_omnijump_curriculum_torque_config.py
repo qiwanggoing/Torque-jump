@@ -79,7 +79,7 @@ class GO2OmniJumpCurriculumTorqueCfg(GO2OmniJumpTorqueCfg):
             peak_height_progress = 0.0         # disabled: projected_peak subsumes this
             all_feet_airborne = 0.0
             takeoff_vertical_velocity = 0.0    # disabled: projected_peak now covers stance+flight
-            projected_peak = 30.0
+            projected_peak = 50.0
             termination = -10.0
             orientation = 0.4
             collision = -3.0                   # boosted (was -1.0): kill leg-leg self-collision in air

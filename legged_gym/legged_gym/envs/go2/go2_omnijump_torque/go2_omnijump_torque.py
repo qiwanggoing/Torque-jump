@@ -812,9 +812,9 @@ class GO2OmniJumpTorque(GO2Torque):
             & (base_height > min_height)
         )
         projected = base_height + torch.clamp(vz, min=0.0) ** 2 / (2.0 * 9.81)
-        target = self.commands[:, 3]
-        sigma = max(float(getattr(self.cfg.rewards, "projected_peak_sigma", 0.05)), 1e-4)
-        reward = torch.exp(-torch.square(projected - target) / sigma)
+        target = self.commands[:, 3].clamp(min=0.1)
+        progress = torch.clamp(projected / target, 0.0, 1.0)
+        reward = progress ** 2
         return ascending.float() * reward
 
     def _reward_takeoff_impulse(self):
