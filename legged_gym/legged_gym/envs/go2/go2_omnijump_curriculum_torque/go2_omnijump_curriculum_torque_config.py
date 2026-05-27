@@ -62,7 +62,7 @@ class GO2OmniJumpCurriculumTorqueCfg(GO2OmniJumpTorqueCfg):
         task_max_height_sigma = 0.05
         height_tracking_sigma = 0.05
         tracking_linear_velocity_all_time = False
-        landing_buffer_steps = 400   # 2s @ 0.005s/step: must survive 2s after landing to get successful_jump reward
+        landing_buffer_steps = 100   # 0.5s @ 0.005s/step: survive 0.5s after landing for successful_jump
         stand_rearm_steps = 5
         one_jump_reward_per_episode = True
         rsi_prob = 0.2
@@ -79,7 +79,7 @@ class GO2OmniJumpCurriculumTorqueCfg(GO2OmniJumpTorqueCfg):
             takeoff_vertical_velocity = 10.0   # boosted (was 4.0): strong stance push signal — primary lever to break "don't jump" mode
             projected_peak = 15.0              # sole height tracker: compensates for disabled height_tracking + peak_height_progress
             termination = -10.0                # not in OmniNet, kept for base-contact episodes
-            orientation = -5.0                 # strong upright pull — fix airborne pitch (butt-up head-down)
+            orientation = -2.5
             collision = -3.0                   # boosted (was -1.0): kill leg-leg self-collision in air
             torques = -1e-5                    # OmniNet: -1e-5
             action_rate = -0.03                # boosted (was -0.025 → -0.08): direct twitching penalty
@@ -87,7 +87,7 @@ class GO2OmniJumpCurriculumTorqueCfg(GO2OmniJumpTorqueCfg):
             horizontal_drift = 0.0            # disabled: dense takeoff_direction subsumes this
             takeoff_direction = 3.0            # dense ascending vz/||v|| (was 80 one-shot; ~40 steps × 3.0 × 0.85 ≈ equivalent total)
             height_tracking = 0.0              # disabled: projected_peak subsumes this
-            successful_jump = 600.0
+            successful_jump = 500.0
             tracking_linear_velocity = 0.5
             tracking_angular_velocity = 0.0
             joint_angle_loaded = 0.4
