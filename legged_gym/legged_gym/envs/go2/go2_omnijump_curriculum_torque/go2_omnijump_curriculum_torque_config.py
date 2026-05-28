@@ -81,7 +81,7 @@ class GO2OmniJumpCurriculumTorqueCfg(GO2OmniJumpTorqueCfg):
             takeoff_vertical_velocity = 10.0
             projected_peak = 25.0
             termination = -10.0
-            orientation = 1.5
+            orientation = 0.8
             collision = -3.0                   # boosted (was -1.0): kill leg-leg self-collision in air
             torques = -1e-5                    # OmniNet: -1e-5
             action_rate = -0.01
