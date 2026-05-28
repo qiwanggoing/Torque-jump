@@ -76,6 +76,7 @@ class GO2OmniJumpCurriculumTorque(GO2OmniJumpTorque):
         # Stage 3 — full jump cycle
         "successful_jump": 3,
         "joint_angle_landing": 3,
+        "landing_stability": 3,
     }
 
     CURRICULUM_METRICS = (
