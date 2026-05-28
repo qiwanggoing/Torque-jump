@@ -691,12 +691,17 @@ class GO2OmniJumpTorque(GO2Torque):
         return self.torques
 
     def _update_default_joint_pd_target(self):
-        # Two-phase PD prior matching the reward design:
-        #   loaded → q_squat (fold legs during squat-down / pre-pushoff)
-        #   extended → q_ground (straight legs through pushoff / flight / landing)
-        #   non-jumping → default_dof_pos (idle standing)
+        # Phase-aligned PD prior (matches reward joint_angle_* targets):
+        #   loaded → q_squat
+        #   pushoff / landing → q_ground (default)
+        #   airborne (~prelanding) → q_air (tucked)
+        #   prelanding → q_pre (semi-extended)
+        #   non-jumping → default_dof_pos
         self.default_joint_pd_target[:] = self.q_ground_target.unsqueeze(0)
         self.default_joint_pd_target[self.phase_loaded] = self.q_squat_target.unsqueeze(0)
+        airborne_only = self.airborne & (~self.prelanding)
+        self.default_joint_pd_target[airborne_only] = self.q_air_target.unsqueeze(0)
+        self.default_joint_pd_target[self.prelanding] = self.q_pre_target.unsqueeze(0)
 
         use_default_pose = (~self.jumping_state) & (self.jump_starts <= 0.0)
         if self.cfg.commands.num_commands > 4:
