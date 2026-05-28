@@ -111,14 +111,8 @@ def play(args):
 
     # === Play-time command override (edit the number to test different jump heights) ===
     # cmd layout: [lin_vel_x, lin_vel_y, ang_vel_yaw, jump_height, jump_command]
-    # Per-task training ranges:
-    #   atanassov: jump_height = [0.6, 0.6]  (fixed — Stage 1 paper alignment)
-    #   curriculum: jump_height = [0.4, 0.7] (varied)
-    # Auto-pick the upper bound of the task's training range so cmd[3] stays in-distribution.
-    if hasattr(env_cfg.commands, "ranges") and hasattr(env_cfg.commands.ranges, "jump_height"):
-        env_cfg.test.vel[3] = float(env_cfg.commands.ranges.jump_height[1])
-    else:
-        env_cfg.test.vel[3] = 0.6
+    # 修改下面这行即可改变跳跃高度（保持在训练范围 [0.40, 0.70] 内）
+    env_cfg.test.vel[3] = 0.7
     print(f"[Play] cmd[3] (jump_height) = {float(env_cfg.test.vel[3]):.2f}")
     # ============================================================================
 

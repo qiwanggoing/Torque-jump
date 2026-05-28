@@ -502,21 +502,23 @@ class GO2OmniJumpTorque(GO2Torque):
             self.jump_evaluations += self.just_landed.float()
             self.peak_height_error_sum += peak_err * self.just_landed.float()
             self.peak_height_sum += self.peak_base_height * self.just_landed.float()
-            # Simplified: any real jump (peak above min) qualifies at impact.
-            # Target-height tracking is handled by projected_peak (continuous reward), not here.
             min_peak = float(getattr(self.cfg.rewards, "successful_jump_min_peak_height", 0.30))
             real_jump = self.peak_base_height >= min_peak
             jump_height_commanded = self.commands[:, 3] >= 0.28
             success_at_impact = self.just_landed & real_jump & jump_height_commanded
             self.pending_success |= success_at_impact
-            
+
+            # cmd-aware Gaussian height score: penalize both overshoot and undershoot
+            height_sigma = float(getattr(self.cfg.rewards, "success_height_sigma", 0.05))
+            height_score = torch.exp(-torch.square(self.peak_base_height - self.commands[:, 3]) / max(height_sigma, 1e-4))
             success_velocity_score = self._get_successful_jump_velocity_score()
             if not getattr(self.cfg.rewards, "success_use_velocity_score", False):
                 success_velocity_score = torch.ones_like(success_velocity_score)
-            
+            combined_score = height_score * success_velocity_score
+
             self.pending_velocity_score = torch.where(
                 success_at_impact,
-                success_velocity_score,
+                combined_score,
                 self.pending_velocity_score,
             )
 
@@ -797,14 +799,14 @@ class GO2OmniJumpTorque(GO2Torque):
         return torch.mean((~self._get_contact_state()).float(), dim=1)
 
     def _reward_takeoff_vertical_velocity(self):
-        # Active during ascent (vz > 0) with upright-ish base — base_height floor blocks the
-        # "flop on side and twitch" local optimum that abused unconditional ascending rewards.
         base_height = self.root_states[:, 2]
         min_height = float(getattr(self.cfg.rewards, "ascending_min_base_height", 0.18))
         vz = self.root_states[:, 9]
         ascending = self.jumping_state & (vz > 0) & (~self.has_landed) & (base_height > min_height)
-        target_vel = max(float(self.cfg.rewards.takeoff_velocity_target), 1e-3)
-        upward_velocity = torch.clamp(vz / target_vel, min=0.0, max=1.0)
+        # cmd-aware target: vz needed to reach cmd[3] from standing height
+        h_stand = float(getattr(self.cfg.rewards, "stance_standing_height", 0.30))
+        target_vz = torch.sqrt((2.0 * 9.81 * (self.commands[:, 3] - h_stand)).clamp(min=0.01))
+        upward_velocity = torch.clamp(vz / target_vz, min=0.0, max=1.0)
         return ascending.float() * upward_velocity
 
     def _reward_projected_peak(self):
