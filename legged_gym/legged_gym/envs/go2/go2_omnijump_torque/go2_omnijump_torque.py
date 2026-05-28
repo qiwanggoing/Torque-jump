@@ -36,6 +36,7 @@ class GO2OmniJumpTorque(GO2Torque):
         "takeoff_direction",          # one-shot at just_took_off: vz / ||v|| → encourage vertical takeoff
         "default_pos",                # mygo2jump-style L1 toward q_squat (whole-body squat bias)
         "default_hip_pos",            # mygo2jump-style exp reward for hip joints near default
+        "landing_stability",          # Atanassov-style: penalize lin/ang vel during landing buffer
     }
 
     def _prepare_reward_function(self):

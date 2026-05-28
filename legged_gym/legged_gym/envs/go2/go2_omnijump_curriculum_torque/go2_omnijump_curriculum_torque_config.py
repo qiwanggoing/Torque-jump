@@ -97,7 +97,8 @@ class GO2OmniJumpCurriculumTorqueCfg(GO2OmniJumpTorqueCfg):
             aerial_dof_acc = -1e-6             # airborne-only joint accel penalty (4× global dof_acc); targets in-air twitching/flailing observed after PD fades out
             joint_angle_aerial = 0.4
             joint_angle_prelanding = 0.4
-            joint_angle_landing = 0.0          # superseded by joint_angle_extended
+            joint_angle_landing = 0.4
+            landing_stability = 1.0
 
     class logging(GO2OmniJumpTorqueCfg.logging):
         print_episode_keys = [
