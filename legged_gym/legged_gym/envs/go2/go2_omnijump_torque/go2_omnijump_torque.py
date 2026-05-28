@@ -501,21 +501,21 @@ class GO2OmniJumpTorque(GO2Torque):
             self.jump_evaluations += self.just_landed.float()
             self.peak_height_error_sum += peak_err * self.just_landed.float()
             self.peak_height_sum += self.peak_base_height * self.just_landed.float()
+            # Simplified: any real jump (peak above min) qualifies at impact.
+            # Target-height tracking is handled by projected_peak (continuous reward), not here.
             min_peak = float(getattr(self.cfg.rewards, "successful_jump_min_peak_height", 0.30))
             real_jump = self.peak_base_height >= min_peak
             jump_height_commanded = self.commands[:, 3] >= 0.28
             success_at_impact = self.just_landed & real_jump & jump_height_commanded
             self.pending_success |= success_at_impact
-
-            height_score = torch.clamp(self.peak_base_height / self.commands[:, 3].clamp(min=0.1), 0.0, 1.0)
+            
             success_velocity_score = self._get_successful_jump_velocity_score()
             if not getattr(self.cfg.rewards, "success_use_velocity_score", False):
                 success_velocity_score = torch.ones_like(success_velocity_score)
-            combined_score = height_score * success_velocity_score
-
+            
             self.pending_velocity_score = torch.where(
                 success_at_impact,
-                combined_score,
+                success_velocity_score,
                 self.pending_velocity_score,
             )
 
@@ -748,11 +748,10 @@ class GO2OmniJumpTorque(GO2Torque):
             jump_cmd_active = torch.ones(self.num_envs, dtype=torch.bool, device=self.device)
 
         squat_height = float(getattr(self.cfg.rewards, "stance_squat_height", 0.20))
-        vz = self.root_states[:, 9]
 
         target = torch.full_like(self.root_states[:, 2], squat_height)
-        ascending_or_flight = (self.has_taken_off & (~self.has_landed)) | (self.jumping_state & (vz > 0))
-        target = torch.where(ascending_or_flight, self.commands[:, 3], target)
+        flight_mask = self.has_taken_off & (~self.has_landed)
+        target = torch.where(flight_mask, self.commands[:, 3], target)
 
         active = jump_cmd_active.float()
         height_error = torch.square(self.root_states[:, 2] - target)
@@ -803,19 +802,23 @@ class GO2OmniJumpTorque(GO2Torque):
         return ascending.float() * upward_velocity
 
     def _reward_projected_peak(self):
+        # Olsen 2025: project peak height from current state (h + vz^2/2g) and reward closeness to target.
+        # Gated on has_taken_off: ballistic formula h+vz²/2g only holds in free flight; allowing it in
+        # stance lets policy game by spiking vz while feet still push the ground (no real liftoff).
         base_height = self.root_states[:, 2]
         min_height = float(getattr(self.cfg.rewards, "ascending_min_base_height", 0.18))
         vz = self.root_states[:, 9]
         ascending = (
             self.jumping_state
+            & self.has_taken_off
             & (vz > 0)
             & (~self.has_landed)
             & (base_height > min_height)
         )
         projected = base_height + torch.clamp(vz, min=0.0) ** 2 / (2.0 * 9.81)
-        target = self.commands[:, 3].clamp(min=0.1)
-        progress = torch.clamp(projected / target, 0.0, 1.0)
-        reward = progress ** 2
+        target = self.commands[:, 3]
+        sigma = max(float(getattr(self.cfg.rewards, "projected_peak_sigma", 0.05)), 1e-4)
+        reward = torch.exp(-torch.square(projected - target) / sigma)
         return ascending.float() * reward
 
     def _reward_takeoff_impulse(self):
@@ -835,7 +838,8 @@ class GO2OmniJumpTorque(GO2Torque):
         return active.float() * support * (0.5 * force_reward + 0.5 * vertical_acc)
 
     def _reward_all_feet_airborne(self):
-        return self.airborne.float()
+        height_progress = self._get_height_progress()
+        return self.airborne.float() * (0.25 + 0.75 * height_progress)
 
     def _get_successful_jump_velocity_score(self):
         min_time = max(float(getattr(self.cfg.rewards, "success_velocity_min_airborne_time", 0.08)), 1e-3)
@@ -979,10 +983,6 @@ class GO2OmniJumpTorque(GO2Torque):
             * (0.20 + 0.80 * body_clear_quality)
             * (0.20 + 0.80 * height_gate)
         )
-
-    def _reward_orientation(self):
-        orientation_error = torch.sum(torch.square(self.projected_gravity[:, :2]), dim=1)
-        return torch.exp(-6.0 * orientation_error)
 
     def _reward_horizontal_drift(self):
         # Penalize world-frame horizontal velocity through the entire jump cycle (before landing).

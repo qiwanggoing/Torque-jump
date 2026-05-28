@@ -57,14 +57,12 @@ class GO2OmniJumpCurriculumTorqueCfg(GO2OmniJumpTorqueCfg):
         pose_tracking_sigma = 0.20
         prelanding_tracking_sigma = 0.20
         joint_symmetry_tracking_sigma = 0.25
-        successful_jump_min_peak_height = 0.30
         success_height_tolerance = 0.10
         success_use_velocity_score = False
-        projected_peak_sigma = 0.10
         task_max_height_sigma = 0.05
         height_tracking_sigma = 0.05
         tracking_linear_velocity_all_time = False
-        landing_buffer_steps = 25
+        landing_buffer_steps = 25    # was 50; shorter buffer = give policy faster credit for surviving landing
         stand_rearm_steps = 5
         one_jump_reward_per_episode = True
         rsi_prob = 0.2
@@ -75,28 +73,28 @@ class GO2OmniJumpCurriculumTorqueCfg(GO2OmniJumpTorqueCfg):
         post_jump_stand_steps = 300   # was 80 (~0.8s); extended to 3s so robot trains an explicit autonomous-stand phase under PD fade conditions
 
         class scales(GO2OmniJumpTorqueCfg.rewards.scales):
-            maintain_contact = 0.0
-            peak_height_progress = 5.0
-            all_feet_airborne = 0.0
-            takeoff_vertical_velocity = 10.0
-            projected_peak = 25.0
-            termination = -10.0
-            orientation = 0.8
+            maintain_contact = 0.10            # moderate: standing anchor without dominating takeoff signal
+            peak_height_progress = 0.0         # disabled: projected_peak subsumes this
+            all_feet_airborne = 2.0            # boosted (was 1.0): bigger airborne reward
+            takeoff_vertical_velocity = 10.0   # boosted (was 4.0): strong stance push signal — primary lever to break "don't jump" mode
+            projected_peak = 15.0              # sole height tracker: compensates for disabled height_tracking + peak_height_progress
+            termination = -10.0                # not in OmniNet, kept for base-contact episodes
+            orientation = -1.6                 # boosted (was -0.8): stronger upright pull during all phases
             collision = -3.0                   # boosted (was -1.0): kill leg-leg self-collision in air
             torques = -1e-5                    # OmniNet: -1e-5
-            action_rate = -0.01
+            action_rate = -0.03                # boosted (was -0.025 → -0.08): direct twitching penalty
             dof_acc = -2.5e-7                  # restored to original: was over-penalizing fast (smooth) motion
             horizontal_drift = 0.0            # disabled: dense takeoff_direction subsumes this
             takeoff_direction = 3.0            # dense ascending vz/||v|| (was 80 one-shot; ~40 steps × 3.0 × 0.85 ≈ equivalent total)
-            height_tracking = 1.0
-            successful_jump = 800.0
+            height_tracking = 0.0              # disabled: projected_peak subsumes this
+            successful_jump = 300.0            # boosted (was 200): make completion reward dominate to overcome ep-short collapse
             tracking_linear_velocity = 0.5
             tracking_angular_velocity = 0.0
             joint_angle_loaded = 0.4
             joint_angle_extended = 0.0
-            default_pos = -0.15
-            default_hip_pos = 0.1
-            aerial_dof_acc = -5e-7
+            default_pos = -0.3                 # mygo2jump weight; now spans ALL 12 joints (fix: was hip-only and 1/3 weight). Strong pose anchor toward default standing pose — critical for surviving PD=0 stand.
+            default_hip_pos = 0.3              # mygo2jump-style exp keep hip joints near default (no outward/inward drift)
+            aerial_dof_acc = -1e-6             # airborne-only joint accel penalty (4× global dof_acc); targets in-air twitching/flailing observed after PD fades out
             joint_angle_aerial = 0.4
             joint_angle_prelanding = 0.4
             joint_angle_landing = 0.0          # superseded by joint_angle_extended
@@ -149,4 +147,4 @@ class GO2OmniJumpCurriculumTorqueCfgPPO(GO2OmniJumpTorqueCfgPPO):
         load_run = -1
         checkpoint = -1
         resume_path = None
-        max_iterations = 8000
+        max_iterations = 6000
