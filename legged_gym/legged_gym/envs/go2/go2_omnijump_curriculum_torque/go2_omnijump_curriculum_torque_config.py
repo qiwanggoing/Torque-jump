@@ -79,9 +79,9 @@ class GO2OmniJumpCurriculumTorqueCfg(GO2OmniJumpTorqueCfg):
             peak_height_progress = 5.0
             all_feet_airborne = 0.0
             takeoff_vertical_velocity = 10.0
-            projected_peak = 20.0
+            projected_peak = 25.0
             termination = -10.0
-            orientation = 0.4
+            orientation = 1.5
             collision = -3.0                   # boosted (was -1.0): kill leg-leg self-collision in air
             torques = -1e-5                    # OmniNet: -1e-5
             action_rate = -0.03
@@ -89,7 +89,7 @@ class GO2OmniJumpCurriculumTorqueCfg(GO2OmniJumpTorqueCfg):
             horizontal_drift = 0.0            # disabled: dense takeoff_direction subsumes this
             takeoff_direction = 3.0            # dense ascending vz/||v|| (was 80 one-shot; ~40 steps × 3.0 × 0.85 ≈ equivalent total)
             height_tracking = 1.0
-            successful_jump = 500.0
+            successful_jump = 800.0
             tracking_linear_velocity = 0.5
             tracking_angular_velocity = 0.0
             joint_angle_loaded = 0.4
