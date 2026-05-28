@@ -748,10 +748,11 @@ class GO2OmniJumpTorque(GO2Torque):
             jump_cmd_active = torch.ones(self.num_envs, dtype=torch.bool, device=self.device)
 
         squat_height = float(getattr(self.cfg.rewards, "stance_squat_height", 0.20))
+        vz = self.root_states[:, 9]
 
         target = torch.full_like(self.root_states[:, 2], squat_height)
-        flight_mask = self.has_taken_off & (~self.has_landed)
-        target = torch.where(flight_mask, self.commands[:, 3], target)
+        ascending_or_flight = (self.has_taken_off & (~self.has_landed)) | (self.jumping_state & (vz > 0))
+        target = torch.where(ascending_or_flight, self.commands[:, 3], target)
 
         active = jump_cmd_active.float()
         height_error = torch.square(self.root_states[:, 2] - target)
