@@ -510,7 +510,14 @@ class GO2OmniJumpTorque(GO2Torque):
             self.pending_success |= success_at_impact
 
             # cmd-aware Gaussian height score: penalize both overshoot and undershoot
-            height_sigma = float(getattr(self.cfg.rewards, "success_height_sigma", 0.05))
+            # Sigma curriculum: widen early (learn to jump) then narrow late (force tracking)
+            sigma_initial = float(getattr(self.cfg.rewards, "success_height_sigma_initial", -1.0))
+            if sigma_initial > 0:
+                sigma_final = float(getattr(self.cfg.rewards, "success_height_sigma_final", sigma_initial))
+                sigma_switch = float(getattr(self.cfg.rewards, "success_height_sigma_switch_step", 0.0))
+                height_sigma = sigma_final if self.step_count >= sigma_switch else sigma_initial
+            else:
+                height_sigma = float(getattr(self.cfg.rewards, "success_height_sigma", 0.05))
             height_score = torch.exp(-torch.square(self.peak_base_height - self.commands[:, 3]) / max(height_sigma, 1e-4))
             success_velocity_score = self._get_successful_jump_velocity_score()
             if not getattr(self.cfg.rewards, "success_use_velocity_score", False):

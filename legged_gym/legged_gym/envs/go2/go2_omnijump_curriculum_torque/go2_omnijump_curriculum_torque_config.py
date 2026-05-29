@@ -43,9 +43,9 @@ class GO2OmniJumpCurriculumTorqueCfg(GO2OmniJumpTorqueCfg):
 
     class commands(GO2OmniJumpTorqueCfg.commands):
         single_jump_command_prob = 1.0
-        # Curriculum: shift jump_height lower bound after step_count threshold
-        jump_height_curriculum_switch_step = 240000   # ~iter 2500 (PD fade mid-period)
-        jump_height_curriculum_lower_after = 0.55      # narrow range to [0.55, 0.70] to force higher jumps
+        # Curriculum on cmd range disabled — using sigma curriculum instead (see rewards class)
+        jump_height_curriculum_switch_step = -1.0      # disabled
+        jump_height_curriculum_lower_after = 0.55      # unused when switch_step < 0
         class ranges(GO2OmniJumpTorqueCfg.commands.ranges):
             jump_height = [0.40, 0.70]
             lin_vel_x = [0.0, 0.0]
@@ -61,6 +61,10 @@ class GO2OmniJumpCurriculumTorqueCfg(GO2OmniJumpTorqueCfg):
         prelanding_tracking_sigma = 0.20
         joint_symmetry_tracking_sigma = 0.25
         success_height_tolerance = 0.10
+        # Sigma curriculum: lenient early (learn to jump), strict late (force tracking)
+        success_height_sigma_initial = 0.05
+        success_height_sigma_final = 0.04          # widened from 0.025: avoid steep reward cliff
+        success_height_sigma_switch_step = 192000   # ~iter 2000 (tighter tracking demand kicks in)
         success_use_velocity_score = False
         task_max_height_sigma = 0.05
         height_tracking_sigma = 0.05
@@ -85,19 +89,19 @@ class GO2OmniJumpCurriculumTorqueCfg(GO2OmniJumpTorqueCfg):
             orientation = -1.6                 # boosted (was -0.8): stronger upright pull during all phases
             collision = -3.0                   # boosted (was -1.0): kill leg-leg self-collision in air
             torques = -1e-5                    # OmniNet: -1e-5
-            action_rate = -0.015               # halved from -0.03: allow more explosive pushoff
+            action_rate = -0.015               # revert: -0.005 caused policy to flail (action_rate contribution +54%)
             dof_acc = -2.5e-7                  # restored to original: was over-penalizing fast (smooth) motion
             horizontal_drift = 0.0            # disabled: dense takeoff_direction subsumes this
             takeoff_direction = 3.0            # dense ascending vz/||v|| (was 80 one-shot; ~40 steps × 3.0 × 0.85 ≈ equivalent total)
             height_tracking = 0.0              # disabled: projected_peak subsumes this
-            successful_jump = 300.0            # boosted (was 200): make completion reward dominate to overcome ep-short collapse
+            successful_jump = 400.0            # 600 was too sharp, created reward cliff at peak ≠ cmd
             tracking_linear_velocity = 0.5
             tracking_angular_velocity = 0.0
             joint_angle_loaded = 0.4
             joint_angle_extended = 0.0
-            default_pos = -0.3                 # mygo2jump weight; now spans ALL 12 joints (fix: was hip-only and 1/3 weight). Strong pose anchor toward default standing pose — critical for surviving PD=0 stand.
+            default_pos = -0.2                 # reduced from -0.3: less penalty for motion, give policy room to jump
             default_hip_pos = 0.3              # mygo2jump-style exp keep hip joints near default (no outward/inward drift)
-            aerial_dof_acc = -1e-6             # airborne-only joint accel penalty (4× global dof_acc); targets in-air twitching/flailing observed after PD fades out
+            aerial_dof_acc = -2e-6             # doubled to suppress in-air shaking (was -1e-6)
             joint_angle_aerial = 0.4
             joint_angle_prelanding = 0.4
             joint_angle_landing = 0.4
