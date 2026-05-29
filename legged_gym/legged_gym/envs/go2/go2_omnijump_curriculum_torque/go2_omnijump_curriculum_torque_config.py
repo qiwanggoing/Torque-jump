@@ -149,4 +149,4 @@ class GO2OmniJumpCurriculumTorqueCfgPPO(GO2OmniJumpTorqueCfgPPO):
         load_run = -1
         checkpoint = -1
         resume_path = None
-        max_iterations = 6000
+        max_iterations = 24000   # 4× compensation for 8× fewer envs (4096 → 512)
