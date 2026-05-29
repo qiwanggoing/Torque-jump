@@ -111,8 +111,24 @@ class GO2OmniJumpCurriculumTorqueCfg(GO2OmniJumpTorqueCfg):
             landing_stability = 1.0
 
     class logging(GO2OmniJumpTorqueCfg.logging):
-        # Setting to None prints ALL episode keys (every active reward + metrics)
-        print_episode_keys = None
+        # Print only active rewards (zero-weight ones auto-filtered) + key jump metrics.
+        # Disabled curriculum_* metrics by not listing them.
+        print_episode_keys = [
+            # All possible reward keys — only active ones (weight != 0) appear in log
+            "rew_height_tracking", "rew_peak_height_progress", "rew_all_feet_airborne",
+            "rew_maintain_contact", "rew_takeoff_vertical_velocity", "rew_projected_peak",
+            "rew_successful_jump", "rew_orientation", "rew_joint_angle_loaded",
+            "rew_joint_angle_extended", "rew_joint_angle_aerial", "rew_joint_angle_prelanding",
+            "rew_joint_angle_landing", "rew_collision", "rew_termination",
+            "rew_torques", "rew_action_rate", "rew_dof_acc", "rew_aerial_dof_acc",
+            "rew_horizontal_drift", "rew_takeoff_direction",
+            "rew_default_pos", "rew_default_hip_pos", "rew_landing_stability",
+            "rew_motor_fatigue", "rew_pitch", "rew_tracking_linear_velocity",
+            "rew_tracking_angular_velocity",
+            # Key jump metrics
+            "jump_flight_rate", "jump_landing_rate", "jump_completed_cycles",
+            "successful_jump_rate", "mean_peak_height", "peak_height_error",
+        ]
 
     class test(GO2OmniJumpTorqueCfg.test):
         vel = GO2OmniJumpTorqueCfg.test.vel.clone()
