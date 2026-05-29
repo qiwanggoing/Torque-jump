@@ -383,7 +383,8 @@ class GO2OmniJumpTorque(GO2Torque):
         self.landing_step_counter[env_ids] = 0
         self.airborne_time[env_ids] = 0.0
         self.stand_step_counter[env_ids] = 0
-        self.peak_base_height[env_ids] = self.root_states[env_ids, 2]
+        # Don't reset peak_base_height here — _start_jump resets it on the next jump.
+        # Keeping it lets play.py and metrics read the actual peak after the cycle ends.
         self.landing_min_height[env_ids] = self.root_states[env_ids, 2]
         if completed:
             self.jump_completed_cycles[env_ids] += 1.0

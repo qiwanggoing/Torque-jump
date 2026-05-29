@@ -43,6 +43,9 @@ class GO2OmniJumpCurriculumTorqueCfg(GO2OmniJumpTorqueCfg):
 
     class commands(GO2OmniJumpTorqueCfg.commands):
         single_jump_command_prob = 1.0
+        # Curriculum: shift jump_height lower bound after step_count threshold
+        jump_height_curriculum_switch_step = 240000   # ~iter 2500 (PD fade mid-period)
+        jump_height_curriculum_lower_after = 0.55      # narrow range to [0.55, 0.70] to force higher jumps
         class ranges(GO2OmniJumpTorqueCfg.commands.ranges):
             jump_height = [0.40, 0.70]
             lin_vel_x = [0.0, 0.0]
@@ -82,7 +85,7 @@ class GO2OmniJumpCurriculumTorqueCfg(GO2OmniJumpTorqueCfg):
             orientation = -1.6                 # boosted (was -0.8): stronger upright pull during all phases
             collision = -3.0                   # boosted (was -1.0): kill leg-leg self-collision in air
             torques = -1e-5                    # OmniNet: -1e-5
-            action_rate = -0.03                # boosted (was -0.025 → -0.08): direct twitching penalty
+            action_rate = -0.015               # halved from -0.03: allow more explosive pushoff
             dof_acc = -2.5e-7                  # restored to original: was over-penalizing fast (smooth) motion
             horizontal_drift = 0.0            # disabled: dense takeoff_direction subsumes this
             takeoff_direction = 3.0            # dense ascending vz/||v|| (was 80 one-shot; ~40 steps × 3.0 × 0.85 ≈ equivalent total)
