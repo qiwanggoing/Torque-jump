@@ -37,6 +37,8 @@ class GO2OmniJumpTorque(GO2Torque):
         "default_pos",                # mygo2jump-style L1 toward q_squat (whole-body squat bias)
         "default_hip_pos",            # mygo2jump-style exp reward for hip joints near default
         "landing_stability",          # Atanassov-style: penalize lin/ang vel during landing buffer
+        "motor_fatigue",              # SATA-style physics-based penalty for sustained torque
+        "pitch",                      # SATA-style single-axis penalty for forward/backward tilt
     }
 
     def _prepare_reward_function(self):
@@ -999,6 +1001,10 @@ class GO2OmniJumpTorque(GO2Torque):
             * (0.20 + 0.80 * body_clear_quality)
             * (0.20 + 0.80 * height_gate)
         )
+
+    def _reward_pitch(self):
+        # SATA-style single-axis penalty for forward/backward tilt (head down/butt up)
+        return torch.abs(self.projected_gravity[:, 0])
 
     def _reward_horizontal_drift(self):
         # Penalize world-frame horizontal velocity through the entire jump cycle (before landing).

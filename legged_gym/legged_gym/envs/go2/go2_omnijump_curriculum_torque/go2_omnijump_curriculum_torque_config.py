@@ -61,6 +61,7 @@ class GO2OmniJumpCurriculumTorqueCfg(GO2OmniJumpTorqueCfg):
         prelanding_tracking_sigma = 0.20
         joint_symmetry_tracking_sigma = 0.25
         success_height_tolerance = 0.10
+        successful_jump_min_peak_height = 0.35   # above standing (~0.336) to prevent "fake jump" exploit
         # Sigma curriculum: lenient early (learn to jump), strict late (force tracking)
         success_height_sigma_initial = 0.05
         success_height_sigma_final = 0.04          # widened from 0.025: avoid steep reward cliff
@@ -80,16 +81,18 @@ class GO2OmniJumpCurriculumTorqueCfg(GO2OmniJumpTorqueCfg):
         post_jump_stand_steps = 300   # was 80 (~0.8s); extended to 3s so robot trains an explicit autonomous-stand phase under PD fade conditions
 
         class scales(GO2OmniJumpTorqueCfg.rewards.scales):
-            maintain_contact = 0.10            # moderate: standing anchor without dominating takeoff signal
+            maintain_contact = 0.0             # cut: SATA-style minimalism (not used in walking task either)
             peak_height_progress = 0.0         # disabled: projected_peak subsumes this
             all_feet_airborne = 2.0            # boosted (was 1.0): bigger airborne reward
             takeoff_vertical_velocity = 10.0   # boosted (was 4.0): strong stance push signal — primary lever to break "don't jump" mode
-            projected_peak = 15.0              # sole height tracker: compensates for disabled height_tracking + peak_height_progress
+            projected_peak = 20.0              # boosted: dominant height-tracking signal
             termination = -10.0                # not in OmniNet, kept for base-contact episodes
-            orientation = -1.6                 # boosted (was -0.8): stronger upright pull during all phases
+            orientation = 0.0                 # boosted (was -0.8): stronger upright pull during all phases
             collision = -3.0                   # boosted (was -1.0): kill leg-leg self-collision in air
-            torques = -1e-5                    # OmniNet: -1e-5
-            action_rate = -0.015               # revert: -0.005 caused policy to flail (action_rate contribution +54%)
+            torques = 0.0                      # cut: SATA uses motor_fatigue instead
+            action_rate = 0.0                  # cut: SATA doesn't use this; activation low-pass already smooths
+            motor_fatigue = -0.005             # 10× lighter than SATA walking: jump has shorter sustained torque
+            pitch = -3.0                       # SATA-style single-axis penalty for forward/backward tilt
             dof_acc = -2.5e-7                  # restored to original: was over-penalizing fast (smooth) motion
             horizontal_drift = 0.0            # disabled: dense takeoff_direction subsumes this
             takeoff_direction = 3.0            # dense ascending vz/||v|| (was 80 one-shot; ~40 steps × 3.0 × 0.85 ≈ equivalent total)
@@ -97,7 +100,7 @@ class GO2OmniJumpCurriculumTorqueCfg(GO2OmniJumpTorqueCfg):
             successful_jump = 400.0            # 600 was too sharp, created reward cliff at peak ≠ cmd
             tracking_linear_velocity = 0.5
             tracking_angular_velocity = 0.0
-            joint_angle_loaded = 0.4
+            joint_angle_loaded = 0.0           # cut: phase_loaded window too short, contribution always 0
             joint_angle_extended = 0.0
             default_pos = -0.2                 # reduced from -0.3: less penalty for motion, give policy room to jump
             default_hip_pos = 0.3              # mygo2jump-style exp keep hip joints near default (no outward/inward drift)
@@ -108,33 +111,8 @@ class GO2OmniJumpCurriculumTorqueCfg(GO2OmniJumpTorqueCfg):
             landing_stability = 1.0
 
     class logging(GO2OmniJumpTorqueCfg.logging):
-        print_episode_keys = [
-            "rew_height_tracking",
-            "rew_peak_height_progress",
-            "rew_all_feet_airborne",
-            "rew_maintain_contact",
-            "rew_takeoff_vertical_velocity",
-            "rew_projected_peak",
-            "rew_successful_jump",
-            "rew_orientation",
-            "rew_joint_angle_loaded",
-            "rew_joint_angle_extended",
-            "rew_collision",
-            "rew_termination",
-            "rew_torques",
-            "rew_action_rate",
-            "rew_dof_acc",
-            "rew_aerial_dof_acc",
-            "rew_horizontal_drift",
-            "rew_takeoff_direction",
-            "rew_default_pos",
-            "rew_default_hip_pos",
-            "jump_flight_rate",
-            "jump_landing_rate",
-            "jump_completed_cycles",
-            "successful_jump_rate",
-            "mean_peak_height",
-        ]
+        # Setting to None prints ALL episode keys (every active reward + metrics)
+        print_episode_keys = None
 
     class test(GO2OmniJumpTorqueCfg.test):
         vel = GO2OmniJumpTorqueCfg.test.vel.clone()

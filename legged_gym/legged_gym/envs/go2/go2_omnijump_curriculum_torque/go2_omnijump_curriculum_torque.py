@@ -77,6 +77,9 @@ class GO2OmniJumpCurriculumTorque(GO2OmniJumpTorque):
         "successful_jump": 3,
         "joint_angle_landing": 3,
         "landing_stability": 3,
+        # Stage 0 — safety / regularization
+        "motor_fatigue": 0,
+        "pitch": 0,
     }
 
     CURRICULUM_METRICS = (
