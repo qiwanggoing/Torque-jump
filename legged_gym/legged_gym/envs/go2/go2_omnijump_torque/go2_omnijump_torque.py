@@ -37,8 +37,6 @@ class GO2OmniJumpTorque(GO2Torque):
         "default_pos",                # mygo2jump-style L1 toward q_squat (whole-body squat bias)
         "default_hip_pos",            # mygo2jump-style exp reward for hip joints near default
         "landing_stability",          # Atanassov-style: penalize lin/ang vel during landing buffer
-        "motor_fatigue",              # SATA-style physics-based penalty for sustained torque
-        "pitch",                      # SATA-style single-axis penalty for forward/backward tilt
     }
 
     def _prepare_reward_function(self):
@@ -385,8 +383,7 @@ class GO2OmniJumpTorque(GO2Torque):
         self.landing_step_counter[env_ids] = 0
         self.airborne_time[env_ids] = 0.0
         self.stand_step_counter[env_ids] = 0
-        # Don't reset peak_base_height here — _start_jump resets it on the next jump.
-        # Keeping it lets play.py and metrics read the actual peak after the cycle ends.
+        self.peak_base_height[env_ids] = self.root_states[env_ids, 2]
         self.landing_min_height[env_ids] = self.root_states[env_ids, 2]
         if completed:
             self.jump_completed_cycles[env_ids] += 1.0
@@ -512,14 +509,7 @@ class GO2OmniJumpTorque(GO2Torque):
             self.pending_success |= success_at_impact
 
             # cmd-aware Gaussian height score: penalize both overshoot and undershoot
-            # Sigma curriculum: widen early (learn to jump) then narrow late (force tracking)
-            sigma_initial = float(getattr(self.cfg.rewards, "success_height_sigma_initial", -1.0))
-            if sigma_initial > 0:
-                sigma_final = float(getattr(self.cfg.rewards, "success_height_sigma_final", sigma_initial))
-                sigma_switch = float(getattr(self.cfg.rewards, "success_height_sigma_switch_step", 0.0))
-                height_sigma = sigma_final if self.step_count >= sigma_switch else sigma_initial
-            else:
-                height_sigma = float(getattr(self.cfg.rewards, "success_height_sigma", 0.05))
+            height_sigma = float(getattr(self.cfg.rewards, "success_height_sigma", 0.05))
             height_score = torch.exp(-torch.square(self.peak_base_height - self.commands[:, 3]) / max(height_sigma, 1e-4))
             success_velocity_score = self._get_successful_jump_velocity_score()
             if not getattr(self.cfg.rewards, "success_use_velocity_score", False):
@@ -1001,10 +991,6 @@ class GO2OmniJumpTorque(GO2Torque):
             * (0.20 + 0.80 * body_clear_quality)
             * (0.20 + 0.80 * height_gate)
         )
-
-    def _reward_pitch(self):
-        # SATA-style single-axis penalty for forward/backward tilt (head down/butt up)
-        return torch.abs(self.projected_gravity[:, 0])
 
     def _reward_horizontal_drift(self):
         # Penalize world-frame horizontal velocity through the entire jump cycle (before landing).

@@ -77,9 +77,6 @@ class GO2OmniJumpCurriculumTorque(GO2OmniJumpTorque):
         "successful_jump": 3,
         "joint_angle_landing": 3,
         "landing_stability": 3,
-        # Stage 0 — safety / regularization
-        "motor_fatigue": 0,
-        "pitch": 0,
     }
 
     CURRICULUM_METRICS = (
@@ -253,22 +250,9 @@ class GO2OmniJumpCurriculumTorque(GO2OmniJumpTorque):
             + metric.get("rew_default_hip_pos", 0.0)
         )
 
-    def _apply_jump_height_curriculum(self):
-        # Shift the lower bound of jump_height after a step threshold to force higher jumps.
-        switch_step = float(getattr(self.cfg.commands, "jump_height_curriculum_switch_step", -1.0))
-        if switch_step < 0:
-            return
-        original_lower = float(self.cfg.commands.ranges.jump_height[0])
-        new_lower = float(getattr(self.cfg.commands, "jump_height_curriculum_lower_after", 0.55))
-        if self.step_count >= switch_step:
-            self.command_ranges["jump_height"][0] = new_lower
-        else:
-            self.command_ranges["jump_height"][0] = original_lower
-
     def _resample_commands(self, env_ids):
         if len(env_ids) == 0:
             return
-        self._apply_jump_height_curriculum()
         if not getattr(self.cfg.curriculum, "enabled", False):
             return super()._resample_commands(env_ids)
 
