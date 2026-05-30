@@ -63,9 +63,9 @@ class GO2OmniJumpCurriculumTorqueCfg(GO2OmniJumpTorqueCfg):
         success_height_tolerance = 0.10
         successful_jump_min_peak_height = 0.35   # above standing (~0.336) to prevent "fake jump" exploit
         # Sigma curriculum: lenient early (learn to jump), strict late (force tracking)
-        success_height_sigma_initial = 0.05
-        success_height_sigma_final = 0.04          # widened from 0.025: avoid steep reward cliff
-        success_height_sigma_switch_step = 192000   # ~iter 2000 (tighter tracking demand kicks in)
+        success_height_sigma_initial = 0.08         # widened: avoid steep cliff at peak ≠ cmd
+        success_height_sigma_final = 0.08           # keep same (curriculum disabled)
+        success_height_sigma_switch_step = 192000   # unused when initial == final
         success_use_velocity_score = False
         task_max_height_sigma = 0.05
         height_tracking_sigma = 0.05
