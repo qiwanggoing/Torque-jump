@@ -81,7 +81,7 @@ class GO2OmniJumpCurriculumTorqueCfg(GO2OmniJumpTorqueCfg):
         post_jump_stand_steps = 300   # was 80 (~0.8s); extended to 3s so robot trains an explicit autonomous-stand phase under PD fade conditions
 
         class scales(GO2OmniJumpTorqueCfg.rewards.scales):
-            maintain_contact = 0.0             # cut: SATA-style minimalism (not used in walking task either)
+            maintain_contact = 0.10            # restored: needed for standing stability
             peak_height_progress = 0.0         # disabled: projected_peak subsumes this
             all_feet_airborne = 2.0            # boosted (was 1.0): bigger airborne reward
             takeoff_vertical_velocity = 10.0   # boosted (was 4.0): strong stance push signal — primary lever to break "don't jump" mode
@@ -92,7 +92,7 @@ class GO2OmniJumpCurriculumTorqueCfg(GO2OmniJumpTorqueCfg):
             torques = 0.0                      # cut: SATA uses motor_fatigue instead
             action_rate = 0.0                  # cut: SATA doesn't use this; activation low-pass already smooths
             motor_fatigue = -0.005             # 10× lighter than SATA walking: jump has shorter sustained torque
-            pitch = -3.0                       # SATA-style single-axis penalty for forward/backward tilt
+            pitch = -1.0                       # reduced from -3.0: was too punishing
             dof_acc = -2.5e-7                  # restored to original: was over-penalizing fast (smooth) motion
             horizontal_drift = 0.0            # disabled: dense takeoff_direction subsumes this
             takeoff_direction = 3.0            # dense ascending vz/||v|| (was 80 one-shot; ~40 steps × 3.0 × 0.85 ≈ equivalent total)
