@@ -5,7 +5,7 @@ from legged_gym.envs.go2.go2_torque.go2_torque_config import GO2TorqueCfg, GO2To
 
 class GO2OmniJumpTorqueCfg(GO2TorqueCfg):
     class env(GO2TorqueCfg.env):
-        num_envs = 512
+        num_envs = 4096
         num_observations = 69   # +1 for pd_alpha (curriculum PD strength 0..0.5); lets policy condition on PD fade level
         num_privileged_obs = 109  # +1 propagated (privileged_obs concats obs_buf)
         num_actions = 12
