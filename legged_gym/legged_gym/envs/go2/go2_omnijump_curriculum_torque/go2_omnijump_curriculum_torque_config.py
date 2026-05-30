@@ -87,12 +87,12 @@ class GO2OmniJumpCurriculumTorqueCfg(GO2OmniJumpTorqueCfg):
             takeoff_vertical_velocity = 15.0   # 1.5× boost: make jump dominate penalties
             projected_peak = 30.0              # 1.5× boost: make jump dominate penalties
             termination = -10.0                # not in OmniNet, kept for base-contact episodes
-            orientation = 0.0                 # boosted (was -0.8): stronger upright pull during all phases
+            orientation = -1.0                 # restored from 0.0: critical for preventing Roll (side falls)
             collision = -3.0                   # boosted (was -1.0): kill leg-leg self-collision in air
-            torques = 0.0                      # cut: SATA uses motor_fatigue instead
-            action_rate = 0.0                  # cut: SATA doesn't use this; activation low-pass already smooths
+            torques = -1e-5                    # restored from 0.0: baseline torque penalty
+            action_rate = -0.015               # restored from 0.0: penalize high-frequency jitter to maintain balance
             motor_fatigue = -0.005             # 10× lighter than SATA walking: jump has shorter sustained torque
-            pitch = -1.0                       # reduced from -3.0: was too punishing
+            pitch = -0.5                       # reduced from -1.0/-3.0: orientation already covers it, keep a small L1 penalty
             dof_acc = -2.5e-7                  # restored to original: was over-penalizing fast (smooth) motion
             horizontal_drift = 0.0            # disabled: dense takeoff_direction subsumes this
             takeoff_direction = 5.0            # 1.67× boost: make jump dominate penalties
