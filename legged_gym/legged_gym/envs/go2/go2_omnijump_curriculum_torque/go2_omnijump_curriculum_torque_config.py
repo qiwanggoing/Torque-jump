@@ -58,6 +58,7 @@ class GO2OmniJumpCurriculumTorqueCfg(GO2OmniJumpTorqueCfg):
         prelanding_tracking_sigma = 0.20
         joint_symmetry_tracking_sigma = 0.25
         success_height_tolerance = 0.10
+        success_height_sigma = 0.08         # widened from 0.05: soften reward cliff to compensate boosted weights
         success_use_velocity_score = False
         task_max_height_sigma = 0.05
         height_tracking_sigma = 0.05
@@ -82,7 +83,8 @@ class GO2OmniJumpCurriculumTorqueCfg(GO2OmniJumpTorqueCfg):
             orientation = -1.6                 # boosted (was -0.8): stronger upright pull during all phases
             collision = -3.0                   # boosted (was -1.0): kill leg-leg self-collision in air
             torques = -1e-5                    # OmniNet: -1e-5
-            action_rate = -0.03                # boosted (was -0.025 → -0.08): direct twitching penalty
+            action_rate = 0.0                  # replaced by action_smoothness (2nd-order, allows explosive moves)
+            action_smoothness = -0.03          # 2nd-order: Σ(a_t - 2·a_{t-1} + a_{t-2})², penalize jerk not velocity
             dof_acc = -2.5e-7                  # restored to original: was over-penalizing fast (smooth) motion
             horizontal_drift = 0.0            # disabled: dense takeoff_direction subsumes this
             takeoff_direction = 3.0            # dense ascending vz/||v|| (was 80 one-shot; ~40 steps × 3.0 × 0.85 ≈ equivalent total)

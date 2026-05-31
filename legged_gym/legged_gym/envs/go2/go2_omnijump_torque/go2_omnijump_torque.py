@@ -37,6 +37,7 @@ class GO2OmniJumpTorque(GO2Torque):
         "default_pos",                # mygo2jump-style L1 toward q_squat (whole-body squat bias)
         "default_hip_pos",            # mygo2jump-style exp reward for hip joints near default
         "landing_stability",          # Atanassov-style: penalize lin/ang vel during landing buffer
+        "action_smoothness",          # 2nd-order action jerk (replaces action_rate; allows explosive)
     }
 
     def _prepare_reward_function(self):
@@ -50,6 +51,8 @@ class GO2OmniJumpTorque(GO2Torque):
     def _init_buffers(self):
         super()._init_buffers()
         self.default_joint_pd_target = self.default_dof_pos.repeat(self.num_envs, 1)
+        # For 2nd-order action smoothness: track action 2 steps back
+        self.last_last_actions = torch.zeros_like(self.actions)
         self.residual_torques_action = torch.zeros(
             self.num_envs, self.num_actions, dtype=torch.float, device=self.device
         )
@@ -135,6 +138,8 @@ class GO2OmniJumpTorque(GO2Torque):
         self.reset_idx(env_ids)
         self.compute_observations()
 
+        # Shift action history (for 2nd-order smoothness): last_last ← last ← current
+        self.last_last_actions[:] = self.last_actions[:]
         self.last_actions[:] = self.actions[:]
         self.last_dof_vel[:] = self.dof_vel[:]
         self.last_root_vel[:] = self.root_states[:, 7:13]
@@ -990,6 +995,15 @@ class GO2OmniJumpTorque(GO2Torque):
             * contact_quality
             * (0.20 + 0.80 * body_clear_quality)
             * (0.20 + 0.80 * height_gate)
+        )
+
+    def _reward_action_smoothness(self):
+        # 2nd-order action smoothness (jerk): Σ(a_t - 2·a_{t-1} + a_{t-2})²
+        # Allows smooth acceleration (uniform Δa), only penalizes acceleration CHANGES.
+        # Better for explosive jumping than 1st-order action_rate.
+        return torch.sum(
+            torch.square(self.actions - 2.0 * self.last_actions + self.last_last_actions),
+            dim=1,
         )
 
     def _reward_horizontal_drift(self):
