@@ -655,7 +655,16 @@ class GO2AtanassovJumpTorque(GO2OmniJumpTorque):
     def _reward_atanassov_base_acceleration(self):
         # |v̇|² where v̇ ≈ (v_t - v_{t-1}) / dt
         acc = (self.base_lin_vel - self.atan_last_base_lin_vel) / self.dt
-        return torch.sum(torch.square(acc), dim=1)
+        penalty = torch.sum(torch.square(acc), dim=1)
+        return (~self._pushoff_mask()).float() * penalty
+
+    def _reward_dof_acc(self):
+        penalty = super()._reward_dof_acc()
+        return (~self._pushoff_mask()).float() * penalty
+
+    def _reward_action_rate(self):
+        penalty = super()._reward_action_rate()
+        return (~self._pushoff_mask()).float() * penalty
 
     def _reward_atanassov_contact_change(self):
         contact_now = self._get_contact_state()

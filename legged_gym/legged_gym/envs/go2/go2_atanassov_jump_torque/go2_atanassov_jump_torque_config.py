@@ -247,7 +247,7 @@ class GO2AtanassovJumpTorqueCfg(GO2OmniJumpTorqueCfg):
             atanassov_symmetry = 1.0               # 2.0 → 1.0 (cut standing wage; all-phase term so this also lowers the stance-standing income in jump episodes). Still anti-tilt.
             atanassov_nominal_pose = 2.0           # 8.0 -> 2.0: dramatically reduced. The robot was exploiting this by doing a tiny hop and quickly reverting to nominal pose to farm this reward instead of jumping high.
             atanassov_maintain_contact = 1.0       # 5.0 → 1.0 (cut standing wage). Keep small to still discourage the one-foot-tilted-push exploit.
-            atanassov_takeoff_vz = 50.0             # 30 -> 50: significantly boost the push-off reward to absolutely ensure it overpowers any remaining "squat wage" from base_position/nominal_pose.
+            atanassov_takeoff_vz = 20.0             # 50.0 -> 20.0: reduced to prevent farming random spikes; let projected_peak guide the climb.
             projected_peak = 25.0                   # 15 -> 25: stronger dense climb gradient toward cmd height once airborne. Olsen-style exp(-(h+vz²/2g - cmd)²/σ)
 
             # =====================================================================
@@ -264,7 +264,7 @@ class GO2AtanassovJumpTorqueCfg(GO2OmniJumpTorqueCfg):
             # =====================================================================
             # Disable everything else from the SATA / OmniJump infrastructure
             # =====================================================================
-            termination = 0.0             # restored original: no explicit termination penalty (relies on lost reward from short episodes as implicit penalty)
+            termination = -10.0           # 0.0 -> -10.0: CRITICAL FIX. A non-zero death penalty is required to stop suicide-farming noise.
             maintain_contact = 0.0
             peak_height_progress = 0.0
             all_feet_airborne = 0.0
@@ -334,7 +334,7 @@ class GO2AtanassovJumpTorqueCfgPPO(GO2OmniJumpTorqueCfgPPO):
         # SATA torque task). Paper Atanassov / OmniNet use 1.0 noise + 0.01 entropy
         # but those are tuned for POSE+PD@10kHz control where actions get filtered
         # before reaching joints. Direct torque control needs much less noise.
-        init_noise_std = 0.5         # 0.35 → 0.5: prior run noise collapsed to 0.01 by iter 2800, policy then froze and crashed when PD hit 0 (iter 4000+)
+        init_noise_std = 0.3         # 0.5 → 0.3: lowered to prevent noise explosion after fixing reward hacking
         actor_hidden_dims = [512, 256, 128]
         critic_hidden_dims = [512, 256, 128]
         activation = "elu"
@@ -343,7 +343,7 @@ class GO2AtanassovJumpTorqueCfgPPO(GO2OmniJumpTorqueCfgPPO):
         value_loss_coef = 1.0
         use_clipped_value_loss = True
         clip_param = 0.2
-        entropy_coef = 0.005         # 0.001 → 0.005: prior 0.001 let noise_std collapse to 0.01 well before fade ended → no exploration to adapt to PD=0
+        entropy_coef = 0.001         # 0.005 → 0.001: stop forcing excessive exploration since the gradient is now clean
         num_learning_epochs = 5
         num_mini_batches = 4
         learning_rate = 1.0e-4       # SATA baseline (was 1e-3; paper uses 1e-3 but for POSE control). 10× smaller for stable torque PPO updates.
