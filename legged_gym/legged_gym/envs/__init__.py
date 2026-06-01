@@ -46,6 +46,11 @@ from .go2.go2_omnijump_curriculum_torque.go2_omnijump_curriculum_torque_config i
     GO2OmniJumpCurriculumTorqueCfgPPO,
 )
 from .go2.go2_omnijump_curriculum_torque.go2_omnijump_curriculum_torque import GO2OmniJumpCurriculumTorque
+from .go2.go2_omnijump_landing_torque.go2_omnijump_landing_torque_config import (
+    GO2OmniJumpLandingTorqueCfg,
+    GO2OmniJumpLandingTorqueCfgPPO,
+)
+from .go2.go2_omnijump_landing_torque.go2_omnijump_landing_torque import GO2OmniJumpLandingTorque
 from .go2.go2_omninet_jump_torque.go2_omninet_jump_torque_config import (
     GO2OmniNetJumpTorqueCfg,
     GO2OmniNetJumpTorqueCfgPPO,
@@ -74,6 +79,12 @@ task_registry.register(
     GO2OmniJumpCurriculumTorque,
     GO2OmniJumpCurriculumTorqueCfg(),
     GO2OmniJumpCurriculumTorqueCfgPPO(),
+)
+task_registry.register(
+    "go2_omnijump_landing_torque",
+    GO2OmniJumpLandingTorque,
+    GO2OmniJumpLandingTorqueCfg(),
+    GO2OmniJumpLandingTorqueCfgPPO(),
 )
 task_registry.register(
     "go2_omninet_jump_torque",

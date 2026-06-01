@@ -45,9 +45,9 @@ class GO2OmniJumpCurriculumTorqueCfg(GO2OmniJumpTorqueCfg):
         single_jump_command_prob = 1.0
         class ranges(GO2OmniJumpTorqueCfg.commands.ranges):
             jump_height = [0.40, 0.70]
-            lin_vel_x = [-1.0, 1.0]     # Opened up for forward/backward jumps
-            lin_vel_y = [-0.5, 0.5]     # Opened up for lateral jumps
-            ang_vel_yaw = [-0.5, 0.5]   # Opened up for turning jumps
+            lin_vel_x = [0.0, 0.0]      # restored to May28_22-34-51 proven vertical-jump baseline
+            lin_vel_y = [0.0, 0.0]      # (omnidirectional velocity opening lives in go2_omnijump_landing_torque now)
+            ang_vel_yaw = [0.0, 0.0]
 
     class rewards(GO2OmniJumpTorqueCfg.rewards):
         zero_command_velocity_sigma = 0.25
