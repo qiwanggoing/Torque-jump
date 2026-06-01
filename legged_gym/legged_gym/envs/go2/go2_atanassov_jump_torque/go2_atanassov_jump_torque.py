@@ -54,6 +54,7 @@ class GO2AtanassovJumpTorque(GO2OmniJumpTorque):
         "atanassov_nominal_pose",
         "atanassov_maintain_contact",
         "atanassov_takeoff_vz",
+        "projected_peak",  # dense ballistic peak-height reward (replaces sparse atanassov_max_height)
         "orientation",  # parent's raw-form orientation penalty (curriculum-style); replaces atanassov_orientation_tracking
         "default_hip_pos",  # parent's exp(-gain × Σ|q_hip - q_hip_default|) — hip-specific anti-splay (mygo2jump-style, but target = configured default 0.1/-0.1)
         # Regularization (negative scale)
@@ -585,18 +586,51 @@ class GO2AtanassovJumpTorque(GO2OmniJumpTorque):
         return active * all_four
 
     def _reward_atanassov_takeoff_vz(self):
-        # Quadratic upward-velocity reward, gated on three conditions:
-        #   1. Pre-takeoff (~has_taken_off) so it stops once airborne
-        #   2. Significant vz (>0.8 m/s) — kills micro-jitter exploit
-        #   3. cmd[4]>0.5 — RSI bootstrap gives vz up to 3 m/s for free in stand
-        #      episodes (cmd[4]=0); without this gate the policy gets paid for
-        #      that bootstrap velocity it didn't earn.
-        # World-frame vz (root_states[:, 9]) — body-frame would let tilted-push exploit grow.
-        vz_world = self.root_states[:, 9]
+        # Borrowed from the working curriculum env's takeoff_vertical_velocity:
+        # reward upward velocity CONTINUOUSLY from vz=0 (NO dead zone), scaled by
+        # the vz needed to reach the commanded peak from standing.
+        # The previous (~has_taken_off)&(vz>0.8) form gave ZERO gradient below
+        # 0.8 m/s, so the push-off never bootstrapped (rew stayed 0.0000): the
+        # policy could not find "start pushing" because no reward appeared until
+        # it already had 0.8 m/s, which it never reached.
+        # Now active throughout the ascent (ground push + rise), like the working
+        # env. cmd[4] gate kept so RSI / stand episodes (cmd[4]=0, bootstrapped
+        # vz up to 3) can't farm it. World-frame vz (root_states[:, 9]).
+        base_height = self.root_states[:, 2]
+        min_height = float(getattr(self.cfg.rewards, "ascending_min_base_height", 0.18))
+        vz = self.root_states[:, 9]
         jump_commanded = self.commands[:, 4] > float(self.cfg.commands.jump_command_threshold)
-        active = (~self.has_taken_off) & (vz_world > 0.8) & jump_commanded
-        clipped_vz = torch.clamp(vz_world, min=0.0, max=4.0)
-        return active.float() * torch.square(clipped_vz)
+        ascending = (
+            self.jumping_state & (vz > 0) & (~self.has_landed)
+            & (base_height > min_height) & jump_commanded
+        )
+        h_stand = float(getattr(self.cfg.rewards, "stance_standing_height", 0.30))
+        target_vz = torch.sqrt((2.0 * 9.81 * (self.commands[:, 3] - h_stand)).clamp(min=0.01))
+        upward = torch.clamp(vz / target_vz, min=0.0, max=1.0)
+        return ascending.float() * upward
+
+    def _reward_projected_peak(self):
+        # DENSE height reward (working curriculum env's projected_peak / Olsen):
+        # project the apex h + vz²/2g every step while ascending in flight and
+        # reward closeness to the commanded peak. Replaces the SPARSE
+        # atanassov_max_height (fired only at just_landed → no climb gradient
+        # during the rise). Together with the now-continuous takeoff_vz this is
+        # the working env's takeoff pair: takeoff_vz pulls you off the ground,
+        # projected_peak rewards projecting higher once airborne.
+        # Override the parent to add the cmd[4] gate (parent lacks it) so RSI /
+        # stand episodes don't farm it.
+        jump_commanded = self.commands[:, 4] > float(self.cfg.commands.jump_command_threshold)
+        base_height = self.root_states[:, 2]
+        min_height = float(getattr(self.cfg.rewards, "ascending_min_base_height", 0.18))
+        vz = self.root_states[:, 9]
+        ascending = (
+            self.jumping_state & self.has_taken_off & (vz > 0)
+            & (~self.has_landed) & (base_height > min_height) & jump_commanded
+        )
+        projected = base_height + torch.clamp(vz, min=0.0) ** 2 / (2.0 * 9.81)
+        sigma = max(float(getattr(self.cfg.rewards, "projected_peak_sigma", 0.05)), 1e-4)
+        reward = torch.exp(-torch.square(projected - self.commands[:, 3]) / sigma)
+        return ascending.float() * reward
 
     # ---- Regularization rewards (negative scale; squared into r^-) ----
     def _reward_atanassov_energy(self):

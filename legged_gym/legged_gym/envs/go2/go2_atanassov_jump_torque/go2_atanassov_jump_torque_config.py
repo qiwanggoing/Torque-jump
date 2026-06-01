@@ -230,7 +230,7 @@ class GO2AtanassovJumpTorqueCfg(GO2OmniJumpTorqueCfg):
             # Sparse (landing phase only) — boosted because they fire ≤1× per ep
             atanassov_landing_position = 50.0      # 15 → 50 (3.3×) — strong landing-at-init incentive
             atanassov_landing_orientation = 10.0   # 3 → 10 (3.3×)
-            atanassov_max_height = 100.0           # 50 → 100 (2×, dominant jump-completion signal)
+            atanassov_max_height = 0.0             # REPLACED by dense projected_peak below — sparse (just_landed only) gave no climb gradient during the rise
             atanassov_jumping_sparse = 20.0        # 5 → 20 (4×)
 
             # Dense phase-aware
@@ -246,7 +246,8 @@ class GO2AtanassovJumpTorqueCfg(GO2OmniJumpTorqueCfg):
             atanassov_symmetry = 2.0               # 0.2 → 2.0 (10×): force left-right symmetric joint angles to kill tilted-push exploit
             atanassov_nominal_pose = 8.0           # restored original: positive bell-curve exp(-||q-q_default||²/σ) bonus, phase-weighted (1.0×idle + 0.5×stance + 1.0×flight + 1.0×landing). Reverted from L1 penalty form which broke jumping in combination with other strict penalties.
             atanassov_maintain_contact = 5.0       # 0.5 → 5.0 (10×): strict 4-foot-contact gate; main stance stability incentive
-            atanassov_takeoff_vz = 5.0              # restored original: vz² clamp [0,4] with 0.8 m/s threshold gate. Reward fires only after policy pushes hard enough to overcome the cliff — works in original setup where other rewards (max_height, base_position flight) drive the jump.
+            atanassov_takeoff_vz = 10.0             # borrowed from working curriculum env (takeoff_vertical_velocity=10): now continuous vz/target_vz from vz=0 (no dead zone) — the push-off bootstrap gradient
+            projected_peak = 15.0                   # NEW: dense ballistic peak-height tracker (working env weight). Sole height driver now (replaces sparse atanassov_max_height). Olsen-style exp(-(h+vz²/2g - cmd)²/σ)
 
             # =====================================================================
             # Regularization rewards (negative weights → multiplicative penalty)
@@ -266,8 +267,8 @@ class GO2AtanassovJumpTorqueCfg(GO2OmniJumpTorqueCfg):
             maintain_contact = 0.0
             peak_height_progress = 0.0
             all_feet_airborne = 0.0
-            takeoff_vertical_velocity = 0.0
-            projected_peak = 0.0
+            takeoff_vertical_velocity = 0.0   # parent's version unused — atanassov_takeoff_vz (now continuous) is our push reward
+            # projected_peak set to 15.0 above (dense height tracker)
             orientation = -1.6            # curriculum-style raw form (sum(square(projected_gravity_xy))); no exp saturation — pitch/roll penalty grows continuously with tilt
             collision = -1.0              # restored original: paper Table 1 "Collisions" weight
             torques = 0.0
@@ -304,6 +305,7 @@ class GO2AtanassovJumpTorqueCfg(GO2OmniJumpTorqueCfg):
             "rew_atanassov_landing_position",
             "rew_atanassov_landing_orientation",
             "rew_atanassov_max_height",
+            "rew_projected_peak",
             "rew_atanassov_jumping_sparse",
             "rew_atanassov_energy",
             "rew_atanassov_base_acceleration",
