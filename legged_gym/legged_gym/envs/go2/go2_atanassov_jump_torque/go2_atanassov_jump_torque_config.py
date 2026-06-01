@@ -244,9 +244,9 @@ class GO2AtanassovJumpTorqueCfg(GO2OmniJumpTorqueCfg):
             atanassov_base_lin_vel = 1.0           # flight
             atanassov_base_ang_vel = 0.5           # flight + 0.1·landing
             atanassov_feet_clearance = 1.0         # reduced 2 → 1: pose is secondary
-            atanassov_symmetry = 5.0               # 1.0 → 5.0: boost significantly to force symmetrical takeoff and prevent flipping.
-            atanassov_nominal_pose = 2.0           # 8.0 -> 2.0: dramatically reduced. The robot was exploiting this by doing a tiny hop and quickly reverting to nominal pose to farm this reward instead of jumping high.
-            atanassov_maintain_contact = 1.0       # 5.0 → 1.0 (cut standing wage). Keep small to still discourage the one-foot-tilted-push exploit.
+            atanassov_symmetry = 0.0               # 5.0 → 0.0: REMOVED. Caused massive exploit where robot just stood symmetrically to farm points.
+            atanassov_nominal_pose = 0.0           # 2.0 -> 0.0: REMOVED. Stop paying it to stand in nominal pose.
+            atanassov_maintain_contact = 0.0       # 1.0 -> 0.0: REMOVED. Stop paying it to keep feet on the ground.
             atanassov_takeoff_vz = 20.0             # 50.0 -> 20.0: reduced to prevent farming random spikes; let projected_peak guide the climb.
             projected_peak = 25.0                   # 15 -> 25: stronger dense climb gradient toward cmd height once airborne. Olsen-style exp(-(h+vz²/2g - cmd)²/σ)
 
@@ -276,7 +276,7 @@ class GO2AtanassovJumpTorqueCfg(GO2OmniJumpTorqueCfg):
             horizontal_drift = 0.0
             takeoff_direction = 0.0
             default_pos = 0.0
-            default_hip_pos = 1.0          # 5 → 1 (cut standing wage; all-phase term, lowers stance-standing income in jump episodes). Still mild anti-splay.
+            default_hip_pos = 0.0          # 1.0 -> 0.0: REMOVED. Another standing wage exploit.
             joint_angle_loaded = 0.0
             joint_angle_extended = 0.0
             joint_angle_aerial = 0.0
