@@ -239,12 +239,12 @@ class GO2AtanassovJumpTorqueCfg(GO2OmniJumpTorqueCfg):
             # (target = takeoff point → identical to original env). Raise to ~5–10
             # together with landing_stage = 2 to drive the forward/diagonal landing.
             atanassov_projected_landing = 0.0
-            atanassov_base_position = 10.0         # 15 -> 10: reduce slightly to encourage leaving the comfort zone
+            atanassov_base_position = 0.0          # 10.0 -> 0.0: REMOVED. Stop paying the robot a massive wage just for squatting. Force it to jump for points.
             atanassov_orientation_tracking = 0.0   # disabled — replaced by curriculum-style raw `orientation` below (more continuous gradient at large tilts)
             atanassov_base_lin_vel = 1.0           # flight
             atanassov_base_ang_vel = 0.5           # flight + 0.1·landing
             atanassov_feet_clearance = 1.0         # reduced 2 → 1: pose is secondary
-            atanassov_symmetry = 1.0               # 2.0 → 1.0 (cut standing wage; all-phase term so this also lowers the stance-standing income in jump episodes). Still anti-tilt.
+            atanassov_symmetry = 5.0               # 1.0 → 5.0: boost significantly to force symmetrical takeoff and prevent flipping.
             atanassov_nominal_pose = 2.0           # 8.0 -> 2.0: dramatically reduced. The robot was exploiting this by doing a tiny hop and quickly reverting to nominal pose to farm this reward instead of jumping high.
             atanassov_maintain_contact = 1.0       # 5.0 → 1.0 (cut standing wage). Keep small to still discourage the one-foot-tilted-push exploit.
             atanassov_takeoff_vz = 20.0             # 50.0 -> 20.0: reduced to prevent farming random spikes; let projected_peak guide the climb.
@@ -270,7 +270,7 @@ class GO2AtanassovJumpTorqueCfg(GO2OmniJumpTorqueCfg):
             all_feet_airborne = 0.0
             takeoff_vertical_velocity = 0.0   # parent's version unused — atanassov_takeoff_vz (now continuous) is our push reward
             # projected_peak set to 15.0 above (dense height tracker)
-            orientation = -1.6            # curriculum-style raw form (sum(square(projected_gravity_xy))); no exp saturation — pitch/roll penalty grows continuously with tilt
+            orientation = -5.0            # -1.6 -> -5.0: Heavily penalize pitch/roll to prevent flipping in the air. Force a stable, straight-up jump.
             collision = -1.0              # restored original: paper Table 1 "Collisions" weight
             torques = 0.0
             horizontal_drift = 0.0
