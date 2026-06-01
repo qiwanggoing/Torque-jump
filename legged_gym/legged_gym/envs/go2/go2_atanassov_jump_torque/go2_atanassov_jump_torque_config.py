@@ -127,6 +127,7 @@ class GO2AtanassovJumpTorqueCfg(GO2OmniJumpTorqueCfg):
         atanassov_target_peak = 0.6              # peak height target (lowered from paper 0.9)
         atanassov_stance_height = 0.20            # base z target during stance (squat)
         atanassov_flight_height = 0.6             # base z target during flight (matches peak target)
+        atanassov_real_jump_min_peak = 0.45       # a jump only "counts" (unlocks completion + landing rewards) once peak base height clears this — ABOVE the ~0.42 standing height, so a legs-tucked 0-height "fake airborne" can't farm jumping_sparse / landing_position / base_position-landing
         atanassov_terminate_orientation = 3.0    # rad
         atanassov_terminate_base_height = 0.12   # m
         atanassov_terminate_landing_error = 0.15 # m (landing position)
@@ -243,9 +244,9 @@ class GO2AtanassovJumpTorqueCfg(GO2OmniJumpTorqueCfg):
             atanassov_base_lin_vel = 1.0           # flight
             atanassov_base_ang_vel = 0.5           # flight + 0.1·landing
             atanassov_feet_clearance = 1.0         # reduced 2 → 1: pose is secondary
-            atanassov_symmetry = 2.0               # 0.2 → 2.0 (10×): force left-right symmetric joint angles to kill tilted-push exploit
+            atanassov_symmetry = 1.0               # 2.0 → 1.0 (cut standing wage; all-phase term so this also lowers the stance-standing income in jump episodes). Still anti-tilt.
             atanassov_nominal_pose = 8.0           # restored original: positive bell-curve exp(-||q-q_default||²/σ) bonus, phase-weighted (1.0×idle + 0.5×stance + 1.0×flight + 1.0×landing). Reverted from L1 penalty form which broke jumping in combination with other strict penalties.
-            atanassov_maintain_contact = 5.0       # 0.5 → 5.0 (10×): strict 4-foot-contact gate; main stance stability incentive
+            atanassov_maintain_contact = 1.0       # 5.0 → 1.0 (cut standing wage). Keep small to still discourage the one-foot-tilted-push exploit.
             atanassov_takeoff_vz = 10.0             # borrowed from working curriculum env (takeoff_vertical_velocity=10): now continuous vz/target_vz from vz=0 (no dead zone) — the push-off bootstrap gradient
             projected_peak = 15.0                   # NEW: dense ballistic peak-height tracker (working env weight). Sole height driver now (replaces sparse atanassov_max_height). Olsen-style exp(-(h+vz²/2g - cmd)²/σ)
 
@@ -275,7 +276,7 @@ class GO2AtanassovJumpTorqueCfg(GO2OmniJumpTorqueCfg):
             horizontal_drift = 0.0
             takeoff_direction = 0.0
             default_pos = 0.0
-            default_hip_pos = 5.0          # 2 → 5: stronger hip-only anti-splay
+            default_hip_pos = 1.0          # 5 → 1 (cut standing wage; all-phase term, lowers stance-standing income in jump episodes). Still mild anti-splay.
             joint_angle_loaded = 0.0
             joint_angle_extended = 0.0
             joint_angle_aerial = 0.0

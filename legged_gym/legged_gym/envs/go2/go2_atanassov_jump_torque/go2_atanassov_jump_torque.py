@@ -401,6 +401,14 @@ class GO2AtanassovJumpTorque(GO2OmniJumpTorque):
     def _landing_mask(self):
         return self.has_landed
 
+    def _real_jump_mask(self):
+        # A jump only "counts" once the BODY actually rose: peak base height for
+        # this cycle clears the threshold (set ABOVE the ~0.42 standing height,
+        # so a legs-tucked "fake airborne" at standing height does NOT qualify).
+        # Used to gate the completion / landing rewards so the 0-height tuck-fake
+        # (lift feet by tucking, body never rises) can't farm them.
+        return self.peak_base_height >= float(getattr(self.cfg.rewards, "atanassov_real_jump_min_peak", 0.45))
+
     # ====================================================================== #
     # Reward functions — Atanassov Table 1
     # All return non-negative values in [0, 1] for task rewards (exp kernel)
@@ -412,7 +420,7 @@ class GO2AtanassovJumpTorque(GO2OmniJumpTorque):
         # Gate by cmd[4]>0.5: RSI episodes with cmd[4]=0 land airborne robots and would
         # otherwise leak this reward into stand-episode training.
         jump_commanded = self.commands[:, 4] > float(self.cfg.commands.jump_command_threshold)
-        active = self.just_landed.float() * jump_commanded.float()
+        active = self.just_landed.float() * jump_commanded.float() * self._real_jump_mask().float()
         err = torch.sum(torch.square(self.root_states[:, :2] - self.atan_p_des[:, :2]), dim=1)
         sigma = float(self.cfg.rewards.sigma_pos_landing)
         return active * torch.exp(-err / sigma)
@@ -421,7 +429,7 @@ class GO2AtanassovJumpTorque(GO2OmniJumpTorque):
         # q_des is identity. Use projected_gravity tilt as orientation error.
         # Same cmd[4] gate as landing_position to keep stand episodes clean.
         jump_commanded = self.commands[:, 4] > float(self.cfg.commands.jump_command_threshold)
-        active = self.just_landed.float() * jump_commanded.float()
+        active = self.just_landed.float() * jump_commanded.float() * self._real_jump_mask().float()
         err = torch.sum(torch.square(self.projected_gravity[:, :2]), dim=1)
         sigma = float(self.cfg.rewards.sigma_ori_landing)
         return active * torch.exp(-err / sigma)
@@ -443,7 +451,9 @@ class GO2AtanassovJumpTorque(GO2OmniJumpTorque):
         # episodes; without this gate the policy gets paid for "jumping" in stand episodes.
         jump_commanded = self.commands[:, 4] > float(self.cfg.commands.jump_command_threshold)
         active = self.just_landed.float() * jump_commanded.float()
-        return active * self.has_taken_off.float()
+        # real_jump gate: a 0-height tuck-fake (feet leave, body stays) must NOT
+        # count as "jumped" and farm this bonus.
+        return active * self.has_taken_off.float() * self._real_jump_mask().float()
 
     # ---- Dense phase-aware task rewards ----
     def _reward_atanassov_base_position(self):
@@ -464,7 +474,9 @@ class GO2AtanassovJumpTorque(GO2OmniJumpTorque):
         r_la = torch.exp(
             -torch.sum(torch.square(self.root_states[:, :3] - self.atan_p_des), dim=1) / sigma_la
         )
-        return stance * r_st + flight * r_fl + landing * r_la
+        # landing term gated by real_jump: the 15/step post-landing "stand at
+        # target" income only unlocks after a REAL jump, not a 0-height tuck-fake.
+        return stance * r_st + flight * r_fl + landing * self._real_jump_mask().float() * r_la
 
     def _reward_atanassov_projected_landing(self):
         # Olsen 2025 densification: while airborne, project the final landing xy
@@ -567,8 +579,11 @@ class GO2AtanassovJumpTorque(GO2OmniJumpTorque):
         sigma = float(self.cfg.rewards.sigma_q_nominal)
         rew = torch.exp(-err / sigma)
         idle = (~self.jumping_state) & (~self.has_landed)
+        # idle weight cut 1.0 -> 0.2: the "standing wage" that let the policy sit
+        # in default pose forever (stand episodes). flight/landing weights kept so
+        # the in-air / post-landing pose guidance (needed under PD fade) survives.
         weight = (
-            1.0 * idle.float()
+            0.2 * idle.float()
             + 0.5 * self._stance_mask().float()
             + 1.0 * self._flight_mask().float()
             + 1.0 * self._landing_mask().float()
