@@ -63,10 +63,21 @@ class GO2AtanassovJumpTorqueCfg(GO2OmniJumpTorqueCfg):
         single_jump_command_prob = 0.7    # 70% jump episodes + 30% pure-stand episodes (cmd[4]=0 throughout) — teaches policy "cmd[4]=0 → stand still"
         atanassov_target_height = 0.6   # default target peak (lowered from paper 0.9 — easier to reach for torque control)
 
+        # ---- Landing-point task (extends Stage 1 in-place jump) ----
+        # commands[0:2] are REPURPOSED from velocity to desired landing
+        # DISPLACEMENT in meters, expressed in the spawn/heading frame:
+        #   commands[0] = dx (forward landing distance), commands[1] = dy (lateral).
+        # Stage 1 keeps them [0,0] (land in place — identical to original env).
+        # Set landing_stage = 2 to open the forward/diagonal ranges below; the env
+        # widens command_ranges["lin_vel_x"/"lin_vel_y"] accordingly at init.
+        landing_stage = 1
+        landing_disp_x_stage2 = [0.0, 0.6]    # forward landing distance (m), Stage 2
+        landing_disp_y_stage2 = [-0.3, 0.3]   # lateral landing offset (m), Stage 2
+
         class ranges(GO2OmniJumpTorqueCfg.commands.ranges):
             jump_height = [0.6, 0.6]       # default 0.6m (Stage 1 fixed; Stage 2 will vary)
-            lin_vel_x = [0.0, 0.0]
-            lin_vel_y = [0.0, 0.0]
+            lin_vel_x = [0.0, 0.0]         # repurposed: desired landing dx (m). Stage 1 = land in place.
+            lin_vel_y = [0.0, 0.0]         # repurposed: desired landing dy (m). Stage 1 = land in place.
             ang_vel_yaw = [0.0, 0.0]
             jump_command = [0.0, 1.0]
 
@@ -123,7 +134,8 @@ class GO2AtanassovJumpTorqueCfg(GO2OmniJumpTorqueCfg):
         # ---------- Reward kernel sigmas (Table 1 σ_X) ----------
         sigma_pz_stance = 0.05     # restored original wide bell
         sigma_pz_flight = 0.05     # broader for peak target
-        sigma_pos_landing = 0.05   # landing xy position
+        sigma_pos_landing = 0.05   # landing xy position (terminal, sparse)
+        sigma_landing_proj = 0.10  # projected (ballistic) landing xy — looser than terminal: estimate is noisy
         sigma_pos_max = 0.05       # max height
         sigma_ori_stance = 0.05    # narrower (0.10 → 0.05): pitch sensitivity 2× sharper
         sigma_ori_landing = 0.10
@@ -222,6 +234,10 @@ class GO2AtanassovJumpTorqueCfg(GO2OmniJumpTorqueCfg):
             atanassov_jumping_sparse = 20.0        # 5 → 20 (4×)
 
             # Dense phase-aware
+            # Olsen ballistic landing densification (flight, ascending). 0 in Stage 1
+            # (target = takeoff point → identical to original env). Raise to ~5–10
+            # together with landing_stage = 2 to drive the forward/diagonal landing.
+            atanassov_projected_landing = 0.0
             atanassov_base_position = 15.0         # 8 → 15: stronger phase target signal; landing-phase 3D position pull doubled to push back-jumping correction
             atanassov_orientation_tracking = 0.0   # disabled — replaced by curriculum-style raw `orientation` below (more continuous gradient at large tilts)
             atanassov_base_lin_vel = 1.0           # flight
@@ -273,6 +289,7 @@ class GO2AtanassovJumpTorqueCfg(GO2OmniJumpTorqueCfg):
     class logging(GO2OmniJumpTorqueCfg.logging):
         print_episode_keys = [
             "rew_atanassov_base_position",
+            "rew_atanassov_projected_landing",
             "rew_atanassov_orientation_tracking",
             "rew_orientation",
             "rew_default_hip_pos",

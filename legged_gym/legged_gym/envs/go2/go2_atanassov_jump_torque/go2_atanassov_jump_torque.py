@@ -24,7 +24,7 @@ Key design elements (matching paper §STAGE 1, Figure 2, Table 1):
 
 import torch
 from isaacgym import gymtorch
-from isaacgym.torch_utils import quat_rotate_inverse, torch_rand_float
+from isaacgym.torch_utils import get_euler_xyz, quat_rotate_inverse, torch_rand_float
 
 from legged_gym.envs.go2.go2_omnijump_torque.go2_omnijump_torque import GO2OmniJumpTorque
 from legged_gym.envs.go2.go2_atanassov_jump_torque.go2_atanassov_jump_torque_config import (
@@ -45,6 +45,7 @@ class GO2AtanassovJumpTorque(GO2OmniJumpTorque):
         "atanassov_max_height",
         "atanassov_jumping_sparse",
         "atanassov_base_position",
+        "atanassov_projected_landing",
         "atanassov_orientation_tracking",
         "atanassov_base_lin_vel",
         "atanassov_base_ang_vel",
@@ -85,6 +86,13 @@ class GO2AtanassovJumpTorque(GO2OmniJumpTorque):
 
         # Reuse parent's last_dof_vel for joint accel computation; nothing else needed.
 
+        # Landing-point Stage 2: widen the displacement ranges that the parent's
+        # _resample_commands draws commands[0:2] from. Stage 1 leaves them [0,0]
+        # (land in place — behaviour identical to the original in-place env).
+        if int(getattr(self.cfg.commands, "landing_stage", 1)) >= 2:
+            self.command_ranges["lin_vel_x"] = list(self.cfg.commands.landing_disp_x_stage2)
+            self.command_ranges["lin_vel_y"] = list(self.cfg.commands.landing_disp_y_stage2)
+
     # ====================================================================== #
     # Reset / RSI
     # ====================================================================== #
@@ -92,13 +100,16 @@ class GO2AtanassovJumpTorque(GO2OmniJumpTorque):
         if len(env_ids) == 0:
             return
         super().reset_idx(env_ids)
-        # After parent reset (which applied RSI and reset jump buffers),
-        # capture the spawn xy as p_des and reset trackers.
+        # After parent reset (which applied RSI, reset jump buffers, and resampled
+        # commands), set the desired landing point = spawn xy + commanded
+        # displacement (commands[0:2], meters). The robot spawns facing +x with
+        # identity heading, so the displacement maps directly to world xy.
+        # Stage 1: commands[0:2] == 0 → target == spawn (land in place, unchanged).
         init_x = float(self.cfg.init_state.pos[0])
         init_y = float(self.cfg.init_state.pos[1])
         init_z = float(self.cfg.init_state.pos[2])
-        self.atan_p_des[env_ids, 0] = self.env_origins[env_ids, 0] + init_x
-        self.atan_p_des[env_ids, 1] = self.env_origins[env_ids, 1] + init_y
+        self.atan_p_des[env_ids, 0] = self.env_origins[env_ids, 0] + init_x + self.commands[env_ids, 0]
+        self.atan_p_des[env_ids, 1] = self.env_origins[env_ids, 1] + init_y + self.commands[env_ids, 1]
         self.atan_p_des[env_ids, 2] = self.env_origins[env_ids, 2] + init_z
         self.atan_q_des[env_ids] = 0.0
         self.atan_q_des[env_ids, 3] = 1.0
@@ -145,6 +156,81 @@ class GO2AtanassovJumpTorque(GO2OmniJumpTorque):
             gymtorch.unwrap_tensor(env_ids_int32),
             len(env_ids_int32),
         )
+
+    # ====================================================================== #
+    # Observations — identical to parent GO2OmniJumpTorque.compute_observations,
+    # except the velocity-command slot (commands[:, :3]) is replaced by the
+    # desired landing-point error in the robot's yaw-aligned frame:
+    #   Ryaw^T · (p_des_xy − base_xy)  →  [forward_err, lateral_err, 0].
+    # This is the navigation signal Olsen 2025 feeds for horizontal jumps ("how
+    # far / which way still to go"). Only the yaw component of orientation is
+    # used (not full quat) so pitch/roll during flight don't scramble the target
+    # direction. The 3rd slot (old yaw command) stays 0 in v1 (no landing-yaw
+    # tracking yet) — keeps the 69-dim layout and obs mirror-symmetry indices
+    # intact (err_x even, err_y odd — same parity as the old vx/vy/yaw command).
+    # Stage 1 (p_des == spawn): the error reports drift from the spawn point.
+    # ====================================================================== #
+    def compute_observations(self):
+        foot_contact_obs = self._get_contact_state().float()
+        motor_fatigue = self.motor_fatigue.detach()
+
+        err_world = self.atan_p_des[:, :2] - self.root_states[:, :2]
+        _, _, yaw = get_euler_xyz(self.base_quat)
+        cos_y, sin_y = torch.cos(yaw), torch.sin(yaw)
+        err_fwd = cos_y * err_world[:, 0] + sin_y * err_world[:, 1]
+        err_lat = -sin_y * err_world[:, 0] + cos_y * err_world[:, 1]
+        landing_err_obs = torch.stack((err_fwd, err_lat, torch.zeros_like(err_fwd)), dim=-1)
+
+        height_obs = torch.cat(
+            (
+                self.root_states[:, 2:3] * 2.0,
+                (self.commands[:, 3:4] - self.root_states[:, 2:3]) * 2.0,
+            ),
+            dim=-1,
+        )
+        obs_buf = torch.cat(
+            (
+                self.base_lin_vel * self.obs_scales.lin_vel,
+                self.base_ang_vel * self.obs_scales.ang_vel,
+                self.projected_gravity,
+                landing_err_obs,
+                self.commands[:, 3:4] * 2.0,
+                self.commands[:, 4:5],
+                height_obs,
+                (self.dof_pos - self.default_dof_pos) * self.obs_scales.dof_pos,
+                self.dof_vel * self.obs_scales.dof_vel,
+                foot_contact_obs,
+                self.torques,
+                motor_fatigue,
+                self.pd_prior_alpha,
+            ),
+            dim=-1,
+        )
+        obs_buf = torch.nan_to_num(obs_buf, nan=0.0, posinf=100.0, neginf=-100.0)
+        if self.add_noise:
+            obs_buf += (2 * torch.rand_like(obs_buf) - 1) * self.noise_scale_vec
+        self.obs_buf = torch.where(
+            torch.rand(self.num_envs, device=self.device).unsqueeze(1) > self.cfg.domain_rand.loss_rate,
+            obs_buf,
+            self.obs_buf,
+        )
+
+        if self.num_privileged_obs is not None:
+            feet_pos = self.rigid_body_states[:, self.feet_indices, :3]
+            feet_pos_local = feet_pos - self.root_states[:, :3].unsqueeze(1)
+            feet_vel = self.rigid_body_states[:, self.feet_indices, 7:10]
+            feet_contact_forces = self.contact_forces[:, self.feet_indices, :]
+            self.privileged_obs_buf = torch.cat(
+                (
+                    obs_buf,
+                    self.root_states[:, 2:3],
+                    self.base_lin_vel,
+                    feet_pos_local.reshape(self.num_envs, -1),
+                    feet_vel.reshape(self.num_envs, -1),
+                    feet_contact_forces.reshape(self.num_envs, -1),
+                ),
+                dim=-1,
+            )
 
     # ====================================================================== #
     # Termination — contact-based only.
@@ -379,6 +465,28 @@ class GO2AtanassovJumpTorque(GO2OmniJumpTorque):
         )
         return stance * r_st + flight * r_fl + landing * r_la
 
+    def _reward_atanassov_projected_landing(self):
+        # Olsen 2025 densification: while airborne, project the final landing xy
+        # from ballistic motion and reward closeness to the commanded landing
+        # point. Converts the otherwise terminal-only landing-position signal
+        # into a dense in-flight gradient — the antidote to landing-reward
+        # sparseness. Active across the whole flight (up + down), unlike
+        # projected_peak which only makes sense while ascending.
+        #   t_land solves  pz + vz·t − ½g·t² = h_land  (later root, descending).
+        # cmd[4] gate keeps RSI / stand episodes clean (same as landing_position).
+        jump_commanded = self.commands[:, 4] > float(self.cfg.commands.jump_command_threshold)
+        active = (self._flight_mask() & jump_commanded).float()
+        g = 9.81
+        pz = self.root_states[:, 2]
+        vz = self.root_states[:, 9]
+        h_land = self.env_origins[:, 2] + float(self.cfg.rewards.base_height_target)
+        disc = torch.clamp(vz * vz + 2.0 * g * (pz - h_land), min=0.0)
+        t_land = (vz + torch.sqrt(disc)) / g
+        proj_xy = self.root_states[:, :2] + self.root_states[:, 7:9] * t_land.unsqueeze(1)
+        err = torch.sum(torch.square(proj_xy - self.atan_p_des[:, :2]), dim=1)
+        sigma = max(float(getattr(self.cfg.rewards, "sigma_landing_proj", 0.10)), 1e-4)
+        return active * torch.exp(-err / sigma)
+
     def _reward_atanassov_orientation_tracking(self):
         # All phases (stance + flight + landing). Paper Table 1 sets flight to
         # 0 to allow somersault-style rotations, but we want vertical jump in
@@ -517,3 +625,16 @@ class GO2AtanassovJumpTorque(GO2OmniJumpTorque):
         out = -(self.dof_pos - self.dof_pos_limits[:, 0]).clip(max=0.0)  # below lower
         out += (self.dof_pos - self.dof_pos_limits[:, 1]).clip(min=0.0)   # above upper
         return torch.sum(torch.square(out), dim=1)
+
+    def _reward_default_hip_pos(self):
+        # Override the parent's GO2OmniJumpTorque version, which does
+        # default_dof_pos[hip_indices] — indexing the (1, 12) buffer on dim 0
+        # (rows 3/6/9 don't exist) → CUDA out-of-bounds. Use the correct dim-1
+        # indexing (identical to the working curriculum env). Numerically the
+        # same as the parent intended (gain 4.0), just no longer crashing.
+        hip_ids = [0, 3, 6, 9]
+        hip_error = torch.sum(
+            torch.abs(self.dof_pos[:, hip_ids] - self.default_dof_pos[:, hip_ids]),
+            dim=1,
+        )
+        return torch.exp(-self.cfg.rewards.default_hip_pos_gain * hip_error)
