@@ -239,15 +239,15 @@ class GO2AtanassovJumpTorqueCfg(GO2OmniJumpTorqueCfg):
             # (target = takeoff point → identical to original env). Raise to ~5–10
             # together with landing_stage = 2 to drive the forward/diagonal landing.
             atanassov_projected_landing = 0.0
-            atanassov_base_position = 15.0         # 8 → 15: stronger phase target signal; landing-phase 3D position pull doubled to push back-jumping correction
+            atanassov_base_position = 10.0         # 15 -> 10: reduce slightly to encourage leaving the comfort zone
             atanassov_orientation_tracking = 0.0   # disabled — replaced by curriculum-style raw `orientation` below (more continuous gradient at large tilts)
             atanassov_base_lin_vel = 1.0           # flight
             atanassov_base_ang_vel = 0.5           # flight + 0.1·landing
             atanassov_feet_clearance = 1.0         # reduced 2 → 1: pose is secondary
             atanassov_symmetry = 1.0               # 2.0 → 1.0 (cut standing wage; all-phase term so this also lowers the stance-standing income in jump episodes). Still anti-tilt.
-            atanassov_nominal_pose = 8.0           # restored original: positive bell-curve exp(-||q-q_default||²/σ) bonus, phase-weighted (1.0×idle + 0.5×stance + 1.0×flight + 1.0×landing). Reverted from L1 penalty form which broke jumping in combination with other strict penalties.
+            atanassov_nominal_pose = 2.0           # 8.0 -> 2.0: dramatically reduced. The robot was exploiting this by doing a tiny hop and quickly reverting to nominal pose to farm this reward instead of jumping high.
             atanassov_maintain_contact = 1.0       # 5.0 → 1.0 (cut standing wage). Keep small to still discourage the one-foot-tilted-push exploit.
-            atanassov_takeoff_vz = 30.0             # 10 -> 30: the on-ground push reward must out-earn the base_position-stance "squat wage" (~12/step at 0.31). At 30, pushing to vz~1.5 pays ~19 vs ~6 base_position lost -> net positive -> robot leaves the ground. Once airborne + past 0.45, the (already-large) completion/landing rewards fire on their own.
+            atanassov_takeoff_vz = 50.0             # 30 -> 50: significantly boost the push-off reward to absolutely ensure it overpowers any remaining "squat wage" from base_position/nominal_pose.
             projected_peak = 25.0                   # 15 -> 25: stronger dense climb gradient toward cmd height once airborne. Olsen-style exp(-(h+vz²/2g - cmd)²/σ)
 
             # =====================================================================
