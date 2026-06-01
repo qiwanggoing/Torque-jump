@@ -127,7 +127,7 @@ class GO2AtanassovJumpTorqueCfg(GO2OmniJumpTorqueCfg):
         atanassov_target_peak = 0.6              # peak height target (lowered from paper 0.9)
         atanassov_stance_height = 0.20            # base z target during stance (squat)
         atanassov_flight_height = 0.6             # base z target during flight (matches peak target)
-        atanassov_real_jump_min_peak = 0.45       # a jump only "counts" (unlocks completion + landing rewards) once peak base height clears this — ABOVE the ~0.42 standing height, so a legs-tucked 0-height "fake airborne" can't farm jumping_sparse / landing_position / base_position-landing
+        atanassov_real_jump_min_peak = 0.25       # Reduced from 0.45: make the jump completion reward actually reachable for initial learning
         atanassov_terminate_orientation = 3.0    # rad
         atanassov_terminate_base_height = 0.12   # m
         atanassov_terminate_landing_error = 0.15 # m (landing position)
@@ -188,7 +188,7 @@ class GO2AtanassovJumpTorqueCfg(GO2OmniJumpTorqueCfg):
         takeoff_acc_target = 8.0
         takeoff_velocity_target = 2.5
         squat_pushoff_height_threshold = 0.32
-        projected_peak_sigma = 0.025
+        projected_peak_sigma = 0.15          # Widened from 0.025: soften the Gaussian cliff so partial jumps get partial rewards
         squat_foot_height = 0.10
         ascending_min_base_height = 0.18
         successful_jump_min_peak_height = 0.30
@@ -232,7 +232,7 @@ class GO2AtanassovJumpTorqueCfg(GO2OmniJumpTorqueCfg):
             atanassov_landing_position = 50.0      # 15 → 50 (3.3×) — strong landing-at-init incentive
             atanassov_landing_orientation = 10.0   # 3 → 10 (3.3×)
             atanassov_max_height = 0.0             # REPLACED by dense projected_peak below — sparse (just_landed only) gave no climb gradient during the rise
-            atanassov_jumping_sparse = 20.0        # 5 → 20 (4×)
+            atanassov_jumping_sparse = 300.0       # Boosted from 20.0: make this the ultimate jackpot to force jumping
 
             # Dense phase-aware
             # Olsen ballistic landing densification (flight, ascending). 0 in Stage 1
