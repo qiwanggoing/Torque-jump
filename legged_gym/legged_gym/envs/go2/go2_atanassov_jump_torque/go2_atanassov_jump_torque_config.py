@@ -247,8 +247,8 @@ class GO2AtanassovJumpTorqueCfg(GO2OmniJumpTorqueCfg):
             atanassov_symmetry = 1.0               # 2.0 → 1.0 (cut standing wage; all-phase term so this also lowers the stance-standing income in jump episodes). Still anti-tilt.
             atanassov_nominal_pose = 8.0           # restored original: positive bell-curve exp(-||q-q_default||²/σ) bonus, phase-weighted (1.0×idle + 0.5×stance + 1.0×flight + 1.0×landing). Reverted from L1 penalty form which broke jumping in combination with other strict penalties.
             atanassov_maintain_contact = 1.0       # 5.0 → 1.0 (cut standing wage). Keep small to still discourage the one-foot-tilted-push exploit.
-            atanassov_takeoff_vz = 10.0             # borrowed from working curriculum env (takeoff_vertical_velocity=10): now continuous vz/target_vz from vz=0 (no dead zone) — the push-off bootstrap gradient
-            projected_peak = 15.0                   # NEW: dense ballistic peak-height tracker (working env weight). Sole height driver now (replaces sparse atanassov_max_height). Olsen-style exp(-(h+vz²/2g - cmd)²/σ)
+            atanassov_takeoff_vz = 30.0             # 10 -> 30: the on-ground push reward must out-earn the base_position-stance "squat wage" (~12/step at 0.31). At 30, pushing to vz~1.5 pays ~19 vs ~6 base_position lost -> net positive -> robot leaves the ground. Once airborne + past 0.45, the (already-large) completion/landing rewards fire on their own.
+            projected_peak = 25.0                   # 15 -> 25: stronger dense climb gradient toward cmd height once airborne. Olsen-style exp(-(h+vz²/2g - cmd)²/σ)
 
             # =====================================================================
             # Regularization rewards (negative weights → multiplicative penalty)
