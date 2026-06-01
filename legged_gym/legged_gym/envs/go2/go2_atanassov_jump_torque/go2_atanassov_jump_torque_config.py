@@ -275,8 +275,8 @@ class GO2AtanassovJumpTorqueCfg(GO2OmniJumpTorqueCfg):
             torques = 0.0
             horizontal_drift = 0.0
             takeoff_direction = 0.0
-            default_pos = 0.0
-            default_hip_pos = 0.0          # 1.0 -> 0.0: REMOVED. Another standing wage exploit.
+            default_pos = -0.10            # Restored from 0.0 to -0.10: Provide a structural "launch pad". Prevent legs from splaying into a puddle before takeoff.
+            default_hip_pos = 0.5          # Restored from 0.0 to 0.5: Keep hips aligned vertically to stop sideways spinning off the ground.
             joint_angle_loaded = 0.0
             joint_angle_extended = 0.0
             joint_angle_aerial = 0.0
