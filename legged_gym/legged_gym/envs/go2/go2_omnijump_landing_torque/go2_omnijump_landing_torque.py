@@ -24,7 +24,7 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
     ACTIVE_REWARD_WHITELIST = GO2OmniJumpCurriculumTorque.ACTIVE_REWARD_WHITELIST | {
         "landing_position",
         "projected_landing",
-        "pushoff_leg_sync",
+        "foot_contact_sync",
     }
 
     # Curriculum gate table requires an entry for every active reward. Curriculum
@@ -34,7 +34,7 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
         **GO2OmniJumpCurriculumTorque.REWARD_START_STAGES,
         "landing_position": 1,
         "projected_landing": 1,
-        "pushoff_leg_sync": 0,
+        "foot_contact_sync": 0,
     }
 
     # ------------------------------------------------------------------ #
@@ -199,36 +199,21 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
         pushoff = self.jumping_state & (~self.has_taken_off) & (self.root_states[:, 9] > 0.0)
         return torch.where(pushoff, torch.zeros_like(l1), l1)
 
-    def _reward_pushoff_leg_sync(self):
-        # Front-rear leg coordination during push-off, built in the SAME idiom as
-        # _reward_straight_jump_joint_symmetry (deviation-from-default, L1, exp,
-        # straight-gated) but pairing SAME-SIDE FRONT-REAR (FL-RL, FR-RR) instead
-        # of left-right. Left-right is already enforced by PPO sym_loss; front-rear
-        # is the uncovered gap (user observed the legs diverging front/rear at the
-        # takeoff instant — nothing constrains it: sym_loss is left-right only and
-        # joint_angle_extended is weight 0).
+    def _reward_foot_contact_sync(self):
+        # Four-foot CONTACT-timing sync: all four feet should LEAVE the ground together at
+        # takeoff and TOUCH DOWN together at landing. Staggered contact (1-3 feet on the
+        # ground = "mixed") at those transitions tilts the body (pitch/roll).
         #
-        # The straight gate (forward landing displacement ≈ 0) is the crux: PPO
-        # sym_loss CANNOT enforce front-rear symmetry without killing forward jumps
-        # (front==rear => no net forward push), but a gated reward CAN — full
-        # strength for vertical jumps (Stage 1), relaxing for Stage-2 forward jumps
-        # where front/rear legitimately push differently. Deviation-from-default
-        # cancels the designed front/rear thigh offset (0.8 vs 1.0), so we reward
-        # "front and rear move by the same amount", not "same absolute angle".
-        active = (self.jumping_state & (~self.has_taken_off)).float()
-        fwd = self.commands[:, 0]   # forward landing displacement (m); 0 in Stage 1
-        straight_sigma = max(float(getattr(self.cfg.rewards, "symmetry_forward_sigma", 0.20)), 1e-3)
-        straight_gate = torch.exp(-torch.square(fwd / straight_sigma))
-        q = self.dof_pos - self.default_dof_pos
-        left_fr = (
-            torch.abs(q[:, 0] - q[:, 6])    # FL_hip  vs RL_hip
-            + torch.abs(q[:, 1] - q[:, 7])  # FL_thigh vs RL_thigh
-            + torch.abs(q[:, 2] - q[:, 8])  # FL_calf vs RL_calf
-        )
-        right_fr = (
-            torch.abs(q[:, 3] - q[:, 9])    # FR_hip  vs RR_hip
-            + torch.abs(q[:, 4] - q[:, 10])  # FR_thigh vs RR_thigh
-            + torch.abs(q[:, 5] - q[:, 11])  # FR_calf vs RR_calf
-        )
-        sigma = max(float(getattr(self.cfg.rewards, "pushoff_sync_sigma", 1.5)), 1e-3)
-        return active * straight_gate * torch.exp(-(left_fr + right_fr) / sigma)
+        # Implemented as a PENALTY on the mixed state (returns 1 when 1-3 feet touch, 0 when
+        # all-same = all-off or all-on); used with a NEGATIVE weight. A penalty shapes cleanly
+        # (0 when synced) whereas a positive "all-together" reward is saturated at 1 most of
+        # the time and barely shapes. Active in the ground-transition windows only:
+        #   - pre-takeoff push (jumping & not yet taken off) -> catches staggered LIFT-OFF;
+        #   - landing buffer (self.landing) -> catches staggered TOUCH-DOWN.
+        # Direction-agnostic (no straight gate): a forward Stage-2 jump also wants a clean
+        # simultaneous takeoff/landing.
+        contact = self._get_contact_state()
+        num = contact.sum(dim=1)
+        mixed = ((num > 0) & (num < 4)).float()
+        active = (self.jumping_state & (~self.has_taken_off)) | self.landing
+        return active.float() * mixed

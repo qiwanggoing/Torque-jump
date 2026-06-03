@@ -72,15 +72,11 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
         projected_landing_min_height = 0.40 # instantaneous height gate for the DENSE projected_landing:
                                             # blocks the legs-tucked sprawl farm (body ~0.13, feet off ground)
                                             # while keeping dense in-place landing control during real apex.
-        # Form-reward kernels, RE-WIDENED after the first attempt saturated. The earlier sigmas
-        # (pushoff 0.25 = left-right scale, pose 2.0 = sharpened) drove exp(-err/sigma) to ~0 on
-        # the CURRENT large errors (front-rear push diff ~1.3 rad; air pose ~7 rad off q_air),
-        # so both rewards contributed ~0 with no gradient. sigma must match the error SCALE.
-        symmetry_forward_sigma = 0.20       # straight-jump gate width (m of forward displacement);
-                                            # Stage1 fwd=0 -> always on; relaxes for Stage-2 forward jumps
-        pushoff_sync_sigma = 1.5            # front-rear leg-sync kernel (rad); was 0.25 (left-right scale) -> saturated
-        pose_guidance_sigma = 5.0           # kept inherited 5.0; sharpening to 2.0 backfired (sharp exp saturates at
-                                            # the large air-pose error). Fix for weak pose rewards is WEIGHT (1.5), not sigma.
+        # pose_guidance_sigma for joint_angle_aerial/prelanding/landing: kept inherited 5.0
+        # (sharpening to 2.0 backfired — sharp exp saturates at the large air-pose error; the
+        # fix for weak pose rewards is WEIGHT 1.5, not sigma). NOTE: the old joint-based
+        # pushoff_leg_sync was replaced by contact-based foot_contact_sync, which uses no sigma.
+        pose_guidance_sigma = 5.0
 
         class scales(GO2OmniJumpCurriculumTorqueCfg.rewards.scales):
             # ---- proven jump-driving stack inherited UNCHANGED ----
@@ -97,9 +93,10 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
             landing_stability = 0.0          # was 1.0: exp(-landing_velocity/0.25) but touchdown velocities are
                                              # >> 0.25, so it floors at ~0 and never fires (contributed 0.0002).
                                              # If landing damping is wanted later, re-add with a much looser sigma.
-            # ---- front-rear push-off coordination (new) ----
-            pushoff_leg_sync = 2.0           # front & rear legs extend together at takeoff (deviation-matched,
-                                             # straight-jump gated) -> straighter launch, less in-air pitching.
+            # ---- four-foot contact-timing sync (penalty on staggered takeoff/landing) ----
+            foot_contact_sync = -2.0         # penalize 1-3 feet on the ground during the takeoff push / landing
+                                             # window -> all four feet leave & touch down TOGETHER (less body tilt).
+                                             # (replaced the old joint-based pushoff_leg_sync.)
             # ---- air/landing pose quality: revived from 0.4 (near-dead) to actually pull pose ----
             joint_angle_aerial = 1.5         # was 0.4: tuck pose (q_air) in flight — main in-air stability lever
             joint_angle_prelanding = 1.5     # was 0.4: pre-landing pose (q_pre)
@@ -113,7 +110,7 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
         print_episode_keys = GO2OmniJumpCurriculumTorqueCfg.logging.print_episode_keys + [
             "rew_projected_landing",
             "rew_landing_position",
-            "rew_pushoff_leg_sync",
+            "rew_foot_contact_sync",
             # inherited-active but missing from the parent's print list — surface them
             "rew_joint_angle_aerial",
             "rew_joint_angle_prelanding",
