@@ -140,3 +140,9 @@ class GO2OmniJumpLandingTorqueCfgPPO(GO2OmniJumpCurriculumTorqueCfgPPO):
         checkpoint = -1
         resume_path = None
         max_iterations = 6000
+        # entropy_coef annealing (read by OnPolicyRunner.learn): keep 0.005 early to discover
+        # the jump (~iter2000), then DROP to 0.001 at iter 2800 so the policy converges
+        # (noise_std tightens) as PD fades over iter ~1000-5500. Confirmed winner: noise_std
+        # converged 0.69->0.48, late decline gone, greedy play peak ~0.576.
+        entropy_anneal_iter = 2800
+        entropy_coef_final = 0.001

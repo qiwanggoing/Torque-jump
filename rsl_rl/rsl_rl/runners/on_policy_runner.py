@@ -122,6 +122,15 @@ class OnPolicyRunner:
         tot_iter = self.current_learning_iteration + num_learning_iterations
         for it in range(self.current_learning_iteration, tot_iter):
             start = time.time()
+            # entropy_coef annealing (optional, via runner cfg): keep high exploration early
+            # to discover the behavior, then drop entropy_coef at a configured iteration so the
+            # policy stops exploring and CONVERGES (noise_std tightens) in late training.
+            _anneal_iter = self.cfg.get("entropy_anneal_iter", None)
+            if _anneal_iter is not None and it >= int(_anneal_iter):
+                _ec_final = self.cfg.get("entropy_coef_final", self.alg.entropy_coef)
+                if it == int(_anneal_iter):
+                    print(f"[entropy anneal] iter {it}: entropy_coef {self.alg.entropy_coef} -> {_ec_final}")
+                self.alg.entropy_coef = _ec_final
             # Rollout
             with torch.inference_mode():
                 for i in range(self.num_steps_per_env):
