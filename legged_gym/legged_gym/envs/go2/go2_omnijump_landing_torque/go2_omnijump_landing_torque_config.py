@@ -78,6 +78,25 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
         # pushoff_leg_sync was replaced by contact-based foot_contact_sync, which uses no sigma.
         pose_guidance_sigma = 5.0
 
+        # ---- Countermovement via ENRICHED RSI (Olsen 2025), NOT a squat-depth reward ----
+        # Goal: get a deeper launch (dip-then-explode) so the push distance grows and peak height
+        # recovers toward the Hill cap (~0.6) instead of the current ~0.31 "pop straight up".
+        # Mechanism (no new reward term, no reward-stack conflict — see audit):
+        #   * rsi_static_frac: half of the RSI envs now start AT REST in the deep squat (vz~=0)
+        #     instead of all with upward velocity. This bootstraps V(deep-squat-at-rest); the
+        #     standing rollouts then DISCOVER on their own that dipping into that high-value
+        #     launch state before pushing (a countermovement) yields a higher jump.
+        #   * Early-deep curriculum: keep RSI tight at the deep squat (~0.20m) early in training,
+        #     then broaden the upper height bound toward standing over ~iter 2000.
+        # Squat DEPTH stays at the proven stance_squat_height (0.20) -> identical collision/contact
+        # geometry to the validated RSI; only velocity split + height upper-bound schedule change.
+        rsi_static_frac = 0.5
+        rsi_static_vel_z_min = -0.1          # near-rest: tiny down/up around the squat bottom
+        rsi_static_vel_z_max = 0.3
+        rsi_height_offset_max_early = 0.0    # early: base ~0.20 (deepest), narrow
+        rsi_height_offset_max_late = 0.12    # late: base up to ~0.32 (broaden toward standing)
+        rsi_curriculum_steps = 192000        # ~iter 2000 at ~96 steps/iter
+
         class scales(GO2OmniJumpCurriculumTorqueCfg.rewards.scales):
             # ---- proven jump-driving stack inherited UNCHANGED ----
             #   takeoff_vertical_velocity=10, projected_peak=15, successful_jump=300,
