@@ -24,6 +24,7 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
     ACTIVE_REWARD_WHITELIST = GO2OmniJumpCurriculumTorque.ACTIVE_REWARD_WHITELIST | {
         "landing_position",
         "projected_landing",
+        "pushoff_leg_sync",
     }
 
     # Curriculum gate table requires an entry for every active reward. Curriculum
@@ -33,6 +34,7 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
         **GO2OmniJumpCurriculumTorque.REWARD_START_STAGES,
         "landing_position": 1,
         "projected_landing": 1,
+        "pushoff_leg_sync": 0,
     }
 
     # ------------------------------------------------------------------ #
@@ -147,13 +149,22 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
         # Olsen 2025 densification: while airborne, project the final landing xy
         # from ballistic motion and reward closeness to the commanded landing
         # point. Converts the otherwise terminal-only landing signal into a dense
-        # in-flight gradient. ``airborne`` is already gated on real liftoff
-        # (has_taken_off & not landed & feet off the ground), so a legs-tucked
-        # fake jump that never leaves the ground does not fire it.
+        # in-flight gradient.
         #   t_land solves  pz + vz·t - ½g·t² = h_land  (later/descending root).
-        active = (self.airborne & self._jump_commanded()).float()
-        g = 9.81
+        #
+        # HEIGHT GATE (pz > min): the `airborne` flag alone (feet off ground) is
+        # NOT enough — it is farmable. A legs-tucked sprawl (feet off the ground,
+        # body collapsed to ~0.13m over the spawn point) keeps `airborne` True, so
+        # the projected landing trivially ≈ target and this dense reward pays
+        # ~1/step forever without any real jump (observed: rew exploded 0.2→5.5,
+        # mean_peak collapsed to 0.13). Requiring the body above standing height
+        # mirrors the real-jump peak gate on the sparse landing_position term:
+        # a genuine jump cannot hover up there, so the farm is impossible while
+        # the dense in-place landing control (Stage 1, target=spawn) is preserved.
         pz = self.root_states[:, 2]
+        min_h = float(getattr(self.cfg.rewards, "projected_landing_min_height", 0.40))
+        active = (self.airborne & (pz > min_h) & self._jump_commanded()).float()
+        g = 9.81
         vz = self.root_states[:, 9]
         h_land = self.env_origins[:, 2] + float(self.cfg.rewards.base_height_target)
         disc = torch.clamp(vz * vz + 2.0 * g * (pz - h_land), min=0.0)
@@ -173,3 +184,51 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
         err = torch.sum(torch.square(self.root_states[:, :2] - self.landing_target[:, :2]), dim=1)
         sigma = max(float(getattr(self.cfg.rewards, "sigma_pos_landing", 0.05)), 1e-4)
         return active * torch.exp(-err / sigma)
+
+    def _reward_default_pos(self):
+        # Strengthened pose anchor (weight raised in config) to hold posture after PD
+        # has faded — the rear legs were drifting from the pose at pd_alpha=0 because
+        # the RL never had to hold it itself (PD did). BUT zero it during the ground
+        # push-off extension (jumping, not yet airborne, moving UP): there the legs must
+        # extend BEYOND q_ground to launch, so penalizing that deviation would cap the
+        # jump. Full strength in the held phases (stand / squat-load / flight-tuck /
+        # landing) where holding the pose is exactly the goal; off only during the
+        # explosive upward push (front-rear coordination there is handled by
+        # pushoff_leg_sync, which stays active).
+        l1 = torch.sum(torch.abs(self.dof_pos - self.default_joint_pd_target), dim=1)
+        pushoff = self.jumping_state & (~self.has_taken_off) & (self.root_states[:, 9] > 0.0)
+        return torch.where(pushoff, torch.zeros_like(l1), l1)
+
+    def _reward_pushoff_leg_sync(self):
+        # Front-rear leg coordination during push-off, built in the SAME idiom as
+        # _reward_straight_jump_joint_symmetry (deviation-from-default, L1, exp,
+        # straight-gated) but pairing SAME-SIDE FRONT-REAR (FL-RL, FR-RR) instead
+        # of left-right. Left-right is already enforced by PPO sym_loss; front-rear
+        # is the uncovered gap (user observed the legs diverging front/rear at the
+        # takeoff instant — nothing constrains it: sym_loss is left-right only and
+        # joint_angle_extended is weight 0).
+        #
+        # The straight gate (forward landing displacement ≈ 0) is the crux: PPO
+        # sym_loss CANNOT enforce front-rear symmetry without killing forward jumps
+        # (front==rear => no net forward push), but a gated reward CAN — full
+        # strength for vertical jumps (Stage 1), relaxing for Stage-2 forward jumps
+        # where front/rear legitimately push differently. Deviation-from-default
+        # cancels the designed front/rear thigh offset (0.8 vs 1.0), so we reward
+        # "front and rear move by the same amount", not "same absolute angle".
+        active = (self.jumping_state & (~self.has_taken_off)).float()
+        fwd = self.commands[:, 0]   # forward landing displacement (m); 0 in Stage 1
+        straight_sigma = max(float(getattr(self.cfg.rewards, "symmetry_forward_sigma", 0.20)), 1e-3)
+        straight_gate = torch.exp(-torch.square(fwd / straight_sigma))
+        q = self.dof_pos - self.default_dof_pos
+        left_fr = (
+            torch.abs(q[:, 0] - q[:, 6])    # FL_hip  vs RL_hip
+            + torch.abs(q[:, 1] - q[:, 7])  # FL_thigh vs RL_thigh
+            + torch.abs(q[:, 2] - q[:, 8])  # FL_calf vs RL_calf
+        )
+        right_fr = (
+            torch.abs(q[:, 3] - q[:, 9])    # FR_hip  vs RR_hip
+            + torch.abs(q[:, 4] - q[:, 10])  # FR_thigh vs RR_thigh
+            + torch.abs(q[:, 5] - q[:, 11])  # FR_calf vs RR_calf
+        )
+        sigma = max(float(getattr(self.cfg.rewards, "pushoff_sync_sigma", 1.5)), 1e-3)
+        return active * straight_gate * torch.exp(-(left_fr + right_fr) / sigma)

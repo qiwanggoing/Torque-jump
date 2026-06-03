@@ -49,6 +49,35 @@ def infer_checkpoint_iter(load_path):
     return int(match.group(1))
 
 
+def _true_step_count_at_iter(checkpoint_iter, num_steps_per_env, dt, start_freq, max_freq, warmup_steps, x0):
+    """Reconstruct the env's TRUE step_count at a given training iteration.
+
+    SATA control runs a variable-frequency inner loop (GO2Torque.step): each policy
+    step issues 1/(dt*current_freq) physics steps and step_count increments once per
+    physics step. current_freq ramps start_freq->max_freq with general_scale, so the
+    physics-steps-per-policy-step DROPS over training (e.g. 2->1 for 100->200 Hz at
+    dt=0.005). The old play sync used a CONSTANT ratio (the start-freq value), which
+    over-counts step_count for post-warmup checkpoints -> play reconstructs a too-faded
+    PD prior (pd_alpha too low) -> mid-training checkpoints under-perform in play
+    (e.g. iter 2800 ran at pd_alpha 0.20 vs the trained 0.26; iter 4000 at 0.0 vs 0.13).
+    Replaying the loop with the linear-warmup general_scale schedule makes play's
+    PD-fade level match what the policy actually trained with.
+    """
+    span = max(float(x0) - float(warmup_steps), 1.0)
+    sc = 0.0
+    cdt = 0.0
+    cf = float(start_freq)
+    for _ in range(int(checkpoint_iter)):
+        for _ in range(int(num_steps_per_env)):
+            while cdt * cf < 1.0:
+                sc += 1.0
+                gs = min(1.0, max(0.0, (sc - float(warmup_steps)) / span))
+                cf = float(start_freq) + gs * (float(max_freq) - float(start_freq))
+                cdt += float(dt)
+            cdt %= (1.0 / cf)
+    return sc
+
+
 def play(args):
     env_cfg, train_cfg = task_registry.get_cfgs(name=args.task)
     num_commands = env_cfg.commands.num_commands
@@ -118,9 +147,32 @@ def play(args):
 
     if checkpoint_iter is not None:
         policy_steps_per_iter = train_cfg.runner.num_steps_per_env
-        physics_steps_per_policy_step = max(1, int(round(1.0 / (env_cfg.sim.dt * env_cfg.growth.start_freq))))
-        approx_physics_steps = checkpoint_iter * policy_steps_per_iter * physics_steps_per_policy_step
-        env_cfg.test.checkpoint = checkpoint_iter * physics_steps_per_policy_step
+        if hasattr(env_cfg.growth, "warmup_steps"):
+            # Variable-frequency integration: reconstruct the SAME PD-fade level the
+            # policy trained with (see _true_step_count_at_iter). The env forces, in
+            # test mode, step_count = num_steps_per_env * test.checkpoint each growth
+            # update, so set test.checkpoint to reproduce the true step_count.
+            true_sc = _true_step_count_at_iter(
+                checkpoint_iter, policy_steps_per_iter, env_cfg.sim.dt,
+                env_cfg.growth.start_freq, env_cfg.growth.max_freq,
+                env_cfg.growth.warmup_steps, env_cfg.growth.x0,
+            )
+            approx_physics_steps = int(round(true_sc))
+            # CRITICAL: the env's test-mode override sets
+            #   step_count = GO2TorqueCfgPPO.num_steps_per_env * test.checkpoint
+            # using the BASE GO2TorqueCfgPPO value (24), which is NOT the jump task's
+            # num_steps_per_env (48). Divide by the SAME base value so the env reconstructs
+            # exactly true_sc (else step_count is off by 24/48 = 1/2 -> wrong pd_alpha; e.g.
+            # iter6000 would get pd_alpha 0.31 instead of the trained 0, cutting the policy's
+            # torque authority and preventing takeoff).
+            from legged_gym.envs.go2.go2_torque.go2_torque_config import GO2TorqueCfgPPO as _BaseCfgPPO
+            env_test_multiplier = float(_BaseCfgPPO().runner.num_steps_per_env)
+            env_cfg.test.checkpoint = true_sc / env_test_multiplier
+        else:
+            # Fallback for non-warmup (e.g. Gompertz base) schedules: old constant ratio.
+            physics_steps_per_policy_step = max(1, int(round(1.0 / (env_cfg.sim.dt * env_cfg.growth.start_freq))))
+            approx_physics_steps = checkpoint_iter * policy_steps_per_iter * physics_steps_per_policy_step
+            env_cfg.test.checkpoint = checkpoint_iter * physics_steps_per_policy_step
     else:
         approx_physics_steps = None
 

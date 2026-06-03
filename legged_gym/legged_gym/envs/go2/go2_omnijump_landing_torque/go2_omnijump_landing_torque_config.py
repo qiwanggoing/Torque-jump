@@ -43,6 +43,11 @@ from legged_gym.envs.go2.go2_omnijump_curriculum_torque.go2_omnijump_curriculum_
 
 
 class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
+    # NOTE: the deeper 0.25 ready-crouch experiment was REVERTED — it triggered a collapse
+    # (~iter 700, still in warmup/full-PD): the near-folded crouch was hard to hold, the policy
+    # splayed the hips to balance, default_hip_pos collapsed, and the jump fell apart. Back to the
+    # proven ~0.30 default stance (inherited). Revisit launch depth later via a milder crouch +
+    # stronger default_hip_pos if pursuing more height.
     class commands(GO2OmniJumpCurriculumTorqueCfg.commands):
         # Landing-point task: commands[0:2] repurposed velocity -> landing displacement (m).
         # Stage 1 keeps the displacement at [0,0] (land in place == proven vertical jump).
@@ -62,8 +67,20 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
         # Landing-reward kernel widths + real-jump gate for the sparse terminal term.
         sigma_pos_landing = 0.05            # terminal landing xy (sparse) — tight
         sigma_landing_proj = 0.10           # in-flight ballistic estimate — looser (noisy)
-        landing_real_jump_min_peak = 0.40   # body must clear this for the sparse landing reward
+        landing_real_jump_min_peak = 0.40   # peak gate for the SPARSE landing_position reward
                                             # (omnijump squat settles ~0.31, real jump peaks ~0.56)
+        projected_landing_min_height = 0.40 # instantaneous height gate for the DENSE projected_landing:
+                                            # blocks the legs-tucked sprawl farm (body ~0.13, feet off ground)
+                                            # while keeping dense in-place landing control during real apex.
+        # Form-reward kernels, RE-WIDENED after the first attempt saturated. The earlier sigmas
+        # (pushoff 0.25 = left-right scale, pose 2.0 = sharpened) drove exp(-err/sigma) to ~0 on
+        # the CURRENT large errors (front-rear push diff ~1.3 rad; air pose ~7 rad off q_air),
+        # so both rewards contributed ~0 with no gradient. sigma must match the error SCALE.
+        symmetry_forward_sigma = 0.20       # straight-jump gate width (m of forward displacement);
+                                            # Stage1 fwd=0 -> always on; relaxes for Stage-2 forward jumps
+        pushoff_sync_sigma = 1.5            # front-rear leg-sync kernel (rad); was 0.25 (left-right scale) -> saturated
+        pose_guidance_sigma = 5.0           # kept inherited 5.0; sharpening to 2.0 backfired (sharp exp saturates at
+                                            # the large air-pose error). Fix for weak pose rewards is WEIGHT (1.5), not sigma.
 
         class scales(GO2OmniJumpCurriculumTorqueCfg.rewards.scales):
             # ---- proven jump-driving stack inherited UNCHANGED ----
@@ -73,11 +90,34 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
             tracking_linear_velocity = 0.0   # was 0.5: commands[0:2] is now meters, not m/s
             projected_landing = 10.0         # dense horizontal shaper (vs projected_peak=15 -> height stays prioritized)
             landing_position = 30.0          # sparse terminal landing-at-target bonus (real-jump gated)
+            # ---- structurally-inert rewards removed ----
+            joint_angle_loaded = 0.0         # was 0.4: phase_loaded (jumping & ~taken_off & vz<=0) almost never
+                                             # fires — the policy pre-squats during idle and pops straight up on
+                                             # command, so there is no in-jump squat-down window. Contributed 0.0000.
+            landing_stability = 0.0          # was 1.0: exp(-landing_velocity/0.25) but touchdown velocities are
+                                             # >> 0.25, so it floors at ~0 and never fires (contributed 0.0002).
+                                             # If landing damping is wanted later, re-add with a much looser sigma.
+            # ---- front-rear push-off coordination (new) ----
+            pushoff_leg_sync = 2.0           # front & rear legs extend together at takeoff (deviation-matched,
+                                             # straight-jump gated) -> straighter launch, less in-air pitching.
+            # ---- air/landing pose quality: revived from 0.4 (near-dead) to actually pull pose ----
+            joint_angle_aerial = 1.5         # was 0.4: tuck pose (q_air) in flight — main in-air stability lever
+            joint_angle_prelanding = 1.5     # was 0.4: pre-landing pose (q_pre)
+            joint_angle_landing = 1.5        # was 0.4: landing pose (q_ground)
+            # ---- post-PD pose-holding (rear legs drifted once PD faded to 0) ----
+            default_pos = -0.5               # was -0.3: stronger pose anchor so RL holds posture WITHOUT PD.
+                                             # _reward_default_pos override zeros it during push-off so this does NOT cap the jump.
+            orientation = -2.0               # was -1.6: mild bump — directly hold body attitude (less wobble post-PD)
 
     class logging(GO2OmniJumpCurriculumTorqueCfg.logging):
         print_episode_keys = GO2OmniJumpCurriculumTorqueCfg.logging.print_episode_keys + [
             "rew_projected_landing",
             "rew_landing_position",
+            "rew_pushoff_leg_sync",
+            # inherited-active but missing from the parent's print list — surface them
+            "rew_joint_angle_aerial",
+            "rew_joint_angle_prelanding",
+            "rew_joint_angle_landing",
         ]
 
     class test(GO2OmniJumpCurriculumTorqueCfg.test):
@@ -88,6 +128,10 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
 
 
 class GO2OmniJumpLandingTorqueCfgPPO(GO2OmniJumpCurriculumTorqueCfgPPO):
+    class algorithm(GO2OmniJumpCurriculumTorqueCfgPPO.algorithm):
+        sym_coef = 1.0   # was 0.5: match my_go2_jump — tighter LEFT-RIGHT mirror symmetry
+                         # (front-rear is handled by the pushoff_leg_sync reward, not sym_loss)
+
     class runner(GO2OmniJumpCurriculumTorqueCfgPPO.runner):
         experiment_name = "go2_omnijump_landing_torque"
         run_name = "stage1_landing"
