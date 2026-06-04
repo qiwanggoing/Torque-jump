@@ -447,19 +447,22 @@ class GO2OmniJumpCurriculumTorque(GO2OmniJumpTorque):
         return active * torch.sum(torch.square(acc), dim=1)
 
     def _reward_joint_angle_aerial(self):
-        active = (self.airborne & (~self.prelanding)).float()
+        # Squat-depth gate: a non-squat pop still goes airborne and would farm this
+        # pose reward (only reachable by leaving the ground), giving the policy a reason
+        # to pop without ever loading. Gate it so the dip is the only door to the air.
+        active = (self.airborne & (~self.prelanding) & self._squat_deep_enough()).float()
         pose_error = torch.sum(torch.abs(self.dof_pos - self.q_air_target.unsqueeze(0)), dim=1)
         sigma = max(float(getattr(self.cfg.rewards, "pose_guidance_sigma", 1.5)), 1e-3)
         return active * torch.exp(-pose_error / sigma)
 
     def _reward_joint_angle_prelanding(self):
-        active = self.prelanding.float()
+        active = (self.prelanding & self._squat_deep_enough()).float()   # squat-depth gate: no dip -> no pose farm
         pose_error = torch.sum(torch.abs(self.dof_pos - self.q_pre_target.unsqueeze(0)), dim=1)
         sigma = max(float(getattr(self.cfg.rewards, "pose_guidance_sigma", 1.5)), 1e-3)
         return active * torch.exp(-pose_error / sigma)
 
     def _reward_joint_angle_landing(self):
-        active = self.landing.float()
+        active = (self.landing & self._squat_deep_enough()).float()   # squat-depth gate: no dip -> no pose farm
         pose_error = torch.sum(torch.abs(self.dof_pos - self.q_ground_target.unsqueeze(0)), dim=1)
         sigma = max(float(getattr(self.cfg.rewards, "pose_guidance_sigma", 1.5)), 1e-3)
         return active * torch.exp(-pose_error / sigma)
