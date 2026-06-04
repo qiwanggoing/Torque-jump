@@ -204,17 +204,31 @@ class GO2OmniJumpTorque(GO2Torque):
             rsi_mask = torch.rand(len(env_ids), device=self.device) < rsi_prob
             rsi_ids = env_ids[rsi_mask]
             if len(rsi_ids) > 0:
-                # RSI from squat: base height + DOFs in squat pose + upward velocity.
-                # Goal: bootstrap V(squat → pushoff) so the policy learns to initiate jumps itself.
+                # RSI from squat, two sub-modes (both with DOFs in the squat pose):
+                #   - launch (vz 1-3): air-drop already rising -> bootstraps V(squat -> flight). [original]
+                #   - static (vz ~ 0): air-drop AT REST in the deep squat + jumping_state, so the policy
+                #     must PUSH OFF from a standstill squat. THIS is the exploration piece we were missing:
+                #     it lets value learn "deep-squat-at-rest = high return", so the standing rollouts then
+                #     discover "dip first, then push" (countermovement) on their own. Pairs with the
+                #     squat-depth gate (RSI is gate-exempt, so the dropped env earns jump rewards straight
+                #     from the dip state, planting the V(dip) the gate then makes the standing policy chase).
                 squat_height = float(getattr(self.cfg.rewards, "stance_squat_height", 0.20))
+                static_frac = float(getattr(self.cfg.rewards, "rsi_static_frac", 0.0))
+                static_mask = torch.rand(len(rsi_ids), device=self.device) < static_frac
+
                 height_offset_min = float(getattr(self.cfg.rewards, "rsi_height_offset_min", 0.0))
                 height_offset_max = float(getattr(self.cfg.rewards, "rsi_height_offset_max", 0.1))
                 rsi_height_offset = torch_rand_float(height_offset_min, height_offset_max, (len(rsi_ids), 1), device=self.device).squeeze(1)
+                rsi_height_offset = torch.where(static_mask, torch.zeros_like(rsi_height_offset), rsi_height_offset)  # static sits AT the squat
                 self.root_states[rsi_ids, 2] = squat_height + self.env_origins[rsi_ids, 2] + rsi_height_offset
 
                 vel_z_min = float(getattr(self.cfg.rewards, "rsi_vel_z_min", 1.0))
                 vel_z_max = float(getattr(self.cfg.rewards, "rsi_vel_z_max", 3.0))
-                rsi_vel_z = torch_rand_float(vel_z_min, vel_z_max, (len(rsi_ids), 1), device=self.device).squeeze(1)
+                static_vz_min = float(getattr(self.cfg.rewards, "rsi_static_vel_z_min", -0.1))
+                static_vz_max = float(getattr(self.cfg.rewards, "rsi_static_vel_z_max", 0.3))
+                launch_vz = torch_rand_float(vel_z_min, vel_z_max, (len(rsi_ids), 1), device=self.device).squeeze(1)
+                static_vz = torch_rand_float(static_vz_min, static_vz_max, (len(rsi_ids), 1), device=self.device).squeeze(1)
+                rsi_vel_z = torch.where(static_mask, static_vz, launch_vz)
                 self.root_states[rsi_ids, 9] = rsi_vel_z
 
                 self.dof_pos[rsi_ids] = self.q_squat_target.unsqueeze(0)

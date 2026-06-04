@@ -102,6 +102,13 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
         squat_gate_height = 0.24            # must dip base to <=0.24m (idle ~0.31) to unlock jump rewards
         successful_jump_min_peak_height = 0.40  # was 0.30: a ~0.34 "low pop" no longer counts as success
                                                 # (= command floor 0.40; kills the low-jump shortcut)
+        # RSI static deep-squat air-drop (the EXPLORATION piece): half the RSI envs start AT REST in the
+        # deep squat + jumping, so value learns "deep-squat-at-rest = high return" (they're gate-exempt
+        # and earn jump rewards from the dip). This plants V(dip) that the squat-depth gate then makes the
+        # standing policy chase. (fe15103 tried this WITHOUT the gate and failed; now the gate backs it.)
+        rsi_static_frac = 0.5              # of the rsi_prob(0.2) envs, half = static deep-squat, half = launch
+        rsi_static_vel_z_min = -0.1       # near-rest vz at the squat bottom (slight down/up)
+        rsi_static_vel_z_max = 0.3
 
         class scales(GO2OmniJumpCurriculumTorqueCfg.rewards.scales):
             # ---- proven jump-driving stack inherited UNCHANGED ----
