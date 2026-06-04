@@ -165,7 +165,7 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
         # the dense in-place landing control (Stage 1, target=spawn) is preserved.
         pz = self.root_states[:, 2]
         min_h = float(getattr(self.cfg.rewards, "projected_landing_min_height", 0.40))
-        active = (self.airborne & (pz > min_h) & self._jump_commanded()).float()
+        active = (self.airborne & (pz > min_h) & self._jump_commanded() & self._squat_deep_enough()).float()
         g = 9.81
         vz = self.root_states[:, 9]
         h_land = self.env_origins[:, 2] + float(self.cfg.rewards.base_height_target)
@@ -182,7 +182,7 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
         # peak so the body must genuinely rise (no farming via a tucked fake jump).
         min_peak = float(getattr(self.cfg.rewards, "landing_real_jump_min_peak", 0.40))
         real_jump = self.peak_base_height >= min_peak
-        active = self.just_landed.float() * self._jump_commanded().float() * real_jump.float()
+        active = self.just_landed.float() * self._jump_commanded().float() * real_jump.float() * self._squat_deep_enough().float()
         err = torch.sum(torch.square(self.root_states[:, :2] - self.landing_target[:, :2]), dim=1)
         sigma = max(float(getattr(self.cfg.rewards, "sigma_pos_landing", 0.05)), 1e-4)
         return active * torch.exp(-err / sigma)
@@ -239,10 +239,11 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
         sigma = max(float(getattr(self.cfg.rewards, "stance_squat_sigma", 0.02)), 1e-4)
         base_z = self.root_states[:, 2] - self.env_origins[:, 2]
         reward = torch.exp(-torch.square(base_z - squat_height) / sigma)
-        # Pay ONLY inside the stance-load window (jump_step < N). Outside it the takeoff rewards
-        # take over; capping stance_squat to the window stops the long 1.0s timeout from being
-        # farmed by squatting and never jumping. (n=0 -> whole pre-takeoff phase, backward-compat.)
-        n = int(getattr(self.cfg.rewards, "stance_window_steps", 0))
-        in_window = (self.jump_step_counter < n) if n > 0 else torch.ones_like(self.jumping_state)
-        active = self.jumping_state & (~self.has_taken_off) & in_window
+        # Pay while still loading AND not yet deep enough (jump_min_base_z still above the gate):
+        # this drives the base DOWN to squat_gate_height, then stops (the squat-depth gate on
+        # successful_jump/projected_peak takes over from there). Capping it at the gate also stops
+        # the long 1.0s timeout from being farmed by squatting and never jumping.
+        gate = float(getattr(self.cfg.rewards, "squat_gate_height", 0.0))
+        not_deep_yet = (self.jump_min_base_z > gate) if gate > 0.0 else torch.ones_like(self.jumping_state)
+        active = self.jumping_state & (~self.has_taken_off) & not_deep_yet
         return active.float() * reward

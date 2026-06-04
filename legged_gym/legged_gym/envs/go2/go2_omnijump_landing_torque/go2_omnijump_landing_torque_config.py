@@ -92,15 +92,16 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
         # Give the dip+push room: a countermovement (~0.3-0.35s) does not fit the old 40-step
         # (0.2s) takeoff window — the dip would eat the budget and trip the timeout. 80 steps
         # = 0.4s. (step = sim dt 0.005s, counted on physics substeps, so freq-independent.)
-        takeoff_timeout_steps = 200         # 1.0s (was 80/0.4s): give the full dip(0.5s)+push(0.5s) room
-        # Forced stance-load window (countermovement): first 100 steps (0.5s) after the jump
-        # command, takeoff/height rewards (takeoff_vz / takeoff_direction / projected_peak) are
-        # gated OFF for non-RSI envs so ONLY stance_squat pays -> the policy is FORCED to dip
-        # first, then push. Shares jump_step_counter with takeoff_timeout (100 load + <=100 push,
-        # within the 200-step / 1.0s budget). RSI envs exempt (keeps their flight bootstrap).
-        # NOTE: stance_squat is ALSO limited to this window (see env) so the longer timeout cannot
-        # be farmed by squatting-and-never-jumping.
-        stance_window_steps = 100
+        takeoff_timeout_steps = 200         # 1.0s: room for dip + push
+        # Squat-depth gate (countermovement) — REPLACES the failed time-window. successful_jump and
+        # projected_peak are WITHHELD until this jump has dipped to <= squat_gate_height before
+        # takeoff. So "don't dip" = no main rewards AT ALL (not just a 0.5s blackout) -> a real
+        # countermovement is the only way to score. The time-window failed because gating rewards
+        # for N steps didn't stop the policy from physically insta-popping; a depth gate ties the
+        # reward to the dip itself. RSI air-drops exempt. (stance_window_steps removed.)
+        squat_gate_height = 0.24            # must dip base to <=0.24m (idle ~0.31) to unlock jump rewards
+        successful_jump_min_peak_height = 0.40  # was 0.30: a ~0.34 "low pop" no longer counts as success
+                                                # (= command floor 0.40; kills the low-jump shortcut)
 
         class scales(GO2OmniJumpCurriculumTorqueCfg.rewards.scales):
             # ---- proven jump-driving stack inherited UNCHANGED ----
@@ -116,18 +117,22 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
                                              # command, so there is no in-jump squat-down window. Contributed 0.0000.
                                              # SUPERSEDED by stance_squat below (same goal, NO vz<=0 dead-loop gate).
             # ---- countermovement: stance-squat shaping (the piece we were missing) ----
-            stance_squat = 1.5               # paid ONLY inside the 0.5s stance window now (see env). In that window
-                                             # takeoff rewards are gated off so stance_squat has no competition ->
-                                             # 1.5 is plenty to drive the dip. Window-capped so the 1.0s timeout
-                                             # can't be farmed: squat-and-don't-jump caps ~0.75 << real jump ~1.4.
-                                             # (history: 0.5 then 2.0, both unbounded-in-time = would farm at 1.0s.)
+            stance_squat = 1.5               # SHAPES the dip (how to get down); paid while loading and not yet at
+                                             # squat_gate_height, then stops. The squat-depth gate on successful_jump/
+                                             # projected_peak is the real forcing function (no dip -> no main rewards).
+                                             # Farm-safe: stops at the gate, and squatting-without-jumping earns no
+                                             # successful_jump anyway. (history: 0.5/2.0 weight-only + time-window all failed.)
             landing_stability = 0.0          # was 1.0: exp(-landing_velocity/0.25) but touchdown velocities are
                                              # >> 0.25, so it floors at ~0 and never fires (contributed 0.0002).
                                              # If landing damping is wanted later, re-add with a much looser sigma.
             # ---- four-foot contact-timing sync (penalty on staggered takeoff/landing) ----
-            foot_contact_sync = -2.0         # penalize 1-3 feet on the ground during the takeoff push / landing
+            foot_contact_sync = -3.0         # was -2.0: still visibly uneven at takeoff/landing in play.
+                                             # penalize 1-3 feet on the ground during the takeoff push / landing
                                              # window -> all four feet leave & touch down TOGETHER (less body tilt).
-                                             # (replaced the old joint-based pushoff_leg_sync.)
+                                             # active = (jumping & ~taken_off) | landing, so this tightens BOTH
+                                             # liftoff and touchdown timing. COST: stronger sync caps peak a bit
+                                             # (-2.0 already 0.576->0.539); if still uneven go -4.0, if peak drops
+                                             # too much back off. (replaced the old joint-based pushoff_leg_sync.)
             # ---- kill in-air flailing (PD faded -> RL flails legs in the ~unconstrained air phase) ----
             aerial_dof_acc = -3e-6           # was -1e-6: too weak. Air joint-accel actually ~180 rad/s^2 (flailing);
                                              # air pose is a near-zero-gradient dim (peak/airborne rewards ignore leg

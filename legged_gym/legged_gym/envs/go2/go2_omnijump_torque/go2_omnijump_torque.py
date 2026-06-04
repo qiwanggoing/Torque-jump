@@ -90,6 +90,7 @@ class GO2OmniJumpTorque(GO2Torque):
         self.post_jump_step_counter = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
         self.airborne_time = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
         self.peak_base_height = self.root_states[:, 2].clone()
+        self.jump_min_base_z = self.root_states[:, 2].clone()   # lowest base z before takeoff (squat-depth gate)
         self.landing_min_height = self.root_states[:, 2].clone()
         self.takeoff_root_xy = torch.zeros(self.num_envs, 2, dtype=torch.float, device=self.device)
         self.landing_root_xy = torch.zeros(self.num_envs, 2, dtype=torch.float, device=self.device)
@@ -180,6 +181,7 @@ class GO2OmniJumpTorque(GO2Torque):
         self.post_jump_step_counter[env_ids] = 0
         self.airborne_time[env_ids] = 0.0
         self.peak_base_height[env_ids] = self.root_states[env_ids, 2]
+        self.jump_min_base_z[env_ids] = self.root_states[env_ids, 2]
         self.landing_min_height[env_ids] = self.root_states[env_ids, 2]
         self.takeoff_root_xy[env_ids] = self.root_states[env_ids, :2]
         self.landing_root_xy[env_ids] = self.root_states[env_ids, :2]
@@ -360,6 +362,7 @@ class GO2OmniJumpTorque(GO2Torque):
         self.post_jump_step_counter[env_ids] = 0
         self.airborne_time[env_ids] = 0.0
         self.peak_base_height[env_ids] = self.root_states[env_ids, 2]
+        self.jump_min_base_z[env_ids] = self.root_states[env_ids, 2]
         self.landing_min_height[env_ids] = self.root_states[env_ids, 2]
         self.takeoff_root_xy[env_ids] = self.root_states[env_ids, :2]
         self.landing_root_xy[env_ids] = self.root_states[env_ids, :2]
@@ -384,6 +387,7 @@ class GO2OmniJumpTorque(GO2Torque):
         self.airborne_time[env_ids] = 0.0
         self.stand_step_counter[env_ids] = 0
         self.peak_base_height[env_ids] = self.root_states[env_ids, 2]
+        self.jump_min_base_z[env_ids] = self.root_states[env_ids, 2]
         self.landing_min_height[env_ids] = self.root_states[env_ids, 2]
         if completed:
             self.jump_completed_cycles[env_ids] += 1.0
@@ -447,6 +451,13 @@ class GO2OmniJumpTorque(GO2Torque):
             torch.maximum(self.peak_base_height, self.root_states[:, 2]),
             self.peak_base_height,
         )
+        # Track lowest base height during the pre-takeoff load (the dip), for the squat-depth gate.
+        loading = self.jumping_state & (~self.has_taken_off)
+        self.jump_min_base_z = torch.where(
+            loading,
+            torch.minimum(self.jump_min_base_z, self.root_states[:, 2]),
+            self.jump_min_base_z,
+        )
 
         descending = self.base_lin_vel[:, 2] < -0.05
         prelanding_height = torch.maximum(
@@ -505,7 +516,9 @@ class GO2OmniJumpTorque(GO2Torque):
             min_peak = float(getattr(self.cfg.rewards, "successful_jump_min_peak_height", 0.30))
             real_jump = self.peak_base_height >= min_peak
             jump_height_commanded = self.commands[:, 3] >= 0.28
-            success_at_impact = self.just_landed & real_jump & jump_height_commanded
+            # Squat-depth gate: a jump only counts if it dipped to <= squat_gate_height first
+            # (forces a real countermovement; RSI air-drops exempt). squat_gate_height<=0 -> off.
+            success_at_impact = self.just_landed & real_jump & jump_height_commanded & self._squat_deep_enough()
             self.pending_success |= success_at_impact
 
             # cmd-aware Gaussian height score: penalize both overshoot and undershoot
@@ -798,23 +811,24 @@ class GO2OmniJumpTorque(GO2Torque):
     def _get_air_foot_ratio(self):
         return torch.mean((~self._get_contact_state()).float(), dim=1)
 
-    def _past_stance_window(self):
-        # Countermovement "stance-load" window: for the first stance_window_steps after the jump
-        # command, gate OFF takeoff/height rewards for NON-RSI envs so the policy cannot insta-pop
-        # to grab them — in that window only stance_squat pays, which FORCES a dip-then-push.
-        # RSI envs (air-dropped mid-jump to bootstrap flight value) are exempt so the gate does
-        # not break their bootstrap. stance_window_steps=0 -> always True (no gate; default).
-        n = int(getattr(self.cfg.rewards, "stance_window_steps", 0))
-        if n <= 0:
+    def _squat_deep_enough(self):
+        # Squat-depth gate (countermovement): True once this jump has dipped to <= squat_gate_height
+        # before takeoff. successful_jump / projected_peak are withheld until then, so the only way
+        # to earn the big jump rewards is to actually load (dip) first. The previous TIME window
+        # failed because gating rewards for N steps didn't stop the policy from physically insta-
+        # popping; tying the gate to the dip depth itself does. RSI air-drops exempt (never dip).
+        # squat_gate_height<=0 -> always True (gate off; default, other tasks unaffected).
+        gate = float(getattr(self.cfg.rewards, "squat_gate_height", 0.0))
+        if gate <= 0.0:
             return torch.ones_like(self.jumping_state)
-        return self.rsi_episode_mask | (self.jump_step_counter >= n)
+        return self.rsi_episode_mask | (self.jump_min_base_z <= gate)
 
     def _reward_takeoff_vertical_velocity(self):
         base_height = self.root_states[:, 2]
         min_height = float(getattr(self.cfg.rewards, "ascending_min_base_height", 0.18))
         vz = self.root_states[:, 9]
         ascending = self.jumping_state & (vz > 0) & (~self.has_landed) & (base_height > min_height)
-        ascending = ascending & self._past_stance_window()   # stance-load gate (countermovement)
+        ascending = ascending & self._squat_deep_enough()   # squat-depth gate: no dip -> no takeoff reward
         # cmd-aware target: vz needed to reach cmd[3] from standing height
         h_stand = float(getattr(self.cfg.rewards, "stance_standing_height", 0.30))
         target_vz = torch.sqrt((2.0 * 9.81 * (self.commands[:, 3] - h_stand)).clamp(min=0.01))
@@ -835,7 +849,7 @@ class GO2OmniJumpTorque(GO2Torque):
             & (~self.has_landed)
             & (base_height > min_height)
         )
-        ascending = ascending & self._past_stance_window()   # stance-load gate (countermovement)
+        ascending = ascending & self._squat_deep_enough()   # squat-depth gate (countermovement)
         projected = base_height + torch.clamp(vz, min=0.0) ** 2 / (2.0 * 9.81)
         target = self.commands[:, 3]
         sigma = max(float(getattr(self.cfg.rewards, "projected_peak_sigma", 0.05)), 1e-4)
@@ -860,7 +874,8 @@ class GO2OmniJumpTorque(GO2Torque):
 
     def _reward_all_feet_airborne(self):
         height_progress = self._get_height_progress()
-        return self.airborne.float() * (0.25 + 0.75 * height_progress)
+        active = self.airborne & self._squat_deep_enough()   # squat-depth gate: no dip -> no flight reward
+        return active.float() * (0.25 + 0.75 * height_progress)
 
     def _get_successful_jump_velocity_score(self):
         min_time = max(float(getattr(self.cfg.rewards, "success_velocity_min_airborne_time", 0.08)), 1e-3)
@@ -1042,7 +1057,7 @@ class GO2OmniJumpTorque(GO2Torque):
         base_height = self.root_states[:, 2]
         min_height = float(getattr(self.cfg.rewards, "ascending_min_base_height", 0.18))
         ascending = self.jumping_state & (~self.has_landed) & (vz > 0) & (base_height > min_height)
-        ascending = ascending & self._past_stance_window()   # stance-load gate (countermovement)
+        ascending = ascending & self._squat_deep_enough()   # squat-depth gate: no dip -> no takeoff reward
         return ascending.float() * vertical_frac
 
     def _reward_joint_angle_loaded(self):
