@@ -25,6 +25,7 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
         "landing_position",
         "projected_landing",
         "foot_contact_sync",
+        "stance_squat",
     }
 
     # Curriculum gate table requires an entry for every active reward. Curriculum
@@ -35,6 +36,7 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
         "landing_position": 1,
         "projected_landing": 1,
         "foot_contact_sync": 0,
+        "stance_squat": 0,
     }
 
     # ------------------------------------------------------------------ #
@@ -217,3 +219,25 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
         mixed = ((num > 0) & (num < 4)).float()
         active = (self.jumping_state & (~self.has_taken_off)) | self.landing
         return active.float() * mixed
+
+    def _reward_stance_squat(self):
+        # Atanassov-style stance squat — the dense countermovement shaper we were missing.
+        # While commanded to jump but still on the ground (jumping & not yet taken off),
+        # reward the base descending toward the squat height (~0.20m). This pulls the policy
+        # OUT of the "stand-and-pop" local optimum (Atanassov: "squatting down to a height of
+        # 0.2 m while on the ground"): a deeper dip lengthens the push stroke (~0.09m -> ~0.20m),
+        # so the body accelerates over a longer distance and takes off faster -> jumps higher.
+        #
+        # Gate = jumping & ~has_taken_off, with NO vz<=0 term. That vz<=0 (phase_loaded) was the
+        # dead loop in joint_angle_loaded: it only fired once ALREADY dipping, so nothing ever
+        # drove the dip. Rewarding the whole pre-takeoff window lets the dip emerge on its own.
+        #
+        # Height-based (not pose-based): during the explosive push the base rises and this reward
+        # smoothly decays to ~0 instead of fighting leg extension — takeoff_vertical_velocity /
+        # projected_peak take over there. Switches off the instant the feet leave the ground.
+        squat_height = float(getattr(self.cfg.rewards, "stance_squat_height", 0.20))
+        sigma = max(float(getattr(self.cfg.rewards, "stance_squat_sigma", 0.02)), 1e-4)
+        base_z = self.root_states[:, 2] - self.env_origins[:, 2]
+        reward = torch.exp(-torch.square(base_z - squat_height) / sigma)
+        active = self.jumping_state & (~self.has_taken_off)
+        return active.float() * reward

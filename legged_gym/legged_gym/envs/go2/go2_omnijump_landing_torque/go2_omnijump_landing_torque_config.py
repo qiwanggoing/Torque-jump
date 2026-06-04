@@ -78,24 +78,21 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
         # pushoff_leg_sync was replaced by contact-based foot_contact_sync, which uses no sigma.
         pose_guidance_sigma = 5.0
 
-        # ---- Countermovement via ENRICHED RSI (Olsen 2025), NOT a squat-depth reward ----
-        # Goal: get a deeper launch (dip-then-explode) so the push distance grows and peak height
-        # recovers toward the Hill cap (~0.6) instead of the current ~0.31 "pop straight up".
-        # Mechanism (no new reward term, no reward-stack conflict — see audit):
-        #   * rsi_static_frac: half of the RSI envs now start AT REST in the deep squat (vz~=0)
-        #     instead of all with upward velocity. This bootstraps V(deep-squat-at-rest); the
-        #     standing rollouts then DISCOVER on their own that dipping into that high-value
-        #     launch state before pushing (a countermovement) yields a higher jump.
-        #   * Early-deep curriculum: keep RSI tight at the deep squat (~0.20m) early in training,
-        #     then broaden the upper height bound toward standing over ~iter 2000.
-        # Squat DEPTH stays at the proven stance_squat_height (0.20) -> identical collision/contact
-        # geometry to the validated RSI; only velocity split + height upper-bound schedule change.
-        rsi_static_frac = 0.5
-        rsi_static_vel_z_min = -0.1          # near-rest: tiny down/up around the squat bottom
-        rsi_static_vel_z_max = 0.3
-        rsi_height_offset_max_early = 0.0    # early: base ~0.20 (deepest), narrow
-        rsi_height_offset_max_late = 0.12    # late: base up to ~0.32 (broaden toward standing)
-        rsi_curriculum_steps = 192000        # ~iter 2000 at ~96 steps/iter
+        # ---- Countermovement via a STANCE-SQUAT shaping reward (Atanassov 2025) ----
+        # Root cause of "stand-and-pop" (no dip, capped height): nothing rewarded dipping
+        # BEFORE the push, so the policy sat in the local optimum Atanassov explicitly warns
+        # about ("standing in place"). Atanassov breaks it with RSI + a dense "squat to 0.2m
+        # while on the ground" reward; we only had RSI. Fix = add that squat reward.
+        # CRITICAL: its gate has NO vz<=0 condition. The old joint_angle_loaded used
+        # phase_loaded (jumping & ~taken_off & vz<=0) — a DEAD LOOP: it only fired once the
+        # robot was already dipping, so nothing ever drove the dip. See _reward_stance_squat.
+        stance_squat_sigma = 0.02           # exp kernel width on (base_z - stance_squat_height);
+                                            # 0.02 gives a strong gradient from the 0.31 stand
+                                            # down to the 0.20 squat (stand value ~0.55 -> 1.0).
+        # Give the dip+push room: a countermovement (~0.3-0.35s) does not fit the old 40-step
+        # (0.2s) takeoff window — the dip would eat the budget and trip the timeout. 80 steps
+        # = 0.4s. (step = sim dt 0.005s, counted on physics substeps, so freq-independent.)
+        takeoff_timeout_steps = 80          # was 40 (0.2s, only enough for stand-and-pop)
 
         class scales(GO2OmniJumpCurriculumTorqueCfg.rewards.scales):
             # ---- proven jump-driving stack inherited UNCHANGED ----
@@ -109,6 +106,14 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
             joint_angle_loaded = 0.0         # was 0.4: phase_loaded (jumping & ~taken_off & vz<=0) almost never
                                              # fires — the policy pre-squats during idle and pops straight up on
                                              # command, so there is no in-jump squat-down window. Contributed 0.0000.
+                                             # SUPERSEDED by stance_squat below (same goal, NO vz<=0 dead-loop gate).
+            # ---- countermovement: stance-squat shaping (the piece we were missing) ----
+            stance_squat = 0.5               # dense: reward base dipping toward ~0.20m while commanded
+                                             # to jump but still on the ground (jumping & ~taken_off).
+                                             # Small weight on purpose: must NOT outweigh takeoff_vz(15)/
+                                             # projected_peak(20)/successful_jump(400), so "squat then JUMP"
+                                             # stays net-positive vs squatting idle. Est ~0.10/episode (≈ takeoff_vz);
+                                             # squat-and-don't-jump farm caps ~0.2 but forfeits ~0.4 of jump rewards.
             landing_stability = 0.0          # was 1.0: exp(-landing_velocity/0.25) but touchdown velocities are
                                              # >> 0.25, so it floors at ~0 and never fires (contributed 0.0002).
                                              # If landing damping is wanted later, re-add with a much looser sigma.
@@ -130,6 +135,7 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
             "rew_projected_landing",
             "rew_landing_position",
             "rew_foot_contact_sync",
+            "rew_stance_squat",     # countermovement shaping — watch vs successful_jump_rate
             # inherited-active but missing from the parent's print list — surface them
             "rew_joint_angle_aerial",
             "rew_joint_angle_prelanding",
