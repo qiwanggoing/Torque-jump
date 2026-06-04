@@ -239,5 +239,10 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
         sigma = max(float(getattr(self.cfg.rewards, "stance_squat_sigma", 0.02)), 1e-4)
         base_z = self.root_states[:, 2] - self.env_origins[:, 2]
         reward = torch.exp(-torch.square(base_z - squat_height) / sigma)
-        active = self.jumping_state & (~self.has_taken_off)
+        # Pay ONLY inside the stance-load window (jump_step < N). Outside it the takeoff rewards
+        # take over; capping stance_squat to the window stops the long 1.0s timeout from being
+        # farmed by squatting and never jumping. (n=0 -> whole pre-takeoff phase, backward-compat.)
+        n = int(getattr(self.cfg.rewards, "stance_window_steps", 0))
+        in_window = (self.jump_step_counter < n) if n > 0 else torch.ones_like(self.jumping_state)
+        active = self.jumping_state & (~self.has_taken_off) & in_window
         return active.float() * reward

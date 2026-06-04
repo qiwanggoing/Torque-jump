@@ -92,7 +92,15 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
         # Give the dip+push room: a countermovement (~0.3-0.35s) does not fit the old 40-step
         # (0.2s) takeoff window — the dip would eat the budget and trip the timeout. 80 steps
         # = 0.4s. (step = sim dt 0.005s, counted on physics substeps, so freq-independent.)
-        takeoff_timeout_steps = 80          # was 40 (0.2s, only enough for stand-and-pop)
+        takeoff_timeout_steps = 200         # 1.0s (was 80/0.4s): give the full dip(0.5s)+push(0.5s) room
+        # Forced stance-load window (countermovement): first 100 steps (0.5s) after the jump
+        # command, takeoff/height rewards (takeoff_vz / takeoff_direction / projected_peak) are
+        # gated OFF for non-RSI envs so ONLY stance_squat pays -> the policy is FORCED to dip
+        # first, then push. Shares jump_step_counter with takeoff_timeout (100 load + <=100 push,
+        # within the 200-step / 1.0s budget). RSI envs exempt (keeps their flight bootstrap).
+        # NOTE: stance_squat is ALSO limited to this window (see env) so the longer timeout cannot
+        # be farmed by squatting-and-never-jumping.
+        stance_window_steps = 100
 
         class scales(GO2OmniJumpCurriculumTorqueCfg.rewards.scales):
             # ---- proven jump-driving stack inherited UNCHANGED ----
@@ -108,12 +116,11 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
                                              # command, so there is no in-jump squat-down window. Contributed 0.0000.
                                              # SUPERSEDED by stance_squat below (same goal, NO vz<=0 dead-loop gate).
             # ---- countermovement: stance-squat shaping (the piece we were missing) ----
-            stance_squat = 0.5               # dense: reward base dipping toward ~0.20m while commanded
-                                             # to jump but still on the ground (jumping & ~taken_off).
-                                             # Small weight on purpose: must NOT outweigh takeoff_vz(15)/
-                                             # projected_peak(20)/successful_jump(400), so "squat then JUMP"
-                                             # stays net-positive vs squatting idle. Est ~0.10/episode (≈ takeoff_vz);
-                                             # squat-and-don't-jump farm caps ~0.2 but forfeits ~0.4 of jump rewards.
+            stance_squat = 1.5               # paid ONLY inside the 0.5s stance window now (see env). In that window
+                                             # takeoff rewards are gated off so stance_squat has no competition ->
+                                             # 1.5 is plenty to drive the dip. Window-capped so the 1.0s timeout
+                                             # can't be farmed: squat-and-don't-jump caps ~0.75 << real jump ~1.4.
+                                             # (history: 0.5 then 2.0, both unbounded-in-time = would farm at 1.0s.)
             landing_stability = 0.0          # was 1.0: exp(-landing_velocity/0.25) but touchdown velocities are
                                              # >> 0.25, so it floors at ~0 and never fires (contributed 0.0002).
                                              # If landing damping is wanted later, re-add with a much looser sigma.
@@ -121,6 +128,11 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
             foot_contact_sync = -2.0         # penalize 1-3 feet on the ground during the takeoff push / landing
                                              # window -> all four feet leave & touch down TOGETHER (less body tilt).
                                              # (replaced the old joint-based pushoff_leg_sync.)
+            # ---- kill in-air flailing (PD faded -> RL flails legs in the ~unconstrained air phase) ----
+            aerial_dof_acc = -3e-6           # was -1e-6: too weak. Air joint-accel actually ~180 rad/s^2 (flailing);
+                                             # air pose is a near-zero-gradient dim (peak/airborne rewards ignore leg
+                                             # pose) so RL leaves it noisy. x3 so "flail vs tuck" actually moves the
+                                             # return. Watch it doesn't over-damp the necessary tuck/extend.
             # ---- air/landing pose quality: revived from 0.4 (near-dead) to actually pull pose ----
             joint_angle_aerial = 1.5         # was 0.4: tuck pose (q_air) in flight — main in-air stability lever
             joint_angle_prelanding = 1.5     # was 0.4: pre-landing pose (q_pre)

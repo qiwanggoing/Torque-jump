@@ -798,11 +798,23 @@ class GO2OmniJumpTorque(GO2Torque):
     def _get_air_foot_ratio(self):
         return torch.mean((~self._get_contact_state()).float(), dim=1)
 
+    def _past_stance_window(self):
+        # Countermovement "stance-load" window: for the first stance_window_steps after the jump
+        # command, gate OFF takeoff/height rewards for NON-RSI envs so the policy cannot insta-pop
+        # to grab them — in that window only stance_squat pays, which FORCES a dip-then-push.
+        # RSI envs (air-dropped mid-jump to bootstrap flight value) are exempt so the gate does
+        # not break their bootstrap. stance_window_steps=0 -> always True (no gate; default).
+        n = int(getattr(self.cfg.rewards, "stance_window_steps", 0))
+        if n <= 0:
+            return torch.ones_like(self.jumping_state)
+        return self.rsi_episode_mask | (self.jump_step_counter >= n)
+
     def _reward_takeoff_vertical_velocity(self):
         base_height = self.root_states[:, 2]
         min_height = float(getattr(self.cfg.rewards, "ascending_min_base_height", 0.18))
         vz = self.root_states[:, 9]
         ascending = self.jumping_state & (vz > 0) & (~self.has_landed) & (base_height > min_height)
+        ascending = ascending & self._past_stance_window()   # stance-load gate (countermovement)
         # cmd-aware target: vz needed to reach cmd[3] from standing height
         h_stand = float(getattr(self.cfg.rewards, "stance_standing_height", 0.30))
         target_vz = torch.sqrt((2.0 * 9.81 * (self.commands[:, 3] - h_stand)).clamp(min=0.01))
@@ -823,6 +835,7 @@ class GO2OmniJumpTorque(GO2Torque):
             & (~self.has_landed)
             & (base_height > min_height)
         )
+        ascending = ascending & self._past_stance_window()   # stance-load gate (countermovement)
         projected = base_height + torch.clamp(vz, min=0.0) ** 2 / (2.0 * 9.81)
         target = self.commands[:, 3]
         sigma = max(float(getattr(self.cfg.rewards, "projected_peak_sigma", 0.05)), 1e-4)
@@ -1029,6 +1042,7 @@ class GO2OmniJumpTorque(GO2Torque):
         base_height = self.root_states[:, 2]
         min_height = float(getattr(self.cfg.rewards, "ascending_min_base_height", 0.18))
         ascending = self.jumping_state & (~self.has_landed) & (vz > 0) & (base_height > min_height)
+        ascending = ascending & self._past_stance_window()   # stance-load gate (countermovement)
         return ascending.float() * vertical_frac
 
     def _reward_joint_angle_loaded(self):
