@@ -193,13 +193,21 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
         # the RL never had to hold it itself (PD did). BUT zero it during the ground
         # push-off extension (jumping, not yet airborne, moving UP): there the legs must
         # extend BEYOND q_ground to launch, so penalizing that deviation would cap the
-        # jump. Full strength in the held phases (stand / squat-load / flight-tuck /
-        # landing) where holding the pose is exactly the goal; off only during the
-        # explosive upward push (front-rear coordination there is handled by
-        # pushoff_leg_sync, which stays active).
+        # jump.
+        #
+        # ALSO zero it during the SQUAT-DOWN (jump commanded, not yet squatted to pose):
+        # there default_joint_pd_target = q_squat, so this L1 penalty = -0.5*|stand - q_squat|
+        # ~= -3.5/step the instant the jump is commanded -- bigger than every other term. That
+        # turned the squat into "a penalty wall to flee", and the cheapest escape was to pop
+        # (vz>0 -> pushoff exclusion zeroes it) instead of folding. So the policy popped to dodge
+        # the penalty rather than squatting to earn the reward. Remove the wall: the dip is driven
+        # purely by the POSITIVE stance_squat pull toward q_squat (guide to the target, do not
+        # punish being mid-fold). Penalty resumes once squatted (-> q_ground target = encourages
+        # the launch) and in the held flight/landing phases.
         l1 = torch.sum(torch.abs(self.dof_pos - self.default_joint_pd_target), dim=1)
         pushoff = self.jumping_state & (~self.has_taken_off) & (self.root_states[:, 9] > 0.0)
-        return torch.where(pushoff, torch.zeros_like(l1), l1)
+        squat_down = self.jumping_state & (~self.has_taken_off) & (~self._squat_deep_enough())
+        return torch.where(pushoff | squat_down, torch.zeros_like(l1), l1)
 
     def _reward_foot_contact_sync(self):
         # Four-foot CONTACT-timing sync: all four feet should LEAVE the ground together at
