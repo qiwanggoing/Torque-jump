@@ -89,6 +89,15 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
         stance_squat_sigma = 0.02           # exp kernel width on (base_z - stance_squat_height);
                                             # 0.02 gives a strong gradient from the 0.31 stand
                                             # down to the 0.20 squat (stand value ~0.55 -> 1.0).
+        # Squat-POSE gate (GUIDE to the target, replaces the gameable base_z height gate):
+        # "squatted" = whole-body joint pose within squat_pose_threshold (L1 over 12 joints) of the
+        # loaded pose q_squat. Standing is ~7.1 rad from q_squat (calf -1.5->-2.66, thigh 0.8/1.0
+        # ->1.53, hips unchanged); q_squat itself = 0. Drives stand->squat, then unlocks the jump.
+        squat_pose_sigma = 3.0              # exp kernel on |dof - q_squat| for the dip reward; ~3 keeps a real
+                                            # gradient from standing (rew ~0.09) all the way down to the pose (1.0).
+        squat_pose_threshold = 2.0          # "reached the squat" (unlock jump chain + stop folding) at pose_err<=2.0
+                                            # (~72% of the way down from standing 7.1). THE knob: stuck-not-jumping
+                                            # (can't fold enough) -> RAISE; jumps too shallow -> LOWER.
         # Give the dip+push room: a countermovement (~0.3-0.35s) does not fit the old 40-step
         # (0.2s) takeoff window — the dip would eat the budget and trip the timeout. 80 steps
         # = 0.4s. (step = sim dt 0.005s, counted on physics substeps, so freq-independent.)

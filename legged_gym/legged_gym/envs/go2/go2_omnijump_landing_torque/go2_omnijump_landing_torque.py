@@ -221,29 +221,22 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
         return active.float() * mixed
 
     def _reward_stance_squat(self):
-        # Atanassov-style stance squat — the dense countermovement shaper we were missing.
-        # While commanded to jump but still on the ground (jumping & not yet taken off),
-        # reward the base descending toward the squat height (~0.20m). This pulls the policy
-        # OUT of the "stand-and-pop" local optimum (Atanassov: "squatting down to a height of
-        # 0.2 m while on the ground"): a deeper dip lengthens the push stroke (~0.09m -> ~0.20m),
-        # so the body accelerates over a longer distance and takes off faster -> jumps higher.
+        # Pose-guided countermovement (GUIDE to the target, don't block cheats). The earlier
+        # height-based version rewarded "base_z low", which is degenerate -- a single scalar that
+        # the policy farmed by face-planting forward (@3000) and splaying the legs sideways (@4900),
+        # both of which drop base_z without a launchable squat. Whack-a-mole gating of each sprawl
+        # never ends. Instead reward approaching the loaded squat POSE q_squat (a clean symmetric
+        # vertical fold, neutral hips): a full-pose target has essentially ONE satisfying config,
+        # so there is nothing degenerate to cheat -- only the clean squat scores, and base_z drops
+        # as a consequence of the fold, not as the objective.
         #
-        # Gate = jumping & ~has_taken_off, with NO vz<=0 term. That vz<=0 (phase_loaded) was the
-        # dead loop in joint_angle_loaded: it only fired once ALREADY dipping, so nothing ever
-        # drove the dip. Rewarding the whole pre-takeoff window lets the dip emerge on its own.
-        #
-        # Height-based (not pose-based): during the explosive push the base rises and this reward
-        # smoothly decays to ~0 instead of fighting leg extension — takeoff_vertical_velocity /
-        # projected_peak take over there. Switches off the instant the feet leave the ground.
-        squat_height = float(getattr(self.cfg.rewards, "stance_squat_height", 0.20))
-        sigma = max(float(getattr(self.cfg.rewards, "stance_squat_sigma", 0.02)), 1e-4)
-        base_z = self.root_states[:, 2] - self.env_origins[:, 2]
-        reward = torch.exp(-torch.square(base_z - squat_height) / sigma)
-        # Pay while still loading AND not yet deep enough (jump_min_base_z still above the gate):
-        # this drives the base DOWN to squat_gate_height, then stops (the squat-depth gate on
-        # successful_jump/projected_peak takes over from there). Capping it at the gate also stops
-        # the long 1.0s timeout from being farmed by squatting and never jumping.
-        gate = float(getattr(self.cfg.rewards, "squat_gate_height", 0.0))
-        not_deep_yet = (self.jump_min_base_z > gate) if gate > 0.0 else torch.ones_like(self.jumping_state)
-        active = self.jumping_state & (~self.has_taken_off) & not_deep_yet
+        # Gate = jumping & ~has_taken_off & not-yet-in-pose (NO vz term -> no joint_angle_loaded
+        # dead loop): drives stand -> squat from the moment the jump is commanded, then switches
+        # off once the pose is reached so it never fights the leg extension during the push (the
+        # squat-POSE gate _squat_deep_enough unlocks the jump chain from the same threshold).
+        sigma = max(float(getattr(self.cfg.rewards, "squat_pose_sigma", 3.0)), 1e-4)
+        reward = torch.exp(-self._squat_pose_err() / sigma)
+        thr = float(getattr(self.cfg.rewards, "squat_pose_threshold", 0.0))
+        not_in_pose_yet = (self.jump_min_pose_err > thr) if thr > 0.0 else torch.ones_like(self.jumping_state)
+        active = self.jumping_state & (~self.has_taken_off) & not_in_pose_yet
         return active.float() * reward

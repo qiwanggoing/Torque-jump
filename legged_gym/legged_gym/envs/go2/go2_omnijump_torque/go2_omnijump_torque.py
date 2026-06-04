@@ -91,6 +91,7 @@ class GO2OmniJumpTorque(GO2Torque):
         self.airborne_time = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
         self.peak_base_height = self.root_states[:, 2].clone()
         self.jump_min_base_z = self.root_states[:, 2].clone()   # lowest base z before takeoff (squat-depth gate)
+        self.jump_min_pose_err = torch.full((self.num_envs,), 1e3, device=self.device)  # min |dof-q_squat| before takeoff (squat-POSE gate); 1e3 = not-yet-reached
         self.landing_min_height = self.root_states[:, 2].clone()
         self.takeoff_root_xy = torch.zeros(self.num_envs, 2, dtype=torch.float, device=self.device)
         self.landing_root_xy = torch.zeros(self.num_envs, 2, dtype=torch.float, device=self.device)
@@ -182,6 +183,7 @@ class GO2OmniJumpTorque(GO2Torque):
         self.airborne_time[env_ids] = 0.0
         self.peak_base_height[env_ids] = self.root_states[env_ids, 2]
         self.jump_min_base_z[env_ids] = self.root_states[env_ids, 2]
+        self.jump_min_pose_err[env_ids] = 1e3  # squat-POSE gate: reset to not-yet-reached sentinel
         self.landing_min_height[env_ids] = self.root_states[env_ids, 2]
         self.takeoff_root_xy[env_ids] = self.root_states[env_ids, :2]
         self.landing_root_xy[env_ids] = self.root_states[env_ids, :2]
@@ -377,6 +379,7 @@ class GO2OmniJumpTorque(GO2Torque):
         self.airborne_time[env_ids] = 0.0
         self.peak_base_height[env_ids] = self.root_states[env_ids, 2]
         self.jump_min_base_z[env_ids] = self.root_states[env_ids, 2]
+        self.jump_min_pose_err[env_ids] = 1e3  # squat-POSE gate: reset to not-yet-reached sentinel
         self.landing_min_height[env_ids] = self.root_states[env_ids, 2]
         self.takeoff_root_xy[env_ids] = self.root_states[env_ids, :2]
         self.landing_root_xy[env_ids] = self.root_states[env_ids, :2]
@@ -402,6 +405,7 @@ class GO2OmniJumpTorque(GO2Torque):
         self.stand_step_counter[env_ids] = 0
         self.peak_base_height[env_ids] = self.root_states[env_ids, 2]
         self.jump_min_base_z[env_ids] = self.root_states[env_ids, 2]
+        self.jump_min_pose_err[env_ids] = 1e3  # squat-POSE gate: reset to not-yet-reached sentinel
         self.landing_min_height[env_ids] = self.root_states[env_ids, 2]
         if completed:
             self.jump_completed_cycles[env_ids] += 1.0
@@ -472,6 +476,12 @@ class GO2OmniJumpTorque(GO2Torque):
             torch.minimum(self.jump_min_base_z, self.root_states[:, 2]),
             self.jump_min_base_z,
         )
+        # Track closest approach to the loaded squat POSE before takeoff (squat-POSE gate).
+        self.jump_min_pose_err = torch.where(
+            loading,
+            torch.minimum(self.jump_min_pose_err, self._squat_pose_err()),
+            self.jump_min_pose_err,
+        )
 
         descending = self.base_lin_vel[:, 2] < -0.05
         prelanding_height = torch.maximum(
@@ -485,8 +495,19 @@ class GO2OmniJumpTorque(GO2Torque):
         self.landing = self.jumping_state & self.has_landed
 
         # Two-phase pose guidance — fold during squat-down, extend through pushoff/flight/landing.
+        # Pose-latched boundary (was vz<=0): stay in the FOLD phase until this jump has actually
+        # reached the loaded squat POSE, then commit to EXTEND. jump_min_pose_err is monotone, so it
+        # never flips back on a vz bobble — a clean load-then-release instead of the old vz flip that
+        # switched to "extend" the instant the body twitched up (so it never truly loaded). Only the
+        # PD prior / default_pos pose target read phase_loaded (joint_angle_loaded/extended are off),
+        # so this just makes the symmetric q_squat fold persist until the squat pose is reached.
+        # vz<=0 fallback keeps behaviour unchanged for tasks with the gate disabled.
         vz = self.root_states[:, 9]
-        self.phase_loaded = self.jumping_state & (~self.has_taken_off) & (vz <= 0.0)
+        _pose_thr = float(getattr(self.cfg.rewards, "squat_pose_threshold", 0.0))
+        if _pose_thr > 0.0:
+            self.phase_loaded = self.jumping_state & (~self.has_taken_off) & (self.jump_min_pose_err > _pose_thr)
+        else:
+            self.phase_loaded = self.jumping_state & (~self.has_taken_off) & (vz <= 0.0)
         self.phase_extended = self.jumping_state & (~self.phase_loaded)
         self.jump_step_counter = torch.where(
             self.jumping_state,
@@ -825,17 +846,22 @@ class GO2OmniJumpTorque(GO2Torque):
     def _get_air_foot_ratio(self):
         return torch.mean((~self._get_contact_state()).float(), dim=1)
 
+    def _squat_pose_err(self):
+        # L1 distance from the current whole-body joint pose to the loaded squat pose q_squat
+        # (a clean symmetric vertical fold, neutral hips). The single scalar that defines "squatted".
+        return torch.sum(torch.abs(self.dof_pos - self.q_squat_target.unsqueeze(0)), dim=1)
+
     def _squat_deep_enough(self):
-        # Squat-depth gate (countermovement): True once this jump has dipped to <= squat_gate_height
-        # before takeoff. successful_jump / projected_peak are withheld until then, so the only way
-        # to earn the big jump rewards is to actually load (dip) first. The previous TIME window
-        # failed because gating rewards for N steps didn't stop the policy from physically insta-
-        # popping; tying the gate to the dip depth itself does. RSI air-drops exempt (never dip).
-        # squat_gate_height<=0 -> always True (gate off; default, other tasks unaffected).
-        gate = float(getattr(self.cfg.rewards, "squat_gate_height", 0.0))
-        if gate <= 0.0:
+        # Squat-POSE gate (countermovement): True once this jump has reached the loaded squat POSE
+        # before takeoff (jump_min_pose_err <= squat_pose_threshold). The whole jump-reward chain is
+        # withheld until then, so the only way to earn it is to actually get INTO the squat -- and a
+        # pose target (vs the old base_z height) cannot be farmed by face-planting / leg-splaying to
+        # drop base_z cheaply. RSI air-drops exempt (start already in q_squat). threshold<=0 -> always
+        # True (gate off; default, other tasks unaffected).
+        thr = float(getattr(self.cfg.rewards, "squat_pose_threshold", 0.0))
+        if thr <= 0.0:
             return torch.ones_like(self.jumping_state)
-        return self.rsi_episode_mask | (self.jump_min_base_z <= gate)
+        return self.rsi_episode_mask | (self.jump_min_pose_err <= thr)
 
     def _reward_takeoff_vertical_velocity(self):
         base_height = self.root_states[:, 2]
