@@ -205,9 +205,11 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
             joint_angle_prelanding = 0.0
             joint_angle_landing = 0.0
             # ---- post-PD pose-holding (rear legs drifted once PD faded to 0) ----
-            default_pos = -0.25              # was -0.5 (the single LARGEST term): over-anchored the joint pose ->
-                                             # stiff, non-adaptive landing ("呆", can't adjust -> tips). Halved so RL
-                                             # can move legs to catch the landing. (still zeroed during push-off.)
+            default_pos = -0.5               # RESTORED from -0.25. The -0.25 (cleanup) removed the dominant pose
+                                             # anchor -> looser, higher-variance policy (noise_std ~0.84 vs ~0.55) and
+                                             # deterministic play idled/landed in a deep crouch (base_z~0.149). That
+                                             # sustained high noise is what tipped the iter~2475 collapse. (zeroed
+                                             # during push-off so it doesn't fight the jump.)
             orientation = -3.0               # was -2.0: STRENGTHEN body-attitude hold (roll+pitch) — now the main
                                              # landing-stability lever after joint_angle_landing removed. (pitch also via pitch_level.)
             # ---- (1)+(2) landing stability from the papers: stop "lands then flips" ----
@@ -251,6 +253,9 @@ class GO2OmniJumpLandingTorqueCfgPPO(GO2OmniJumpCurriculumTorqueCfgPPO):
     class algorithm(GO2OmniJumpCurriculumTorqueCfgPPO.algorithm):
         sym_coef = 1.0   # was 0.5: match my_go2_jump — tighter LEFT-RIGHT mirror symmetry
                          # (front-rear is handled by the pushoff_leg_sync reward, not sym_loss)
+        entropy_coef = 0.003   # CONSTANT 0.003 (paired with entropy_coef_final=0.003 -> the iter2800 step is a no-op).
+                               # parent default 0.001. Moderate constant: keep exploration alive through the PD->torque
+                               # fade WITHOUT the 0.005 late runaway (noise ran to 1.0+). See entropy_coef_final note.
 
     class runner(GO2OmniJumpCurriculumTorqueCfgPPO.runner):
         experiment_name = "go2_omnijump_landing_torque"
@@ -260,10 +265,10 @@ class GO2OmniJumpLandingTorqueCfgPPO(GO2OmniJumpCurriculumTorqueCfgPPO):
         checkpoint = -1
         resume_path = None
         max_iterations = 6000
-        # entropy_coef annealing (read by OnPolicyRunner.learn). DISABLED (final==start=0.005):
-        # the 2800 drop to 0.001 collapsed noise_std to ~0.13 right as the PD prior was fading
-        # (pd_alpha->0 only at ~iter5600), starving the HARDER pure-torque jump of exploration ->
-        # success/peak/landing degraded over the takeover. Keep exploration alive through the fade.
-        # (deterministic play uses the mean action, so high entropy doesn't hurt the played policy.)
+        # entropy_coef CONSTANT at 0.003 (entropy_coef=0.003 in algorithm above + final=0.003 here -> 2800 step no-ops).
+        # History: e6bd00f used final=0.005 = a 0.001->0.005 STEP at iter2800. But the collapse was at ~iter2475,
+        # BEFORE the step (entropy was still 0.001, same as the good runs) -> 0.005 did NOT trigger it. What 0.005 did:
+        # pin noise ~0.8 post-2800 and run it to 1.0+ as PD faded -> blocked recovery. Proven-good runs used 0.001
+        # (noise decayed to ~0.15, stable). 0.003 = middle: exploration through the fade, no late runaway.
         entropy_anneal_iter = 2800
-        entropy_coef_final = 0.005
+        entropy_coef_final = 0.003
