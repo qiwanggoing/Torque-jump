@@ -118,7 +118,15 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
         # deep squat + jumping, so value learns "deep-squat-at-rest = high return" (they're gate-exempt
         # and earn jump rewards from the dip). This plants V(dip) that the squat-depth gate then makes the
         # standing policy chase. (fe15103 tried this WITHOUT the gate and failed; now the gate backs it.)
-        rsi_static_frac = 0.5              # of the rsi_prob(0.2) envs, half = static deep-squat, half = launch
+        # RSI DISABLED (2026-06-05): rsi_prob 0.2 -> 0. RSI teleported 20% of envs INTO q_squat
+        # (dof=q_squat) AND exempted them from the gate, so they grabbed the biggest rewards in the
+        # system (takeoff_vz 15 / projected_peak 20 / successful 400) for pushing UP from a squat --
+        # i.e. it demonstrated ONLY the JUMP half (push), never the FOLD half (stand->squat, it
+        # teleports past it), training the shared policy toward popping. With RSI off, NO env earns
+        # the jump chain until it actually folds-then-jumps, so stance_squat becomes the dominant
+        # early reward (the squat is the only thing that scores) -- the intended guidance.
+        rsi_prob = 0.0                    # was 0.2 (inherited). See note above. static_frac etc. now inert.
+        rsi_static_frac = 0.5              # of the rsi_prob envs, half = static deep-squat, half = launch
         rsi_static_vel_z_min = -0.1       # near-rest vz at the squat bottom (slight down/up)
         rsi_static_vel_z_max = 0.3
 
@@ -136,7 +144,9 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
                                              # command, so there is no in-jump squat-down window. Contributed 0.0000.
                                              # SUPERSEDED by stance_squat below (same goal, NO vz<=0 dead-loop gate).
             # ---- countermovement: stance-squat shaping (the piece we were missing) ----
-            stance_squat = 1.5               # SHAPES the dip (how to get down); paid while loading and not yet at
+            stance_squat = 3.0               # was 1.5: now the PRIMARY early driver (RSI off -> jump chain locked
+                                             # until folded, so this is the main thing firing early). pose-based
+                                             # exp(-|dof-q_squat|/sigma). SHAPES the dip (how to get down); paid while loading and not yet at
                                              # squat_gate_height, then stops. The squat-depth gate on successful_jump/
                                              # projected_peak is the real forcing function (no dip -> no main rewards).
                                              # Farm-safe: stops at the gate, and squatting-without-jumping earns no
