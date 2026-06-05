@@ -152,8 +152,19 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
             #   orientation=-1.6, collision=-3.0, default_pos=-0.3, default_hip_pos=0.3, ...
             # ---- landing layer (new) ----
             tracking_linear_velocity = 0.0   # was 0.5: commands[0:2] is now meters, not m/s
-            projected_landing = 10.0         # dense horizontal shaper (vs projected_peak=15 -> height stays prioritized)
+            projected_landing = 20.0         # was 10: STRENGTHEN the dense landing-point gradient to break the drift.
+                                             # Calc: per-unit-weight yield ~0.021 (from projected_peak w15->earned 0.31);
+                                             # on-target potential at w20 ~0.42 > projected_peak 0.31, so landing accuracy
+                                             # now outweighs the marginal height gained by drifting. (was 8-15x too weak.)
             landing_position = 30.0          # sparse terminal landing-at-target bonus (real-jump gated)
+            # ---- Stage2-ready: DISABLE takeoff_direction (was inherited 3.0) ----
+            # takeoff_direction = vz/‖v‖ rewards a PURELY VERTICAL takeoff — the only Stage1-specific
+            # reward. It is redundant at command 0 (takeoff_vz + projected_landing already give the
+            # ballistic vertical+horizontal target) and FIGHTS any directed jump once landing_stage=2
+            # opens dx/dy (it would penalize the horizontal velocity you NEED to reach the target).
+            # Removing it now makes the whole stack direction-general: switching to Stage2 = just open
+            # the command ranges, zero reward surgery. Behaviour stays in-place while commands[0:2]=0.
+            takeoff_direction = 0.0
             # ---- structurally-inert rewards removed ----
             joint_angle_loaded = 0.0         # was 0.4: phase_loaded (jumping & ~taken_off & vz<=0) almost never
                                              # fires — the policy pre-squats during idle and pops straight up on
@@ -249,9 +260,10 @@ class GO2OmniJumpLandingTorqueCfgPPO(GO2OmniJumpCurriculumTorqueCfgPPO):
         checkpoint = -1
         resume_path = None
         max_iterations = 6000
-        # entropy_coef annealing (read by OnPolicyRunner.learn): keep 0.005 early to discover
-        # the jump (~iter2000), then DROP to 0.001 at iter 2800 so the policy converges
-        # (noise_std tightens) as PD fades over iter ~1000-5500. Confirmed winner: noise_std
-        # converged 0.69->0.48, late decline gone, greedy play peak ~0.576.
+        # entropy_coef annealing (read by OnPolicyRunner.learn). DISABLED (final==start=0.005):
+        # the 2800 drop to 0.001 collapsed noise_std to ~0.13 right as the PD prior was fading
+        # (pd_alpha->0 only at ~iter5600), starving the HARDER pure-torque jump of exploration ->
+        # success/peak/landing degraded over the takeover. Keep exploration alive through the fade.
+        # (deterministic play uses the mean action, so high entropy doesn't hurt the played policy.)
         entropy_anneal_iter = 2800
-        entropy_coef_final = 0.001
+        entropy_coef_final = 0.005
