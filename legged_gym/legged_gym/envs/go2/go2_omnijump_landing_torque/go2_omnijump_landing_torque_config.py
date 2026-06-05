@@ -65,7 +65,9 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
 
     class rewards(GO2OmniJumpCurriculumTorqueCfg.rewards):
         # Landing-reward kernel widths + real-jump gate for the sparse terminal term.
-        sigma_pos_landing = 0.05            # terminal landing xy (sparse) — tight
+        sigma_pos_landing = 0.12            # was 0.05 (too tight -> landing_position earned ~0, dead despite w30).
+                                            # REVIVED: loosened so the sparse landing-point bonus actually fires. Landing-POINT
+                                            # is a CORE reward for the upcoming open-command (controllable landing target) stage.
         sigma_landing_proj = 0.10           # in-flight ballistic estimate — looser (noisy)
         landing_real_jump_min_peak = 0.40   # peak gate for the SPARSE landing_position reward
                                             # (omnijump squat settles ~0.31, real jump peaks ~0.56)
@@ -169,7 +171,8 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
                                              # >> 0.25, so it floors at ~0 and never fires (contributed 0.0002).
                                              # If landing damping is wanted later, re-add with a much looser sigma.
             # ---- four-foot contact-timing sync (penalty on staggered takeoff/landing) ----
-            foot_contact_sync = -3.0         # was -2.0: still visibly uneven at takeoff/landing in play.
+            foot_contact_sync = -4.0         # was -3.0: STRENGTHEN four-foot takeoff/landing sync (less body tilt
+                                             # at touchdown). config note: if peak drops too much, back off.
                                              # penalize 1-3 feet on the ground during the takeoff push / landing
                                              # window -> all four feet leave & touch down TOGETHER (less body tilt).
                                              # active = (jumping & ~taken_off) | landing, so this tightens BOTH
@@ -181,14 +184,21 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
                                              # air pose is a near-zero-gradient dim (peak/airborne rewards ignore leg
                                              # pose) so RL leaves it noisy. x3 so "flail vs tuck" actually moves the
                                              # return. Watch it doesn't over-damp the necessary tuck/extend.
-            # ---- air/landing pose quality: revived from 0.4 (near-dead) to actually pull pose ----
-            joint_angle_aerial = 1.5         # was 0.4: tuck pose (q_air) in flight — main in-air stability lever
-            joint_angle_prelanding = 1.5     # was 0.4: pre-landing pose (q_pre)
-            joint_angle_landing = 1.5        # was 0.4: landing pose (q_ground)
+            # ---- general joint-accel smoothness: REDUCED (overrides inherited -2.5e-7). It competes with the
+            #      explosive pure-torque pushoff; halving frees the jump. aerial_dof_acc kept at -3e-6 (unchanged, per call).
+            dof_acc = -1.25e-7
+            # ---- pose-shaping joint_angle_* REMOVED (cleanup, audit): each earned ~0 (robot never reached
+            #      q_air/q_pre/q_ground) = dead weight. Landing ATTITUDE now held by orientation + foot_contact_sync
+            #      (strengthened below); landing-POINT by projected_landing + landing_position (kept / revived).
+            joint_angle_aerial = 0.0
+            joint_angle_prelanding = 0.0
+            joint_angle_landing = 0.0
             # ---- post-PD pose-holding (rear legs drifted once PD faded to 0) ----
-            default_pos = -0.5               # was -0.3: stronger pose anchor so RL holds posture WITHOUT PD.
-                                             # _reward_default_pos override zeros it during push-off so this does NOT cap the jump.
-            orientation = -2.0               # was -1.6: mild bump — directly hold body attitude (less wobble post-PD)
+            default_pos = -0.25              # was -0.5 (the single LARGEST term): over-anchored the joint pose ->
+                                             # stiff, non-adaptive landing ("呆", can't adjust -> tips). Halved so RL
+                                             # can move legs to catch the landing. (still zeroed during push-off.)
+            orientation = -3.0               # was -2.0: STRENGTHEN body-attitude hold (roll+pitch) — now the main
+                                             # landing-stability lever after joint_angle_landing removed. (pitch also via pitch_level.)
             # ---- (1)+(2) landing stability from the papers: stop "lands then flips" ----
             base_ang_vel_xy = -0.05          # (1) PENALTY on base roll/pitch angular velocity in flight+landing
                                              # (Olsen ϕσ(‖ω‖) / Atanassov "track zero ω after landing"). We had NO
@@ -213,9 +223,6 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
             "rew_foot_contact_sync",
             "rew_stance_squat",     # countermovement shaping — watch vs successful_jump_rate
             # inherited-active but missing from the parent's print list — surface them
-            "rew_joint_angle_aerial",
-            "rew_joint_angle_prelanding",
-            "rew_joint_angle_landing",
             "rew_base_ang_vel_xy",   # (1) flight+landing roll/pitch ω damping — the anti-tumble lever
             "rew_landing_impact",    # (2) touchdown force-spike penalty — cushion vs slam
             "rew_pitch_level",       # pitch-specific tilt penalty — fix persistent nose-down
