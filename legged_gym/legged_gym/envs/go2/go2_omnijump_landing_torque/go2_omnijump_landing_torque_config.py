@@ -99,10 +99,10 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
                                             # pull from standing (7.1 rad away) is (1/sigma)*e^(-7.1/sigma), which
                                             # is ~55% stronger at 5 than 3 (peaks near sigma~7). default_pos no
                                             # longer competes during the dip, so this positive pull now drives it.
-        squat_pose_threshold = 2.8          # "in the squat" = pose_err<=2.8, ~= 60% of the way down from
+        squat_pose_threshold = 3.2          # was 2.8: EASED (stuck @ squatQ~0.48). "in the squat" = pose_err<=3.2, shallower from
                                             # standing (7.1). THE depth knob: stuck-not-jumping (can't fold
                                             # enough) -> RAISE; jumps too shallow / want a deeper load -> LOWER.
-        squat_hold_steps = 40               # jump chain unlocks only after the squat POSE is HELD within
+        squat_hold_steps = 25               # was 40 (0.2s) -> 25 (0.125s): EASED to unstick. jump chain unlocks only after the squat POSE is HELD within
                                             # squat_pose_threshold for this many CONSECUTIVE steps (= 0.2s at
                                             # sim dt 0.005s). Closes the "flick through the pose for one frame
                                             # and harvest the flight" hole. THE dwell knob: collapses to
@@ -253,9 +253,10 @@ class GO2OmniJumpLandingTorqueCfgPPO(GO2OmniJumpCurriculumTorqueCfgPPO):
     class algorithm(GO2OmniJumpCurriculumTorqueCfgPPO.algorithm):
         sym_coef = 1.0   # was 0.5: match my_go2_jump — tighter LEFT-RIGHT mirror symmetry
                          # (front-rear is handled by the pushoff_leg_sync reward, not sym_loss)
-        entropy_coef = 0.003   # CONSTANT 0.003 (paired with entropy_coef_final=0.003 -> the iter2800 step is a no-op).
-                               # parent default 0.001. Moderate constant: keep exploration alive through the PD->torque
-                               # fade WITHOUT the 0.005 late runaway (noise ran to 1.0+). See entropy_coef_final note.
+        entropy_coef = 0.005   # CONSTANT 0.005 (paired with entropy_coef_final=0.005 -> the iter2800 step is a no-op).
+                               # was 0.003 -> noise pinned at 0.32 (too low): policy STUCK at squatQ~0.48, couldn't
+                               # explore through the squat-HOLD gate. Raised to 0.005 to lift noise toward ~0.45.
+                               # Safe from the e6bd00f collapse because default_pos=-0.5 now caps how loose it gets.
 
     class runner(GO2OmniJumpCurriculumTorqueCfgPPO.runner):
         experiment_name = "go2_omnijump_landing_torque"
@@ -265,10 +266,10 @@ class GO2OmniJumpLandingTorqueCfgPPO(GO2OmniJumpCurriculumTorqueCfgPPO):
         checkpoint = -1
         resume_path = None
         max_iterations = 6000
-        # entropy_coef CONSTANT at 0.003 (entropy_coef=0.003 in algorithm above + final=0.003 here -> 2800 step no-ops).
-        # History: e6bd00f used final=0.005 = a 0.001->0.005 STEP at iter2800. But the collapse was at ~iter2475,
-        # BEFORE the step (entropy was still 0.001, same as the good runs) -> 0.005 did NOT trigger it. What 0.005 did:
-        # pin noise ~0.8 post-2800 and run it to 1.0+ as PD faded -> blocked recovery. Proven-good runs used 0.001
-        # (noise decayed to ~0.15, stable). 0.003 = middle: exploration through the fade, no late runaway.
+        # entropy_coef CONSTANT at 0.005 (entropy_coef=0.005 in algorithm above + final=0.005 here -> 2800 step no-ops).
+        # History: e6bd00f's collapse was a HIGH-noise (0.84) drift from a loose anchor (default_pos -0.25), NOT from
+        # entropy (collapse @iter2475 predated the 2800 step). With default_pos=-0.5 restored, the FIX run (entropy 0.003)
+        # over-damped the other way: noise pinned at 0.32 -> STUCK at squatQ~0.48 for 2000+ iters (couldn't explore the
+        # squat-HOLD gate). 0.003->0.005 lifts exploration toward the productive ~0.45 band; strong anchor keeps it off 0.8.
         entropy_anneal_iter = 2800
-        entropy_coef_final = 0.003
+        entropy_coef_final = 0.005
