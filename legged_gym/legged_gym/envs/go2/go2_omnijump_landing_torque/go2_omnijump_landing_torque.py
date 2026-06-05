@@ -251,3 +251,28 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
         not_in_pose_yet = (~self.squat_qualified) if thr > 0.0 else torch.ones_like(self.jumping_state)
         active = self.jumping_state & (~self.has_taken_off) & not_in_pose_yet
         return active.float() * reward
+
+    def _reward_base_ang_vel_xy(self):
+        # Landing-stability lever borrowed from Olsen 2025 / Atanassov 2025 (papers): damp base
+        # roll/pitch ANGULAR VELOCITY through flight AND landing so the body does not enter touchdown
+        # already tumbling -- the root cause of the "lands then flips" failure. Returned as a positive
+        # magnitude with a NEGATIVE scale (penalty), NOT a positive bell kernel: a kernel that only
+        # fires during a short phase is cheap for the height/success drive to ignore (cf. joint_angle_*
+        # sitting at ~0). It penalizes rotation RATE, not airborne time, so a CLEAN high jump (w~=0)
+        # pays nothing -> it does not bias toward shorter/lower jumps. yaw (w_z) is excluded because it
+        # may be commanded in Stage 2.
+        active = (self.airborne | self.prelanding | self.landing).float()
+        ang_vel_sq = torch.sum(torch.square(self.base_ang_vel[:, :2]), dim=1)
+        return active * ang_vel_sq
+
+    def _reward_landing_impact(self):
+        # Landing-stability lever borrowed from Olsen 2025 (papers: Ground force L2 / Soft impact):
+        # penalize the hard vertical foot-force SPIKE during the landing window so touchdown is
+        # cushioned instead of slammed. Bounded to [0,1] (saturates) and zero below ~standing weight
+        # (landing_impact_force_floor) -> a soft floor, never an unbounded "wall" the policy flees.
+        active = self.landing.float()
+        fz = torch.sum(torch.clamp(self.contact_forces[:, self.feet_indices, 2], min=0.0), dim=1)
+        floor = float(getattr(self.cfg.rewards, "landing_impact_force_floor", 150.0))
+        norm = max(float(getattr(self.cfg.rewards, "landing_impact_force_norm", 1500.0)), 1e-3)
+        excess = torch.clamp((fz - floor) / norm, min=0.0, max=1.0)
+        return active * excess

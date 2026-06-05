@@ -135,6 +135,15 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
         rsi_static_vel_z_min = -0.1       # near-rest vz at the squat bottom (slight down/up)
         rsi_static_vel_z_max = 0.3
 
+        # ---- landing-stability borrows from the papers (Olsen 2025 / Atanassov 2025) ----
+        # (4) tighten the success gate so a touch-down-then-topple is NOT counted as success.
+        success_fallover_tilt = 0.4       # was 0.7 inherited (~46 deg). projected_gravity_xy above this
+                                          # during the landing buffer cancels the pending success. 0.4 ~ 24 deg:
+                                          # the 400-wt successful_jump now only pays for a landing that STAYS upright.
+        # (2) landing_impact regularization knobs (see _reward_landing_impact):
+        landing_impact_force_floor = 150.0  # N total vertical foot force below which no impact penalty (~standing weight)
+        landing_impact_force_norm = 1500.0  # N normalizer; impact penalty saturates at (floor + norm)
+
         class scales(GO2OmniJumpCurriculumTorqueCfg.rewards.scales):
             # ---- proven jump-driving stack inherited UNCHANGED ----
             #   takeoff_vertical_velocity=10, projected_peak=15, successful_jump=300,
@@ -180,6 +189,17 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
             default_pos = -0.5               # was -0.3: stronger pose anchor so RL holds posture WITHOUT PD.
                                              # _reward_default_pos override zeros it during push-off so this does NOT cap the jump.
             orientation = -2.0               # was -1.6: mild bump — directly hold body attitude (less wobble post-PD)
+            # ---- (1)+(2) landing stability from the papers: stop "lands then flips" ----
+            base_ang_vel_xy = -0.05          # (1) PENALTY on base roll/pitch angular velocity in flight+landing
+                                             # (Olsen ϕσ(‖ω‖) / Atanassov "track zero ω after landing"). We had NO
+                                             # ω damping -> body tumbled into touchdown. Penalty (not bell kernel) so
+                                             # it bites; penalizes spin RATE not airborne time -> clean high jump unhurt.
+                                             # THE knob: still flipping -> more negative; jumps get stiff/low -> back off.
+            landing_impact = -2.0            # (2) Olsen Ground-force/Soft-impact: penalize the vertical foot-force
+                                             # SPIKE at touchdown (bounded, soft floor at ~standing weight) -> cushion,
+                                             # don't slam. KEEP MODEST: too negative incentivizes jumping LOWER
+                                             # (smaller fall = softer impact) and suppresses height. #1 (ω damping)
+                                             # is the primary lever; this is secondary. peak drops -> back off toward 0.
 
     class logging(GO2OmniJumpCurriculumTorqueCfg.logging):
         print_episode_keys = GO2OmniJumpCurriculumTorqueCfg.logging.print_episode_keys + [
@@ -191,6 +211,9 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
             "rew_joint_angle_aerial",
             "rew_joint_angle_prelanding",
             "rew_joint_angle_landing",
+            "rew_base_ang_vel_xy",   # (1) flight+landing roll/pitch ω damping — the anti-tumble lever
+            "rew_landing_impact",    # (2) touchdown force-spike penalty — cushion vs slam
+            "squat_qualified_rate",  # frac of takeoffs preceded by a HELD squat; compare to jump_flight_rate
         ]
 
     class test(GO2OmniJumpCurriculumTorqueCfg.test):
