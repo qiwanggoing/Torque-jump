@@ -276,3 +276,16 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
         norm = max(float(getattr(self.cfg.rewards, "landing_impact_force_norm", 1500.0)), 1e-3)
         excess = torch.clamp((fz - floor) / norm, min=0.0, max=1.0)
         return active * excess
+
+    def _reward_pitch_level(self):
+        # Strengthen PITCH attitude specifically. The base holds a persistent nose-down ("head-heavy")
+        # pitch that the shared orientation term (-2.0, roll+pitch EQUALLY, hence weak on pitch alone)
+        # does not flatten. projected_gravity[:,0] is the pitch tilt (0 when level, ~sin(theta) when
+        # nose-down). Penalty (positive magnitude, negative scale) over the WHOLE jump cycle
+        # (load -> push -> flight -> land) so the body is driven level throughout -- and since an
+        # asymmetric front/rear push is what pitches the body, this also pressures a symmetric push.
+        # Local to the landing task -> leaves the shared _reward_orientation untouched; stacks on top
+        # of it so pitch ends up weighted more than roll. yaw/roll unaffected.
+        active = self.jumping_state.float()
+        pitch_tilt = torch.square(self.projected_gravity[:, 0])
+        return active * pitch_tilt

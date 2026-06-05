@@ -200,6 +200,11 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
                                              # don't slam. KEEP MODEST: too negative incentivizes jumping LOWER
                                              # (smaller fall = softer impact) and suppresses height. #1 (ω damping)
                                              # is the primary lever; this is secondary. peak drops -> back off toward 0.
+            pitch_level = -3.0               # PITCH-specific attitude penalty (projected_gravity_x^2) over the whole
+                                             # jump. Fixes the persistent nose-down ("head-heavy") tilt that the
+                                             # symmetric orientation (-2.0) is too weak on. Stacks on orientation ->
+                                             # pitch weighted ~2.5x roll during the jump. THE knob: still nose-down ->
+                                             # more negative; jump gets stiff/weak or peak drops -> back off.
 
     class logging(GO2OmniJumpCurriculumTorqueCfg.logging):
         print_episode_keys = GO2OmniJumpCurriculumTorqueCfg.logging.print_episode_keys + [
@@ -213,6 +218,7 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
             "rew_joint_angle_landing",
             "rew_base_ang_vel_xy",   # (1) flight+landing roll/pitch ω damping — the anti-tumble lever
             "rew_landing_impact",    # (2) touchdown force-spike penalty — cushion vs slam
+            "rew_pitch_level",       # pitch-specific tilt penalty — fix persistent nose-down
             "squat_qualified_rate",  # frac of takeoffs preceded by a HELD squat; compare to jump_flight_rate
         ]
 
