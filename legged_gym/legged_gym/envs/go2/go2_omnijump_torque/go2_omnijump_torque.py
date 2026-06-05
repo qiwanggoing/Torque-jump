@@ -92,6 +92,8 @@ class GO2OmniJumpTorque(GO2Torque):
         self.peak_base_height = self.root_states[:, 2].clone()
         self.jump_min_base_z = self.root_states[:, 2].clone()   # lowest base z before takeoff (squat-depth gate)
         self.jump_min_pose_err = torch.full((self.num_envs,), 1e3, device=self.device)  # min |dof-q_squat| before takeoff (squat-POSE gate); 1e3 = not-yet-reached
+        self.squat_hold_counter = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)  # consecutive steps held within squat_pose_threshold this jump (resets on pop-out)
+        self.squat_qualified = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)      # latched once squat HELD >= squat_hold_steps: the real squat-POSE gate (no flick-through)
         self.landing_min_height = self.root_states[:, 2].clone()
         self.takeoff_root_xy = torch.zeros(self.num_envs, 2, dtype=torch.float, device=self.device)
         self.landing_root_xy = torch.zeros(self.num_envs, 2, dtype=torch.float, device=self.device)
@@ -99,6 +101,7 @@ class GO2OmniJumpTorque(GO2Torque):
 
         self.jump_starts = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
         self.jump_flights = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
+        self.squat_qualified_takeoffs = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)  # # takeoffs this episode preceded by a HELD squat (diagnostic numerator)
         self.jump_landings = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
         self.jump_completed_cycles = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
         self.successful_jumps = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
@@ -184,6 +187,8 @@ class GO2OmniJumpTorque(GO2Torque):
         self.peak_base_height[env_ids] = self.root_states[env_ids, 2]
         self.jump_min_base_z[env_ids] = self.root_states[env_ids, 2]
         self.jump_min_pose_err[env_ids] = 1e3  # squat-POSE gate: reset to not-yet-reached sentinel
+        self.squat_hold_counter[env_ids] = 0
+        self.squat_qualified[env_ids] = False
         self.landing_min_height[env_ids] = self.root_states[env_ids, 2]
         self.takeoff_root_xy[env_ids] = self.root_states[env_ids, :2]
         self.landing_root_xy[env_ids] = self.root_states[env_ids, :2]
@@ -191,6 +196,7 @@ class GO2OmniJumpTorque(GO2Torque):
 
         self.jump_starts[env_ids] = 0.0
         self.jump_flights[env_ids] = 0.0
+        self.squat_qualified_takeoffs[env_ids] = 0.0
         self.jump_landings[env_ids] = 0.0
         self.jump_completed_cycles[env_ids] = 0.0
         self.successful_jumps[env_ids] = 0.0
@@ -262,6 +268,10 @@ class GO2OmniJumpTorque(GO2Torque):
         self.extras["episode"]["successful_jump_rate"] = torch.mean(self.successful_jumps[env_ids] / jump_den)
         self.extras["episode"]["peak_height_error"] = torch.mean(self.peak_height_error_sum[env_ids] / eval_den)
         self.extras["episode"]["mean_peak_height"] = torch.mean(self.peak_height_sum[env_ids] / eval_den)
+        # Fraction of jump attempts whose takeoff was preceded by a HELD squat (squat_hold_steps).
+        # Compare against jump_flight_rate: equal => every takeoff held the squat first (goal);
+        # squat_qualified_rate << jump_flight_rate => takeoffs still firing without holding the squat.
+        self.extras["episode"]["squat_qualified_rate"] = torch.mean(self.squat_qualified_takeoffs[env_ids] / jump_den)
 
     def _post_physics_step_callback(self):
         resample_interval = int(self.cfg.commands.resampling_time / self.dt)
@@ -380,6 +390,8 @@ class GO2OmniJumpTorque(GO2Torque):
         self.peak_base_height[env_ids] = self.root_states[env_ids, 2]
         self.jump_min_base_z[env_ids] = self.root_states[env_ids, 2]
         self.jump_min_pose_err[env_ids] = 1e3  # squat-POSE gate: reset to not-yet-reached sentinel
+        self.squat_hold_counter[env_ids] = 0
+        self.squat_qualified[env_ids] = False
         self.landing_min_height[env_ids] = self.root_states[env_ids, 2]
         self.takeoff_root_xy[env_ids] = self.root_states[env_ids, :2]
         self.landing_root_xy[env_ids] = self.root_states[env_ids, :2]
@@ -406,6 +418,8 @@ class GO2OmniJumpTorque(GO2Torque):
         self.peak_base_height[env_ids] = self.root_states[env_ids, 2]
         self.jump_min_base_z[env_ids] = self.root_states[env_ids, 2]
         self.jump_min_pose_err[env_ids] = 1e3  # squat-POSE gate: reset to not-yet-reached sentinel
+        self.squat_hold_counter[env_ids] = 0
+        self.squat_qualified[env_ids] = False
         self.landing_min_height[env_ids] = self.root_states[env_ids, 2]
         if completed:
             self.jump_completed_cycles[env_ids] += 1.0
@@ -476,12 +490,28 @@ class GO2OmniJumpTorque(GO2Torque):
             torch.minimum(self.jump_min_base_z, self.root_states[:, 2]),
             self.jump_min_base_z,
         )
-        # Track closest approach to the loaded squat POSE before takeoff (squat-POSE gate).
+        # Track closest approach to the loaded squat POSE before takeoff (kept for diagnostics).
         self.jump_min_pose_err = torch.where(
             loading,
             torch.minimum(self.jump_min_pose_err, self._squat_pose_err()),
             self.jump_min_pose_err,
         )
+        # Squat-HOLD gate: the jump chain unlocks only once the squat POSE has been HELD for
+        # >= squat_hold_steps CONSECUTIVE steps (counter resets the instant the pose pops back out
+        # above threshold). Replaces the old "jump_min_pose_err <= thr touched once" criterion, which
+        # let the policy flick through the pose for a single frame and harvest the whole flight while
+        # earning almost no stance_squat. squat_qualified latches True (so a clean load->release: once
+        # earned, the subsequent leg-extension that raises pose_err does NOT re-lock the gate).
+        _hold_thr = float(getattr(self.cfg.rewards, "squat_pose_threshold", 0.0))
+        if _hold_thr > 0.0:
+            in_pose = loading & (self._squat_pose_err() <= _hold_thr)
+            self.squat_hold_counter = torch.where(
+                in_pose,
+                self.squat_hold_counter + 1,
+                torch.where(loading, torch.zeros_like(self.squat_hold_counter), self.squat_hold_counter),
+            )
+            _hold_steps = int(getattr(self.cfg.rewards, "squat_hold_steps", 40))
+            self.squat_qualified = self.squat_qualified | (self.squat_hold_counter >= _hold_steps)
 
         descending = self.base_lin_vel[:, 2] < -0.05
         prelanding_height = torch.maximum(
@@ -505,7 +535,7 @@ class GO2OmniJumpTorque(GO2Torque):
         vz = self.root_states[:, 9]
         _pose_thr = float(getattr(self.cfg.rewards, "squat_pose_threshold", 0.0))
         if _pose_thr > 0.0:
-            self.phase_loaded = self.jumping_state & (~self.has_taken_off) & (self.jump_min_pose_err > _pose_thr)
+            self.phase_loaded = self.jumping_state & (~self.has_taken_off) & (~self.squat_qualified)
         else:
             self.phase_loaded = self.jumping_state & (~self.has_taken_off) & (vz <= 0.0)
         self.phase_extended = self.jumping_state & (~self.phase_loaded)
@@ -540,6 +570,7 @@ class GO2OmniJumpTorque(GO2Torque):
         self.last_success_velocity_score[:] = 0.0
         if torch.any(self.just_took_off):
             self.jump_flights[self.just_took_off] += 1.0
+            self.squat_qualified_takeoffs[self.just_took_off & self.squat_qualified] += 1.0
             self.takeoff_root_xy[self.just_took_off] = self.root_states[self.just_took_off, :2]
         if torch.any(self.just_landed):
             self.jump_landings[self.just_landed] += 1.0
@@ -852,16 +883,17 @@ class GO2OmniJumpTorque(GO2Torque):
         return torch.sum(torch.abs(self.dof_pos - self.q_squat_target.unsqueeze(0)), dim=1)
 
     def _squat_deep_enough(self):
-        # Squat-POSE gate (countermovement): True once this jump has reached the loaded squat POSE
-        # before takeoff (jump_min_pose_err <= squat_pose_threshold). The whole jump-reward chain is
-        # withheld until then, so the only way to earn it is to actually get INTO the squat -- and a
-        # pose target (vs the old base_z height) cannot be farmed by face-planting / leg-splaying to
-        # drop base_z cheaply. RSI air-drops exempt (start already in q_squat). threshold<=0 -> always
-        # True (gate off; default, other tasks unaffected).
+        # Squat-POSE gate (countermovement): True once this jump has HELD the loaded squat POSE for
+        # >= squat_hold_steps consecutive steps before takeoff (latched in squat_qualified). The whole
+        # jump-reward chain is withheld until then, so the only way to earn it is to actually get INTO
+        # the squat and STAY there -- a pose target (vs the old base_z height) cannot be farmed by
+        # face-planting / leg-splaying to drop base_z cheaply, and the hold requirement closes the
+        # flick-through-for-one-frame hole. RSI air-drops exempt (start already in q_squat).
+        # threshold<=0 -> always True (gate off; default, other tasks unaffected).
         thr = float(getattr(self.cfg.rewards, "squat_pose_threshold", 0.0))
         if thr <= 0.0:
             return torch.ones_like(self.jumping_state)
-        return self.rsi_episode_mask | (self.jump_min_pose_err <= thr)
+        return self.rsi_episode_mask | self.squat_qualified
 
     def _reward_takeoff_vertical_velocity(self):
         base_height = self.root_states[:, 2]

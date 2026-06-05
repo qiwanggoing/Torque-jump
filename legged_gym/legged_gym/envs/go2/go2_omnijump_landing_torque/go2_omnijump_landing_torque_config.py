@@ -97,10 +97,15 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
                                             # pull from standing (7.1 rad away) is (1/sigma)*e^(-7.1/sigma), which
                                             # is ~55% stronger at 5 than 3 (peaks near sigma~7). default_pos no
                                             # longer competes during the dip, so this positive pull now drives it.
-        squat_pose_threshold = 2.8          # "reached the squat" = unlock jump chain + stop folding, at pose_err<=2.8
-                                            # ~= 60% of the way down from standing (7.1). User: "at least ~60% before
-                                            # takeoff". THE knob: stuck-not-jumping (can't fold enough) -> RAISE;
-                                            # jumps too shallow / want a deeper load -> LOWER.
+        squat_pose_threshold = 2.8          # "in the squat" = pose_err<=2.8, ~= 60% of the way down from
+                                            # standing (7.1). THE depth knob: stuck-not-jumping (can't fold
+                                            # enough) -> RAISE; jumps too shallow / want a deeper load -> LOWER.
+        squat_hold_steps = 40               # jump chain unlocks only after the squat POSE is HELD within
+                                            # squat_pose_threshold for this many CONSECUTIVE steps (= 0.2s at
+                                            # sim dt 0.005s). Closes the "flick through the pose for one frame
+                                            # and harvest the flight" hole. THE dwell knob: collapses to
+                                            # not-jumping (can't hold long enough) -> LOWER (e.g. 20=0.1s);
+                                            # want a more deliberate load before launch -> RAISE.
         # Give the dip+push room: a countermovement (~0.3-0.35s) does not fit the old 40-step
         # (0.2s) takeoff window — the dip would eat the budget and trip the timeout. 80 steps
         # = 0.4s. (step = sim dt 0.005s, counted on physics substeps, so freq-independent.)

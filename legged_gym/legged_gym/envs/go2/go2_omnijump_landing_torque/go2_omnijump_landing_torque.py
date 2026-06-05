@@ -245,6 +245,9 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
         sigma = max(float(getattr(self.cfg.rewards, "squat_pose_sigma", 3.0)), 1e-4)
         reward = torch.exp(-self._squat_pose_err() / sigma)
         thr = float(getattr(self.cfg.rewards, "squat_pose_threshold", 0.0))
-        not_in_pose_yet = (self.jump_min_pose_err > thr) if thr > 0.0 else torch.ones_like(self.jumping_state)
+        # Keep paying the dip-shaping reward until the squat is QUALIFIED (held >= squat_hold_steps),
+        # not merely touched: this is what gives the policy a reason to STAY folded through the hold
+        # window instead of popping straight back up the instant pose_err first dips under thr.
+        not_in_pose_yet = (~self.squat_qualified) if thr > 0.0 else torch.ones_like(self.jumping_state)
         active = self.jumping_state & (~self.has_taken_off) & not_in_pose_yet
         return active.float() * reward
