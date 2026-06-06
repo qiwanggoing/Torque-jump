@@ -48,6 +48,21 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
     # splayed the hips to balance, default_hip_pos collapsed, and the jump fell apart. Back to the
     # proven ~0.30 default stance (inherited). Revisit launch depth later via a milder crouch +
     # stronger default_hip_pos if pursuing more height.
+    class growth(GO2OmniJumpCurriculumTorqueCfg.growth):
+        # PD fade-out moved MUCH earlier (2026-06-06): pure torque by ~iter 500 instead of ~iter 5550.
+        # Goal: spend nearly ALL of training in pure torque so the FINAL policy (model_6000) is a
+        # consolidated pure-torque jumper, with NO late PD-takeover disruption (every recurring late
+        # collapse was tied to pd->0 happening at the very end). general_scale ramps 0->1 linearly from
+        # warmup_steps to x0; pd_alpha = 0.5*(1-general_scale). Empirically step_count ~= 69/iter
+        # (old x0=384000 -> pd=0 at iter~5550), so:
+        warmup_steps = 7000        # was 96000: full PD only for the first ~iter 100, then start fading.
+        x0 = 35000                 # was 384000: linear-fade end -> pd_alpha=0 by ~iter 500.
+        # RISK: PD bootstrap is gone by iter 500, but discovery (the jump) happened ~iter 1500 WITH PD.
+        # Pure-torque discovery may be much harder/slower. WATCH flight_rate/squatQ in iter 100-1500:
+        # if it never jumps, the fade is too early -> push warmup_steps/x0 back up. Also note the entropy
+        # anneal at iter 2800 (below): if discovery slips past 2800, the low-entropy phase may lock in a
+        # not-yet-jumping policy -> stuck.
+
     class commands(GO2OmniJumpCurriculumTorqueCfg.commands):
         # Landing-point task: commands[0:2] repurposed velocity -> landing displacement (m).
         # Stage 1 keeps the displacement at [0,0] (land in place == proven vertical jump).
@@ -253,10 +268,11 @@ class GO2OmniJumpLandingTorqueCfgPPO(GO2OmniJumpCurriculumTorqueCfgPPO):
     class algorithm(GO2OmniJumpCurriculumTorqueCfgPPO.algorithm):
         sym_coef = 1.0   # was 0.5: match my_go2_jump — tighter LEFT-RIGHT mirror symmetry
                          # (front-rear is handled by the pushoff_leg_sync reward, not sym_loss)
-        entropy_coef = 0.005   # CONSTANT 0.005 (paired with entropy_coef_final=0.005 -> the iter2800 step is a no-op).
-                               # was 0.003 -> noise pinned at 0.32 (too low): policy STUCK at squatQ~0.48, couldn't
-                               # explore through the squat-HOLD gate. Raised to 0.005 to lift noise toward ~0.45.
-                               # Safe from the e6bd00f collapse because default_pos=-0.5 now caps how loose it gets.
+        entropy_coef = 0.005   # START high for exploration; ANNEALS to entropy_coef_final=0.001 at iter2800.
+                               # Constant 0.005 (run Jun06_07-41-08) cracked the squat gate (squatQ->0.95) but then
+                               # noise RAN AWAY to 1.33 -> degraded from iter3000, collapsed at 5400. Constant 0.003 was
+                               # the opposite (noise 0.32 -> stuck). So: high early (discover/crack gate), low late
+                               # (anneal = consolidate + kill the noise runaway). See entropy_coef_final.
 
     class runner(GO2OmniJumpCurriculumTorqueCfgPPO.runner):
         experiment_name = "go2_omnijump_landing_torque"
@@ -266,10 +282,10 @@ class GO2OmniJumpLandingTorqueCfgPPO(GO2OmniJumpCurriculumTorqueCfgPPO):
         checkpoint = -1
         resume_path = None
         max_iterations = 6000
-        # entropy_coef CONSTANT at 0.005 (entropy_coef=0.005 in algorithm above + final=0.005 here -> 2800 step no-ops).
-        # History: e6bd00f's collapse was a HIGH-noise (0.84) drift from a loose anchor (default_pos -0.25), NOT from
-        # entropy (collapse @iter2475 predated the 2800 step). With default_pos=-0.5 restored, the FIX run (entropy 0.003)
-        # over-damped the other way: noise pinned at 0.32 -> STUCK at squatQ~0.48 for 2000+ iters (couldn't explore the
-        # squat-HOLD gate). 0.003->0.005 lifts exploration toward the productive ~0.45 band; strong anchor keeps it off 0.8.
+        # entropy_coef ANNEALS 0.005 -> 0.001 at iter2800 (re-enabled; "disable the anneal" was a misdiagnosis).
+        # Data: constant 0.005 (Jun06_07-41-08) cracked the gate then noise RAN AWAY (0.45->1.33) -> degraded@3000,
+        # collapsed@5400 as PD faded. Constant 0.003 -> noise 0.32 -> stuck. Neither constant works. The anneal is the
+        # answer: 0.005 early to discover + crack the squat-HOLD gate, drop to 0.001 at 2800 to LOCK IN the peak
+        # (squatQ 0.95 / peak 0.605 hit ~iter2500-2700) and prevent the late noise runaway / pure-torque collapse.
         entropy_anneal_iter = 2800
-        entropy_coef_final = 0.005
+        entropy_coef_final = 0.001
