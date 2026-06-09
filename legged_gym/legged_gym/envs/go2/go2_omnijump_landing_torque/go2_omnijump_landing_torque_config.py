@@ -196,6 +196,14 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
                                              # Calc: per-unit-weight yield ~0.021 (from projected_peak w15->earned 0.31);
                                              # on-target potential at w20 ~0.42 > projected_peak 0.31, so landing accuracy
                                              # now outweighs the marginal height gained by drifting. (was 8-15x too weak.)
+            projected_peak = 30.0            # 20 -> 30: PUSH HEIGHT. Reward-share analysis (Jun09_15-14-50): height
+                                             # rewards were only ~35% of positives (projected_peak 20% + takeoff_vz 15%)
+                                             # while projected_landing (Stage1=in-place) was the 39% "大头". projected_peak
+                                             # had headroom (same w20 as projected_landing but earned 0.29 vs 0.57). An older
+                                             # run (Jun05_23-55-11) proved peak 0.7 IS reachable (the ~0.6 "Hill cap" was
+                                             # wrong) -- it just didn't land it. Make height the dominant pull; landing kept
+                                             # honest by buffer150 (must stand 0.75s for success). Watch: peak should climb
+                                             # toward 0.65-0.7 AND succ/no-crash must hold (else strengthen pitch_level).
             landing_position = 30.0          # sparse terminal landing-at-target bonus (real-jump gated)
             # ---- Stage2-ready: DISABLE takeoff_direction (was inherited 3.0) ----
             # takeoff_direction = vz/‖v‖ rewards a PURELY VERTICAL takeoff — the only Stage1-specific
@@ -245,10 +253,11 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
             joint_angle_prelanding = 0.0
             joint_angle_landing = 0.0
             # ---- post-PD pose-holding (rear legs drifted once PD faded to 0) ----
-            default_pos = -1.0               # -0.5 -> -1.0 (DISCOVERY-SAFE: -1.5 made "stand still" too attractive and
-                                             # hurt jump discovery from scratch, Jun09_11-29-05). Still the return-to-idle lever
-                                             # the next-jump pose gate relies on, just gentler. If post-landing pose still doesn't
-                                             # return tightly once jumping is learned, raise toward -1.5 as a fine-tune.
+            default_pos = -0.7               # -1.0 -> -0.7: RELAX to let the policy be more explosive (push height). It was
+                                             # 74% of all penalty + the run was over-smooth (dof_acc penalty only 1/3 of the
+                                             # best run = too timid to jump high). -0.7 still anchors the post-landing/idle
+                                             # pose (with buffer150 + landing target->default) but stops over-suppressing the
+                                             # countermovement. (-1.0 was discovery-safe; now jumping is learned so loosen.)
                                              # RESTORED from -0.25. The -0.25 (cleanup) removed the dominant pose
                                              # anchor -> looser, higher-variance policy (noise_std ~0.84 vs ~0.55) and
                                              # deterministic play idled/landed in a deep crouch (base_z~0.149). That
