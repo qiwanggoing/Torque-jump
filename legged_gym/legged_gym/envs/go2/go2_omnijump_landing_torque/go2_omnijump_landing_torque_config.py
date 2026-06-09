@@ -49,19 +49,23 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
     # proven ~0.30 default stance (inherited). Revisit launch depth later via a milder crouch +
     # stronger default_hip_pos if pursuing more height.
     class growth(GO2OmniJumpCurriculumTorqueCfg.growth):
-        # PD fade-out moved MUCH earlier (2026-06-06): pure torque by ~iter 500 instead of ~iter 5550.
-        # Goal: spend nearly ALL of training in pure torque so the FINAL policy (model_6000) is a
-        # consolidated pure-torque jumper, with NO late PD-takeover disruption (every recurring late
-        # collapse was tied to pd->0 happening at the very end). general_scale ramps 0->1 linearly from
-        # warmup_steps to x0; pd_alpha = 0.5*(1-general_scale). Empirically step_count ~= 69/iter
-        # (old x0=384000 -> pd=0 at iter~5550), so:
-        warmup_steps = 7000        # was 96000: full PD only for the first ~iter 100, then start fading.
-        x0 = 35000                 # was 384000: linear-fade end -> pd_alpha=0 by ~iter 500.
-        # RISK: PD bootstrap is gone by iter 500, but discovery (the jump) happened ~iter 1500 WITH PD.
-        # Pure-torque discovery may be much harder/slower. WATCH flight_rate/squatQ in iter 100-1500:
-        # if it never jumps, the fade is too early -> push warmup_steps/x0 back up. Also note the entropy
-        # anneal at iter 2800 (below): if discovery slips past 2800, the low-entropy phase may lock in a
-        # not-yet-jumping policy -> stuck.
+        # PD fade-out moved to a MIDDLE window (2026-06-09): full PD through discovery (~iter1500), then
+        # fade to 0 by ~iter3500, leaving ~2500 iters of pure-torque consolidation.
+        # WHY: the iter500 early-fade (warmup 7000/x0 35000) made training OSCILLATE badly -- pure torque
+        # from iter500 rides the bare all-or-nothing gated-reward cliff (small policy change flips envs
+        # in/out of a clean cycle -> succ swings 0.28-0.57). The old smooth run (Jun03_12-46-35: succ
+        # 0.89-0.95 FLAT, even at noise 0.6-0.72!) kept pd_prior=0.5 until iter~800 and faded to 0 only
+        # at iter5999 -- the PD scaffold guaranteed every jump completed, so the gated rewards fired every
+        # episode = no cliff = smooth. But that left ~zero pure-torque consolidation (fragile endpoint).
+        # This middle window gets BOTH: PD scaffolds the rough discovery/climb (smooth), then ~2500 iters
+        # pure torque to consolidate the endpoint. general_scale ramps 0->1 linearly from warmup_steps to
+        # x0; pd_alpha = 0.5*(1-general_scale). Empirically step_count ~= 69/iter.
+        warmup_steps = 100000      # full PD until ~iter1450 (scaffold through discovery), then start fading.
+        x0 = 240000                # linear-fade end -> pd_alpha=0 by ~iter3480 (=> ~2500 iters pure torque).
+        # WATCH: training should be MUCH smoother through discovery now (succ shouldn't swing wildly while
+        # pd>0). If the LATE pure-torque phase (iter3500+) re-collapses, the endpoint is still PD-dependent
+        # -> push the fade window later still. If discovery is fine, can pull the window earlier for more
+        # pure-torque time.
 
     class commands(GO2OmniJumpCurriculumTorqueCfg.commands):
         # Landing-point task: commands[0:2] repurposed velocity -> landing displacement (m).
