@@ -196,14 +196,15 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
                                              # Calc: per-unit-weight yield ~0.021 (from projected_peak w15->earned 0.31);
                                              # on-target potential at w20 ~0.42 > projected_peak 0.31, so landing accuracy
                                              # now outweighs the marginal height gained by drifting. (was 8-15x too weak.)
-            projected_peak = 30.0            # 20 -> 30: PUSH HEIGHT. Reward-share analysis (Jun09_15-14-50): height
-                                             # rewards were only ~35% of positives (projected_peak 20% + takeoff_vz 15%)
-                                             # while projected_landing (Stage1=in-place) was the 39% "大头". projected_peak
-                                             # had headroom (same w20 as projected_landing but earned 0.29 vs 0.57). An older
-                                             # run (Jun05_23-55-11) proved peak 0.7 IS reachable (the ~0.6 "Hill cap" was
-                                             # wrong) -- it just didn't land it. Make height the dominant pull; landing kept
-                                             # honest by buffer150 (must stand 0.75s for success). Watch: peak should climb
-                                             # toward 0.65-0.7 AND succ/no-crash must hold (else strengthen pitch_level).
+            projected_peak = 25.0            # 20 -> 25 (gentler than the 30 that, bundled with default_pos -0.7, tanked succ).
+                                             # PUSH HEIGHT: reward-share analysis (Jun09_15-14-50) showed height was only ~35%
+                                             # of positives (projected_peak 20% + takeoff_vz 15%) vs projected_landing 39%, and
+                                             # projected_peak had headroom (earned 0.29 vs landing's 0.57 at same w20). peak 0.7
+                                             # is physically reachable (older Jun05_23-55-11 play hit 0.706; the ~0.6 "Hill cap"
+                                             # was wrong). ISOLATED change: only projected_peak moves (default_pos kept tight at
+                                             # -1.0). Watch: peak climbs vs the stable 0.517 baseline AND succ stays ~0.9 (height
+                                             # & landing-success are coupled via buffer150; if succ drops, height is being bought
+                                             # with landing failures -> back off / add pitch_level instead).
             landing_position = 30.0          # sparse terminal landing-at-target bonus (real-jump gated)
             # ---- Stage2-ready: DISABLE takeoff_direction (was inherited 3.0) ----
             # takeoff_direction = vz/‖v‖ rewards a PURELY VERTICAL takeoff — the only Stage1-specific
@@ -253,12 +254,11 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
             joint_angle_prelanding = 0.0
             joint_angle_landing = 0.0
             # ---- post-PD pose-holding (rear legs drifted once PD faded to 0) ----
-            default_pos = -0.7               # -1.0 -> -0.7: RELAX to let the policy be more explosive (push height). It was
-                                             # 74% of all penalty + the run was over-smooth (dof_acc penalty only 1/3 of the
-                                             # best run = too timid to jump high). -0.7 still anchors the post-landing/idle
-                                             # pose (with buffer150 + landing target->default) but stops over-suppressing the
-                                             # countermovement. (-1.0 was discovery-safe; now jumping is learned so loosen.)
-                                             # RESTORED from -0.25. The -0.25 (cleanup) removed the dominant pose
+            default_pos = -1.0               # back to -1.0 (the -0.7 RELAX destabilized: run Jun09_17-35-42 had noise runaway
+                                             # to 0.66 + succ oscillating 0.46, same loosen-the-anchor failure as e6bd00f's
+                                             # -0.5->-0.25). Anchor must stay tight. Height is pushed via projected_peak ONLY
+                                             # now (isolated), not by loosening the policy. RESTORED from -0.25 originally; the
+                                             # -0.25 (cleanup) removed the dominant pose
                                              # anchor -> looser, higher-variance policy (noise_std ~0.84 vs ~0.55) and
                                              # deterministic play idled/landed in a deep crouch (base_z~0.149). That
                                              # sustained high noise is what tipped the iter~2475 collapse. (zeroed
