@@ -98,15 +98,16 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
                                             # = the "stand stable" requirement. The 25-step buffer let the policy
                                             # get credit after 0.125s then topple ~0.75s later (play roll_cutoff).
                                             # Toppling within these 150 steps -> roll_cutoff termination = penalty.
-        # CONTINUOUS-jump pose gate: a jump only "finishes" (success credited + next jump unlocked)
-        # once the robot has also RETURNED to the default standing pose, not merely stood stable for
-        # the buffer. Without this the post-landing hold settles into a non-canonical stance (base~0.34
-        # vs idle 0.31) and each subsequent jump starts from that drifted pose -> chain drift + topple.
-        # Gate metric = sum|dof - default_dof_pos| over the 12 joints; threshold is the calibration knob:
-        # too tight -> never finishes (stuck); too loose -> no-op. Calibrate on a short run (watch succ
-        # + post-landing base_z returning toward ~0.31).
-        finish_requires_default_pose = True
-        finish_default_pose_threshold = 1.5
+        # CONTINUOUS-jump NEXT-JUMP pose gate (DECOUPLED from success): success/finish is granted on
+        # the time buffer alone (dense discovery signal preserved); this gate only delays the NEXT
+        # jump until the robot has RETURNED to the default standing pose. Forces every jump in a
+        # continuous sequence to start from the same canonical idle stand (kills chain drift) WITHOUT
+        # withholding the successful_jump carrot from the still-learning policy. (The earlier version
+        # gated success itself on pose -> starved discovery -> never learned to jump; Jun09_11-29-05.)
+        # Gate metric = sum|dof - default_dof_pos| over the 12 joints. Threshold is non-critical now
+        # (too tight = fewer jumps/episode, NOT stuck; too loose = no-op).
+        next_jump_requires_default_pose = True
+        next_jump_default_pose_threshold = 1.5
         projected_landing_min_height = 0.40 # instantaneous height gate for the DENSE projected_landing:
                                             # blocks the legs-tucked sprawl farm (body ~0.13, feet off ground)
                                             # while keeping dense in-place landing control during real apex.
@@ -241,18 +242,19 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
             joint_angle_prelanding = 0.0
             joint_angle_landing = 0.0
             # ---- post-PD pose-holding (rear legs drifted once PD faded to 0) ----
-            default_pos = -1.5               # -0.5 -> -1.5 (3x): now the PRIMARY return-to-idle lever. finish_requires_default_pose
-                                             # makes returning to default pose a HARD unlock condition for the next jump, so this
-                                             # anchor must be strong enough to actually drive the rear legs back home (else it stalls,
-                                             # never finishing). RESTORED from -0.25. The -0.25 (cleanup) removed the dominant pose
+            default_pos = -1.0               # -0.5 -> -1.0 (DISCOVERY-SAFE: -1.5 made "stand still" too attractive and
+                                             # hurt jump discovery from scratch, Jun09_11-29-05). Still the return-to-idle lever
+                                             # the next-jump pose gate relies on, just gentler. If post-landing pose still doesn't
+                                             # return tightly once jumping is learned, raise toward -1.5 as a fine-tune.
+                                             # RESTORED from -0.25. The -0.25 (cleanup) removed the dominant pose
                                              # anchor -> looser, higher-variance policy (noise_std ~0.84 vs ~0.55) and
                                              # deterministic play idled/landed in a deep crouch (base_z~0.149). That
                                              # sustained high noise is what tipped the iter~2475 collapse. (zeroed
                                              # during push-off so it doesn't fight the jump.)
-            orientation = -4.5               # -3.0 -> -4.5: STRENGTHEN body-attitude hold (roll+pitch). Late-training data
-                                             # showed g_xy^2 creeping 0.017->0.038 (body tilting more) as the policy traded
-                                             # attitude for jump magnitude -> succ erosion + topple. Vertical (Stage1) jump
-                                             # wants body level throughout, so this is on-target and does not fight the jump.
+            orientation = -3.5               # -3.0 -> -3.5 (DISCOVERY-SAFE: -4.5 + the strong default_pos made not-jumping
+                                             # too comfortable from scratch, Jun09_11-29-05). Mild strengthen of the level-body
+                                             # hold (late training showed g_xy^2 creeping 0.017->0.038 as the policy traded
+                                             # attitude for jump magnitude). Vertical (Stage1) jump wants body level throughout.
                                              # the main landing-stability lever after joint_angle_landing removed. (pitch also via pitch_level.)
             # ---- (1)+(2) landing stability from the papers: stop "lands then flips" ----
             base_ang_vel_xy = -0.05          # (1) PENALTY on base roll/pitch angular velocity in flight+landing

@@ -633,22 +633,18 @@ class GO2OmniJumpTorque(GO2Torque):
                 torch.zeros_like(self.post_jump_step_counter),
             )
 
-        # Finally, check if landing buffer is complete to finalize the jump and grant rewards
+        # Finally, check if landing buffer is complete to finalize the jump and grant rewards.
+        # success/finish is gated ONLY on the time buffer (NOT on pose return) so the jump-discovery
+        # signal stays dense -- gating success on a pose the early policy can't hit starves the
+        # successful_jump carrot and the policy never learns to jump. The "return to default pose
+        # before the NEXT jump" rule is decoupled below: it delays the next jump WITHOUT withholding
+        # success for this one.
         ready_to_finish = (
             self.jumping_state
             & self.has_landed
             & (self.landing_step_counter >= max(int(self.cfg.rewards.landing_buffer_steps), 1))
         )
-        # Optional CONTINUOUS-jump pose gate (config-driven, default off so other configs are
-        # unchanged): after the time buffer, also require the robot to have RETURNED to the default
-        # standing pose before the jump finishes (= success credited + _finish_jump + next jump
-        # unlocked). Forces every jump in a continuous sequence to start from the same canonical
-        # idle pose -> kills the chain drift. Metric = sum|dof - default_dof_pos| over 12 joints.
-        if getattr(self.cfg.rewards, "finish_requires_default_pose", False):
-            pose_err = torch.sum(torch.abs(self.dof_pos - self.default_dof_pos), dim=1)
-            ready_to_finish = ready_to_finish & (
-                pose_err < float(getattr(self.cfg.rewards, "finish_default_pose_threshold", 1.5))
-            )
+        pose_gate = getattr(self.cfg.rewards, "next_jump_requires_default_pose", False)
         if torch.any(ready_to_finish):
             finish_ids = ready_to_finish.nonzero(as_tuple=False).flatten()
             self.last_jump_success[finish_ids] = self.pending_success[finish_ids]
@@ -656,14 +652,31 @@ class GO2OmniJumpTorque(GO2Torque):
             self.successful_jumps[finish_ids] += self.last_jump_success[finish_ids].float()
             self._finish_jump(finish_ids, completed=True)
             self._disable_jump_command(finish_ids)
-            # CONTINUOUS jumping: only single-jump-MODE envs stop after one jump; continuous-mode envs
-            # (single_jump_command_prob < 1) stay eligible -> they jump, land, stand stable for the whole
-            # landing_buffer, then get re-issued a jump command at the next resample. Backward-compatible:
-            # configs with single_jump_command_prob=1.0 have all mode=True -> done=True, unchanged behavior.
-            self.single_jump_command_done[finish_ids] = self.single_jump_command_mode[finish_ids]
+            # CONTINUOUS jumping: single-jump-MODE envs always stop after one jump. Continuous-mode
+            # envs (mode=False) normally re-enable immediately (done=mode=False). With the pose gate
+            # we instead LOCK them (done=True) and only unlock once they have returned to the default
+            # pose (below), so every jump in the sequence starts from the same canonical idle stand.
+            if pose_gate:
+                self.single_jump_command_done[finish_ids] = True
+            else:
+                self.single_jump_command_done[finish_ids] = self.single_jump_command_mode[finish_ids]
             # Clean up pending success
             self.pending_success[finish_ids] = False
             self.pending_velocity_score[finish_ids] = 0.0
+
+        # Decoupled NEXT-JUMP pose gate (config-driven, default off): unlock a finished continuous-mode
+        # env (re-enable jumping) once it has RETURNED to the default standing pose. Does NOT touch the
+        # success/finish above -> preserves dense discovery signal while still forcing each jump to
+        # start from the canonical idle pose. Metric = sum|dof - default_dof_pos| over the 12 joints.
+        if pose_gate:
+            pose_err = torch.sum(torch.abs(self.dof_pos - self.default_dof_pos), dim=1)
+            unlock = (
+                (~self.jumping_state)
+                & self.single_jump_command_done
+                & (~self.single_jump_command_mode)
+                & (pose_err < float(getattr(self.cfg.rewards, "next_jump_default_pose_threshold", 1.5)))
+            )
+            self.single_jump_command_done[unlock] = False
 
         self.last_contacts[:] = contact
 
