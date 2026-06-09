@@ -76,6 +76,20 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
         self.landing_target[env_ids, 1] = self.env_origins[env_ids, 1] + init_y + self.commands[env_ids, 1]
 
     # ------------------------------------------------------------------ #
+    # Pose-target override — during the post-touchdown landing buffer the parent leaves the
+    # joint pd/reward target at q_ground (foot 0.30 = a TALL stance, base~0.34). With the PD
+    # prior faded to 0 that tall pose never returns to the pre-jump idle pose (default_dof_pos,
+    # base~0.31), so the cmd=0 stance is inconsistent pre/post jump -> topple + continuous-mode
+    # drift. Pull the landing hold back to the canonical idle stand instead (this flows into both
+    # the residual PD prior AND the default_pos reward, which read self.default_joint_pd_target).
+    # ------------------------------------------------------------------ #
+    def _update_default_joint_pd_target(self):
+        super()._update_default_joint_pd_target()
+        self.default_joint_pd_target[self.landing] = (
+            self.default_dof_pos.expand(self.num_envs, -1)[self.landing]
+        )
+
+    # ------------------------------------------------------------------ #
     # Observations — identical to the parent layout except the velocity-command
     # slot (commands[:, :3] * commands_scale) is replaced by the yaw-frame
     # landing-point error  Ryaw^T (p* - p_base) = [fwd_err, lat_err, 0].

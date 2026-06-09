@@ -240,8 +240,8 @@ def play(args):
     #   post_stand→ cmd[4]=0 for POST_JUMP_STAND_SECONDS (verify landing stability)
     #   then manual reset → back to pre_idle
     PRE_JUMP_IDLE_SECONDS = 2.0
-    POST_JUMP_STAND_SECONDS = 2.0   # short stand window; play state machine fires manual reset before atanassov landing instability triggers env collision/roll cutoff
-    CONTINUOUS_JUMP = False         # mirror training: one jump per episode → manual reset → init pose each cycle
+    POST_JUMP_STAND_SECONDS = 4.0   # stand-and-watch window between jumps (longer = clearer pause to observe). raise/lower to taste.
+    CONTINUOUS_JUMP = True          # True: jump -> stand POST_JUMP_STAND_SECONDS -> jump again IN PLACE (no reset/teleport), easier to watch. False: reset to init pose each cycle.
     PRE_JUMP_IDLE_STEPS = max(int(round(PRE_JUMP_IDLE_SECONDS / env.dt)), 1)
     POST_JUMP_STAND_STEPS = max(int(round(POST_JUMP_STAND_SECONDS / env.dt)), 1)
 

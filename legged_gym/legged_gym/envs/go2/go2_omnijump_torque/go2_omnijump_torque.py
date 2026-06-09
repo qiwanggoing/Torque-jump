@@ -639,6 +639,16 @@ class GO2OmniJumpTorque(GO2Torque):
             & self.has_landed
             & (self.landing_step_counter >= max(int(self.cfg.rewards.landing_buffer_steps), 1))
         )
+        # Optional CONTINUOUS-jump pose gate (config-driven, default off so other configs are
+        # unchanged): after the time buffer, also require the robot to have RETURNED to the default
+        # standing pose before the jump finishes (= success credited + _finish_jump + next jump
+        # unlocked). Forces every jump in a continuous sequence to start from the same canonical
+        # idle pose -> kills the chain drift. Metric = sum|dof - default_dof_pos| over 12 joints.
+        if getattr(self.cfg.rewards, "finish_requires_default_pose", False):
+            pose_err = torch.sum(torch.abs(self.dof_pos - self.default_dof_pos), dim=1)
+            ready_to_finish = ready_to_finish & (
+                pose_err < float(getattr(self.cfg.rewards, "finish_default_pose_threshold", 1.5))
+            )
         if torch.any(ready_to_finish):
             finish_ids = ready_to_finish.nonzero(as_tuple=False).flatten()
             self.last_jump_success[finish_ids] = self.pending_success[finish_ids]
@@ -646,7 +656,11 @@ class GO2OmniJumpTorque(GO2Torque):
             self.successful_jumps[finish_ids] += self.last_jump_success[finish_ids].float()
             self._finish_jump(finish_ids, completed=True)
             self._disable_jump_command(finish_ids)
-            self.single_jump_command_done[finish_ids] = True  # one jump per episode, like OmniNet
+            # CONTINUOUS jumping: only single-jump-MODE envs stop after one jump; continuous-mode envs
+            # (single_jump_command_prob < 1) stay eligible -> they jump, land, stand stable for the whole
+            # landing_buffer, then get re-issued a jump command at the next resample. Backward-compatible:
+            # configs with single_jump_command_prob=1.0 have all mode=True -> done=True, unchanged behavior.
+            self.single_jump_command_done[finish_ids] = self.single_jump_command_mode[finish_ids]
             # Clean up pending success
             self.pending_success[finish_ids] = False
             self.pending_velocity_score[finish_ids] = 0.0
