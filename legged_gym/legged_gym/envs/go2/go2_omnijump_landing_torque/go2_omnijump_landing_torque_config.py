@@ -71,12 +71,15 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
         landing_stage = 1
         landing_disp_x_stage2 = [0.0, 0.40]    # forward landing distance (m), Stage 2
         landing_disp_y_stage2 = [-0.20, 0.20]  # lateral landing offset (m), Stage 2
-        single_jump_command_prob = 0.0         # was 1.0 (one jump/episode then stand-to-reset). 0.0 = CONTINUOUS:
-                                               # after a jump finishes (= stood stable for landing_buffer_steps), the
-                                               # env gets re-issued a jump command -> jump, land, stand stable, jump...
-                                               # so it repeatedly practices the land->stable-stand->launch recovery
-                                               # (toppling during the stand -> termination penalty). Pairs with the
-                                               # base-env fix that gates single_jump_command_done on this mode.
+        single_jump_command_prob = 1.0         # SINGLE JUMP per episode (reverted from 0.0=continuous). Continuous
+                                               # (Jun09_13-24-40) gave a noisy, bistable training signal (succ/flght
+                                               # oscillating 0.28-0.56) and lower peak; single-jump (Jun06_13-53-04) is
+                                               # far cleaner (flght 0.97-1.00, succ 0.77-0.86 smooth, peak 0.58, no late
+                                               # degradation). The post-landing topple is fixed WITHOUT continuous, via
+                                               # landing_buffer_steps=150 below (success now requires surviving 0.75s
+                                               # post-touchdown, so the ~0.75s topple is trained out) + the landing-pose
+                                               # fixes (target->default_dof_pos, default_pos/orientation). Play stays
+                                               # continuous regardless (play state machine is independent of train mode).
 
         class ranges(GO2OmniJumpCurriculumTorqueCfg.commands.ranges):
             jump_height = [0.40, 0.70]   # unchanged from the proven May28 baseline
@@ -106,7 +109,7 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
         # gated success itself on pose -> starved discovery -> never learned to jump; Jun09_11-29-05.)
         # Gate metric = sum|dof - default_dof_pos| over the 12 joints. Threshold is non-critical now
         # (too tight = fewer jumps/episode, NOT stuck; too loose = no-op).
-        next_jump_requires_default_pose = True
+        next_jump_requires_default_pose = False   # continuous-only gate; no-op in single-jump mode (no "next jump").
         next_jump_default_pose_threshold = 1.5
         projected_landing_min_height = 0.40 # instantaneous height gate for the DENSE projected_landing:
                                             # blocks the legs-tucked sprawl farm (body ~0.13, feet off ground)
