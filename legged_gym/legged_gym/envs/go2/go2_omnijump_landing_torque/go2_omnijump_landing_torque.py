@@ -29,6 +29,7 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
         "base_ang_vel_xy",   # landing stability: flight+landing roll/pitch ω damping
         "landing_impact",    # landing stability: touchdown force-spike penalty
         "pitch_level",       # landing stability: pitch-specific tilt penalty
+        "dof_pos_limits",    # penalize folding joints to the limit (over-deep squat hits the "wall")
     }
 
     # Curriculum gate table requires an entry for every active reward. Curriculum
@@ -43,6 +44,7 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
         "base_ang_vel_xy": 0,   # active from step 1 (curriculum disabled = one-stage)
         "landing_impact": 0,
         "pitch_level": 0,
+        "dof_pos_limits": 0,
     }
 
     # ------------------------------------------------------------------ #

@@ -584,7 +584,15 @@ class GO2OmniJumpTorque(GO2Torque):
             jump_height_commanded = self.commands[:, 3] >= 0.28
             # Squat-depth gate: a jump only counts if it dipped to <= squat_gate_height first
             # (forces a real countermovement; RSI air-drops exempt). squat_gate_height<=0 -> off.
-            success_at_impact = self.just_landed & real_jump & jump_height_commanded & self._squat_deep_enough()
+            # success_requires_squat_qualified=False DECOUPLES success from the squat_qualified HOLD gate:
+            # that latched gate flickers under pure-torque noise (25 consecutive in-pose steps), and since
+            # success required it, succ oscillated wildly even though flight/peak were stable. It is
+            # REDUNDANT for success -- real_jump (peak>=min_peak 0.40, well above idle 0.31) already
+            # guarantees a real countermovement (you can't pure-torque jump that high without squatting).
+            # The gate still gates the jump-REWARD chain (keeps forcing a real squat during learning).
+            success_at_impact = self.just_landed & real_jump & jump_height_commanded
+            if getattr(self.cfg.rewards, "success_requires_squat_qualified", True):
+                success_at_impact = success_at_impact & self._squat_deep_enough()
             self.pending_success |= success_at_impact
 
             # cmd-aware Gaussian height score: penalize both overshoot and undershoot
@@ -1065,6 +1073,14 @@ class GO2OmniJumpTorque(GO2Torque):
             else:
                 jump_command_active = torch.ones(self.num_envs, dtype=torch.bool, device=self.device)
             active = (jump_command_active & gate).float()
+        elif getattr(self.cfg.rewards, "ang_vel_damp_airborne_only", False):
+            # AIRBORNE only (after takeoff, before landing). Otherwise the reward is active during the
+            # whole jumping_state INCLUDING the squat-but-not-taken-off phase, so a strong weight pays
+            # the policy to SIT in the squat holding yaw still and never jump (discovery collapse, run
+            # Jun10_12-47-57: yaw_r spiked to 0.14 exactly as flight_rate -> 0). Restricting to airborne
+            # removes the "don't jump" optimum (no reward without leaving the ground) while still damping
+            # the yaw spin where it actually accumulates (flight).
+            active = (self.has_taken_off & (~self.has_landed) & gate).float()
         else:
             active = (self.jumping_state & (~self.has_landed) & gate).float()
         yaw_error = torch.square(self.base_ang_vel[:, 2] - self.commands[:, 2])

@@ -114,6 +114,10 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
         # its error term = wz^2 = a yaw-rate damp during flight -> stops the heading drift. (OmniNet does
         # this; our base reward otherwise only rewards tracking a NONZERO commanded yaw.)
         ang_vel_damp_zero_command = True
+        # AIRBORNE-only: only damp yaw while actually in the air, NOT during the squat-but-not-taken-off
+        # phase. Otherwise the strong (1.5) yaw reward pays the policy to sit in the squat holding still
+        # and never jump -> discovery collapse (Jun10_12-47-57).
+        ang_vel_damp_airborne_only = True
         projected_landing_min_height = 0.40 # instantaneous height gate for the DENSE projected_landing:
                                             # blocks the legs-tucked sprawl farm (body ~0.13, feet off ground)
                                             # while keeping dense in-place landing control during real apex.
@@ -161,9 +165,20 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
         # countermovement is the only way to score. The time-window failed because gating rewards
         # for N steps didn't stop the policy from physically insta-popping; a depth gate ties the
         # reward to the dip itself. RSI air-drops exempt. (stance_window_steps removed.)
+        soft_dof_pos_limit = 0.9            # was 1.0 (no margin = penalty only AT the hard limit = useless).
+                                            # 0.9 -> dof_pos_limits starts penalizing in the last 10% before the
+                                            # hard URDF limit, so the over-deep squat stops before jamming the "wall".
         squat_gate_height = 0.24            # must dip base to <=0.24m (idle ~0.31) to unlock jump rewards
         successful_jump_min_peak_height = 0.40  # was 0.30: a ~0.34 "low pop" no longer counts as success
                                                 # (= command floor 0.40; kills the low-jump shortcut)
+        # Grade successful_jump by the landing-drift score (was forced to 1 = pure binary). Stage1 cmd=0
+        # -> zero_cmd_score = exp(-gain*||flight horiz vel||^2): ~1.0 for an in-place jump, lower if it
+        # drifts (floor 0.20). = anti-drift + less-binary success reward. Stage2: becomes velocity tracking.
+        success_use_velocity_score = True
+        # DECOUPLE success from the squat_qualified HOLD gate (which flickers under pure-torque noise ->
+        # made succ oscillate 0.01-0.89 while flight/peak were stable). peak>=0.40 already guarantees a
+        # real countermovement, so the gate is redundant FOR SUCCESS. It still gates the jump-REWARD chain.
+        success_requires_squat_qualified = False
         # RSI static deep-squat air-drop (the EXPLORATION piece): half the RSI envs start AT REST in the
         # deep squat + jumping, so value learns "deep-squat-at-rest = high return" (they're gate-exempt
         # and earn jump rewards from the dip). This plants V(dip) that the squat-depth gate then makes the
@@ -195,7 +210,10 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
             #   orientation=-1.6, collision=-3.0, default_pos=-0.3, default_hip_pos=0.3, ...
             # ---- landing layer (new) ----
             tracking_linear_velocity = 0.0   # was 0.5: commands[0:2] is now meters, not m/s
-            tracking_angular_velocity = 0.5  # ACTIVATE (was 0): OmniNet-style yaw-rate damping to hold heading.
+            tracking_angular_velocity = 1.5  # 0.5 -> 1.5: reverse-engineer of earned 0.027 showed wz~0.28 rad/s
+                                             # (~12 deg drift/jump) = only half-damped. 3x to tighten the hold.
+                                             # Still << main jump rewards (peak25/vz15); earned ~0.08. ACTIVATE (was 0):
+                                             # OmniNet-style yaw-rate damping to hold heading.
                                              # ang_vel_damp_zero_command=True (below) keeps it active at zero yaw cmd
                                              # so the error term = wz^2 = damp spin during flight -> fixes the heading
                                              # drift. Kept WELL below the main jump rewards (peak25/vz15/landing20); it's
@@ -213,6 +231,11 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
                                              # -1.0). Watch: peak climbs vs the stable 0.517 baseline AND succ stays ~0.9 (height
                                              # & landing-success are coupled via buffer150; if succ drops, height is being bought
                                              # with landing failures -> back off / add pitch_level instead).
+            successful_jump = 700.0          # 400 -> 700: raise the completion reward to ~rank3 (just below
+                                             # landing/peak). It's sparse so weight is big but earned modest
+                                             # (~0.25; it's also ALREADY graded by height_score≈0.45 since peak
+                                             # 0.5 < cmd 0.7). Paired with success_use_velocity_score=True so it's
+                                             # graded by landing-drift too (less binary -> less oscillation amplify).
             landing_position = 30.0          # sparse terminal landing-at-target bonus (real-jump gated)
             # ---- Stage2-ready: DISABLE takeoff_direction (was inherited 3.0) ----
             # takeoff_direction = vz/‖v‖ rewards a PURELY VERTICAL takeoff — the only Stage1-specific
@@ -282,12 +305,18 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
                                              # ω damping -> body tumbled into touchdown. Penalty (not bell kernel) so
                                              # it bites; penalizes spin RATE not airborne time -> clean high jump unhurt.
                                              # THE knob: still flipping -> more negative; jumps get stiff/low -> back off.
+            dof_pos_limits = -5.0            # ENABLE (was 0/off): penalize joints folding past the soft limit
+                                             # (soft_dof_pos_limit=0.9 below = last 10% before the hard URDF limit).
+                                             # Fix for the over-deep squat (base ~0.13) jamming the knees to the
+                                             # "wall" + stalling, which also dropped peak. Stops the dip ~10% short
+                                             # of the hard limit -> smoother push, should recover height. Tunable.
             landing_impact = -2.0            # (2) Olsen Ground-force/Soft-impact: penalize the vertical foot-force
                                              # SPIKE at touchdown (bounded, soft floor at ~standing weight) -> cushion,
                                              # don't slam. KEEP MODEST: too negative incentivizes jumping LOWER
                                              # (smaller fall = softer impact) and suppresses height. #1 (ω damping)
                                              # is the primary lever; this is secondary. peak drops -> back off toward 0.
-            pitch_level = -4.5               # -3.0 -> -4.5: STRENGTHEN pitch penalty (nose-dive is the high-jump
+            pitch_level = -6.0               # -4.5 -> -6.0: further STRENGTHEN (preemptive vs nose-dive when we push
+                                             # height higher; back off if the jump gets stiff/peak drops). Nose-dive is the high-jump
                                              # failure mode -- Jun05_23-55-11 crashed at pitch 0.68). PITCH-specific
                                              # attitude penalty (projected_gravity_x^2) over the whole
                                              # jump. Fixes the persistent nose-down ("head-heavy") tilt that the
@@ -306,6 +335,7 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
             "rew_landing_impact",    # (2) touchdown force-spike penalty — cushion vs slam
             "rew_pitch_level",       # pitch-specific tilt penalty — fix persistent nose-down
             "rew_tracking_angular_velocity",  # OmniNet yaw-rate damping (hold heading) — watch it stays < jump rewards
+            "rew_dof_pos_limits",    # joint-limit penalty — watch it shrinks as the over-deep squat stops jamming
             "squat_qualified_rate",  # frac of takeoffs preceded by a HELD squat; compare to jump_flight_rate
         ]
 
