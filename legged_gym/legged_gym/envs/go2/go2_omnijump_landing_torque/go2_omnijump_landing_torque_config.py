@@ -49,23 +49,18 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
     # proven ~0.30 default stance (inherited). Revisit launch depth later via a milder crouch +
     # stronger default_hip_pos if pursuing more height.
     class growth(GO2OmniJumpCurriculumTorqueCfg.growth):
-        # PD fade-out moved to a MIDDLE window (2026-06-09): full PD through discovery (~iter1500), then
-        # fade to 0 by ~iter3500, leaving ~2500 iters of pure-torque consolidation.
-        # WHY: the iter500 early-fade (warmup 7000/x0 35000) made training OSCILLATE badly -- pure torque
-        # from iter500 rides the bare all-or-nothing gated-reward cliff (small policy change flips envs
-        # in/out of a clean cycle -> succ swings 0.28-0.57). The old smooth run (Jun03_12-46-35: succ
-        # 0.89-0.95 FLAT, even at noise 0.6-0.72!) kept pd_prior=0.5 until iter~800 and faded to 0 only
-        # at iter5999 -- the PD scaffold guaranteed every jump completed, so the gated rewards fired every
-        # episode = no cliff = smooth. But that left ~zero pure-torque consolidation (fragile endpoint).
-        # This middle window gets BOTH: PD scaffolds the rough discovery/climb (smooth), then ~2500 iters
-        # pure torque to consolidate the endpoint. general_scale ramps 0->1 linearly from warmup_steps to
-        # x0; pd_alpha = 0.5*(1-general_scale). Empirically step_count ~= 69/iter.
-        warmup_steps = 100000      # full PD until ~iter1450 (scaffold through discovery), then start fading.
-        x0 = 240000                # linear-fade end -> pd_alpha=0 by ~iter3480 (=> ~2500 iters pure torque).
-        # WATCH: training should be MUCH smoother through discovery now (succ shouldn't swing wildly while
-        # pd>0). If the LATE pure-torque phase (iter3500+) re-collapses, the endpoint is still PD-dependent
-        # -> push the fade window later still. If discovery is fine, can pull the window earlier for more
-        # pure-torque time.
+        # PD fade EARLY (pure torque by ~iter500). The MIDDLE-window experiment (warmup 100000/x0 240000,
+        # full PD until iter1450) FAILED: run Jun10_00-50-26 stayed squatQ=0 / peak 0.15 / NO jump for
+        # 1087 iters even with full PD. Cause: with the squat-QUALIFIED gate, a 50% PD prior only gives a
+        # shallow squat that never qualifies -> jump chain stays locked -> RL gets no jump-reward signal,
+        # and the strong PD keeps it "comfortable" not squatting deep. Early fade WORKS precisely because
+        # PD leaves fast and FORCES the RL to learn a qualifying squat-jump (Jun09_19-29-38: succ 0.90,
+        # peak 0.57, continuous 0.65 jumps in play). The early-fade oscillation is cosmetic -- it still
+        # converges to a great policy. ("PD-longer = smoother" held for Jun03 only because that older
+        # config had no squat-qualified gate.) general_scale ramps 0->1 linearly warmup_steps->x0;
+        # pd_alpha = 0.5*(1-general_scale). step_count ~= 69/iter.
+        warmup_steps = 7000        # full PD only for the first ~iter100, then start fading.
+        x0 = 35000                 # linear-fade end -> pd_alpha=0 by ~iter500. (Proven config Jun09_19-29-38.)
 
     class commands(GO2OmniJumpCurriculumTorqueCfg.commands):
         # Landing-point task: commands[0:2] repurposed velocity -> landing displacement (m).
@@ -115,6 +110,10 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
         # (too tight = fewer jumps/episode, NOT stuck; too loose = no-op).
         next_jump_requires_default_pose = False   # continuous-only gate; no-op in single-jump mode (no "next jump").
         next_jump_default_pose_threshold = 1.5
+        # Heading hold: keep tracking_angular_velocity active even at zero yaw command (commands[2]=0) so
+        # its error term = wz^2 = a yaw-rate damp during flight -> stops the heading drift. (OmniNet does
+        # this; our base reward otherwise only rewards tracking a NONZERO commanded yaw.)
+        ang_vel_damp_zero_command = True
         projected_landing_min_height = 0.40 # instantaneous height gate for the DENSE projected_landing:
                                             # blocks the legs-tucked sprawl farm (body ~0.13, feet off ground)
                                             # while keeping dense in-place landing control during real apex.
@@ -196,6 +195,11 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
             #   orientation=-1.6, collision=-3.0, default_pos=-0.3, default_hip_pos=0.3, ...
             # ---- landing layer (new) ----
             tracking_linear_velocity = 0.0   # was 0.5: commands[0:2] is now meters, not m/s
+            tracking_angular_velocity = 0.5  # ACTIVATE (was 0): OmniNet-style yaw-rate damping to hold heading.
+                                             # ang_vel_damp_zero_command=True (below) keeps it active at zero yaw cmd
+                                             # so the error term = wz^2 = damp spin during flight -> fixes the heading
+                                             # drift. Kept WELL below the main jump rewards (peak25/vz15/landing20); it's
+                                             # a stabilizer. Stage2: open commands[2] -> same term becomes turn-tracking.
             projected_landing = 20.0         # was 10: STRENGTHEN the dense landing-point gradient to break the drift.
                                              # Calc: per-unit-weight yield ~0.021 (from projected_peak w15->earned 0.31);
                                              # on-target potential at w20 ~0.42 > projected_peak 0.31, so landing accuracy
@@ -283,7 +287,9 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
                                              # don't slam. KEEP MODEST: too negative incentivizes jumping LOWER
                                              # (smaller fall = softer impact) and suppresses height. #1 (ω damping)
                                              # is the primary lever; this is secondary. peak drops -> back off toward 0.
-            pitch_level = -3.0               # PITCH-specific attitude penalty (projected_gravity_x^2) over the whole
+            pitch_level = -4.5               # -3.0 -> -4.5: STRENGTHEN pitch penalty (nose-dive is the high-jump
+                                             # failure mode -- Jun05_23-55-11 crashed at pitch 0.68). PITCH-specific
+                                             # attitude penalty (projected_gravity_x^2) over the whole
                                              # jump. Fixes the persistent nose-down ("head-heavy") tilt that the
                                              # symmetric orientation (-2.0) is too weak on. Stacks on orientation ->
                                              # pitch weighted ~2.5x roll during the jump. THE knob: still nose-down ->
@@ -299,6 +305,7 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
             "rew_base_ang_vel_xy",   # (1) flight+landing roll/pitch ω damping — the anti-tumble lever
             "rew_landing_impact",    # (2) touchdown force-spike penalty — cushion vs slam
             "rew_pitch_level",       # pitch-specific tilt penalty — fix persistent nose-down
+            "rew_tracking_angular_velocity",  # OmniNet yaw-rate damping (hold heading) — watch it stays < jump rewards
             "squat_qualified_rate",  # frac of takeoffs preceded by a HELD squat; compare to jump_flight_rate
         ]
 

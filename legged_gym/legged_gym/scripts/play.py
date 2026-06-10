@@ -418,11 +418,27 @@ def play(args):
                             # standing where it landed.
                             if hasattr(env, "_reset_jump_buffers"):
                                 env._reset_jump_buffers(env_ids)
-                            # Update landing target to current xy so the robot is
-                            # rewarded for landing back where it currently is.
+                            # --- Restore the canonical FRESH-IDLE state before the next jump. ---
+                            # Single-jump training only ever jumps from a fresh reset_idx idle pose,
+                            # so the policy is OOD (refuses to squat) from a post-landing stand.
+                            # Snap the env state back to what jump-1 saw, WITHOUT teleporting xy:
+                            #   1) landing-point error -> 0. This env uses `landing_target` (NOT
+                            #      `atan_p_des`; that update was a silent no-op). Pure-torque drift
+                            #      leaves the robot 0.3-0.5m off spawn while landing_target stays at
+                            #      spawn -> huge landing_err obs -> policy thinks it must jump back
+                            #      toward spawn (Stage-2 behaviour it never trained). Pin to current xy.
+                            if hasattr(env, "landing_target"):
+                                env.landing_target[:, 0] = env.root_states[:, 0]
+                                env.landing_target[:, 1] = env.root_states[:, 1]
                             if hasattr(env, "atan_p_des"):
                                 env.atan_p_des[:, 0] = env.root_states[:, 0]
                                 env.atan_p_des[:, 1] = env.root_states[:, 1]
+                            #   2) motor_fatigue accumulates across jumps (not reset above) -> obs OOD.
+                            if hasattr(env, "motor_fatigue"):
+                                env.motor_fatigue[env_ids] = 0.0
+                            # NOTE: do NOT snap dof to default here -- a mid-play dof reset lifts the feet
+                            # for one step, which the env reads as a spurious takeoff+landing (the jump
+                            # "completes" in ~7 steps at standing height). The robot keeps its real pose.
                             env_cfg.test.vel[4] = target_jump_cmd
                             if env.commands.shape[1] > 4:
                                 env.commands[:, 4] = target_jump_cmd

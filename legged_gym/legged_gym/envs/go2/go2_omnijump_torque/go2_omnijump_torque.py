@@ -1050,15 +1050,23 @@ class GO2OmniJumpTorque(GO2Torque):
         return active * torch.exp(-self.cfg.rewards.velocity_tracking_gain * vel_error)
 
     def _reward_tracking_angular_velocity(self):
-        yaw_commanded = torch.abs(self.commands[:, 2]) > self.cfg.rewards.ang_vel_tracking_min_command
+        # Track the commanded yaw rate (commands[2]) over the flight. OmniNet-style: when no yaw is
+        # commanded (ang_vel_damp_zero_command=True), stay active anyway so the error term becomes wz^2 =
+        # a yaw-rate DAMP that holds heading (= OmniNet's tracking_ang_vel with omega_cmd=0). A nonzero
+        # command would be turning (Stage 2). Default (flag off / other configs) keeps the old behaviour:
+        # only reward when a yaw rate is actually commanded.
+        if getattr(self.cfg.rewards, "ang_vel_damp_zero_command", False):
+            gate = torch.ones(self.num_envs, dtype=torch.bool, device=self.device)
+        else:
+            gate = torch.abs(self.commands[:, 2]) > getattr(self.cfg.rewards, "ang_vel_tracking_min_command", 0.05)
         if getattr(self.cfg.rewards, "tracking_linear_velocity_all_time", False):
             if self.cfg.commands.num_commands > 4:
                 jump_command_active = self.commands[:, 4] > float(self.cfg.commands.jump_command_threshold)
             else:
                 jump_command_active = torch.ones(self.num_envs, dtype=torch.bool, device=self.device)
-            active = (jump_command_active & yaw_commanded).float()
+            active = (jump_command_active & gate).float()
         else:
-            active = (self.jumping_state & (~self.has_landed) & yaw_commanded).float()
+            active = (self.jumping_state & (~self.has_landed) & gate).float()
         yaw_error = torch.square(self.base_ang_vel[:, 2] - self.commands[:, 2])
         sigma = max(float(getattr(self.cfg.rewards, "tracking_sigma", 0.25)), 1e-3)
         return active * torch.exp(-yaw_error / sigma)
