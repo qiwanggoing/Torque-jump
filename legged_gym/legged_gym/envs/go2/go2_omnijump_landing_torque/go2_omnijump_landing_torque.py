@@ -29,7 +29,6 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
         "base_ang_vel_xy",   # landing stability: flight+landing roll/pitch ω damping
         "landing_impact",    # landing stability: touchdown force-spike penalty
         "pitch_level",       # landing stability: pitch-specific tilt penalty
-        "dof_pos_limits",    # penalize folding joints to the limit (over-deep squat hits the "wall")
     }
 
     # Curriculum gate table requires an entry for every active reward. Curriculum
@@ -44,7 +43,6 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
         "base_ang_vel_xy": 0,   # active from step 1 (curriculum disabled = one-stage)
         "landing_impact": 0,
         "pitch_level": 0,
-        "dof_pos_limits": 0,
     }
 
     # ------------------------------------------------------------------ #
@@ -273,6 +271,20 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
         not_in_pose_yet = (~self.squat_qualified) if thr > 0.0 else torch.ones_like(self.jumping_state)
         active = self.jumping_state & (~self.has_taken_off) & not_in_pose_yet
         return active.float() * reward
+
+    def _reward_collision(self):
+        # FOLD the over-deep-squat ground-scrape INTO the existing collision penalty (no new reward line).
+        # The trunk/calves scrape the ground when the dip goes too low (base ~0.13 = the "hits a wall /
+        # stalls" the user saw) -> count that as a collision. Linear hinge below squat_floor_height=0.16
+        # (between the scrape ~0.13 and the normal q_squat ~0.18-0.20), active during the dip only, so it
+        # catches the harmful over-dip and leaves the useful deep squat (stroke for height) untouched.
+        # (dof_pos_limits was the wrong tool -- it never fired; the contact is the GROUND, not a joint limit.)
+        base = super()._reward_collision()  # thigh/calf/hip contact count (penalised_contact_indices)
+        floor = float(getattr(self.cfg.rewards, "squat_floor_height", 0.16))
+        squatting = (self.jumping_state & (~self.has_taken_off)).float()
+        over_deep = squatting * torch.clamp(floor - self.root_states[:, 2], min=0.0) \
+            * float(getattr(self.cfg.rewards, "squat_floor_collision_gain", 4.0))
+        return base + over_deep
 
     def _reward_base_ang_vel_xy(self):
         # Landing-stability lever borrowed from Olsen 2025 / Atanassov 2025 (papers): damp base
