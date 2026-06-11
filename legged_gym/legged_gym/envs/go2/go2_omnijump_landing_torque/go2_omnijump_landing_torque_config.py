@@ -67,9 +67,9 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
         # Stage 1 keeps the displacement at [0,0] (land in place == proven vertical jump).
         # Set landing_stage = 2 to open the ranges below; the env widens
         # command_ranges["lin_vel_x"/"lin_vel_y"] accordingly at init.
-        landing_stage = 1
+        landing_stage = 2                      # STAGE 2 ON: env widens lin_vel_x/y ranges to the disp ranges below.
         landing_disp_x_stage2 = [0.0, 0.40]    # forward landing distance (m), Stage 2
-        landing_disp_y_stage2 = [-0.20, 0.20]  # lateral landing offset (m), Stage 2
+        landing_disp_y_stage2 = [0.0, 0.0]     # FORWARD-ONLY start (lateral off). Open to [-0.20,0.20] once forward jumps land.
         single_jump_command_prob = 1.0         # SINGLE JUMP per episode (reverted from 0.0=continuous). Continuous
                                                # (Jun09_13-24-40) gave a noisy, bistable training signal (succ/flght
                                                # oscillating 0.28-0.56) and lower peak; single-jump (Jun06_13-53-04) is
@@ -165,16 +165,22 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
         # countermovement is the only way to score. The time-window failed because gating rewards
         # for N steps didn't stop the policy from physically insta-popping; a depth gate ties the
         # reward to the dip itself. RSI air-drops exempt. (stance_window_steps removed.)
-        squat_floor_height = 0.16           # base_z floor for the over-deep-squat penalty (folded into collision):
-                                            # catches the over-deep scrape (~0.13), leaves the normal squat (~0.18-0.20).
-        squat_floor_collision_gain = 4.0    # over-deep depth -> collision-count units (× collision scale -3.0).
+        soft_dof_pos_limit = 0.9            # was 1.0 (no margin = penalty only AT the hard limit = useless).
+                                            # 0.9 -> dof_pos_limits starts penalizing in the last 10% before the
+                                            # hard URDF limit, so the over-deep squat stops before jamming the "wall".
         squat_gate_height = 0.24            # must dip base to <=0.24m (idle ~0.31) to unlock jump rewards
         successful_jump_min_peak_height = 0.40  # was 0.30: a ~0.34 "low pop" no longer counts as success
                                                 # (= command floor 0.40; kills the low-jump shortcut)
         # Grade successful_jump by the landing-drift score (was forced to 1 = pure binary). Stage1 cmd=0
         # -> zero_cmd_score = exp(-gain*||flight horiz vel||^2): ~1.0 for an in-place jump, lower if it
         # drifts (floor 0.20). = anti-drift + less-binary success reward. Stage2: becomes velocity tracking.
-        success_use_velocity_score = True
+        success_use_velocity_score = False  # STAGE 2: OFF. velocity_score compares avg_vel (m/s) to commands[0:2],
+                                            # but those are now landing DISPLACEMENT (m) -> unit mismatch that penalizes
+                                            # correct forward jumps (0.40m jump ~0.8 m/s vs "0.40" target). successful_jump
+                                            # now = land-safely (binary x height_score); the landing POINT is driven by
+                                            # projected_landing (dense, dominant ~0.63) + landing_position (sparse). Clean
+                                            # separation: successful_jump=land safely, projected_landing=land on target.
+                                            # (Stage 1 used True as an anti-drift in-place signal; N/A once we go forward.)
         # DECOUPLE success from the squat_qualified HOLD gate (which flickers under pure-torque noise ->
         # made succ oscillate 0.01-0.89 while flight/peak were stable). peak>=0.40 already guarantees a
         # real countermovement, so the gate is redundant FOR SUCCESS. It still gates the jump-REWARD chain.
@@ -222,9 +228,7 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
                                              # Calc: per-unit-weight yield ~0.021 (from projected_peak w15->earned 0.31);
                                              # on-target potential at w20 ~0.42 > projected_peak 0.31, so landing accuracy
                                              # now outweighs the marginal height gained by drifting. (was 8-15x too weak.)
-            projected_peak = 35.0            # 25 -> 35: PUSH HEIGHT toward the 0.7 command (reachable: old Jun05_23-55-11
-                                             # play hit 0.706). default_pos -1.0 stays tight (the -0.7 was what tanked succ at
-                                             # peak30, not the height reward). Landing kept by buffer150/pitch-6/yaw. 20 -> 25 was
+            projected_peak = 25.0            # 20 -> 25 (gentler than the 30 that, bundled with default_pos -0.7, tanked succ).
                                              # PUSH HEIGHT: reward-share analysis (Jun09_15-14-50) showed height was only ~35%
                                              # of positives (projected_peak 20% + takeoff_vz 15%) vs projected_landing 39%, and
                                              # projected_peak had headroom (earned 0.29 vs landing's 0.57 at same w20). peak 0.7
@@ -307,9 +311,11 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
                                              # ω damping -> body tumbled into touchdown. Penalty (not bell kernel) so
                                              # it bites; penalizes spin RATE not airborne time -> clean high jump unhurt.
                                              # THE knob: still flipping -> more negative; jumps get stiff/low -> back off.
-            # NOTE: the over-deep-squat ground-scrape penalty is FOLDED INTO collision (-3.0) via the env's
-            # _reward_collision override (no new reward line) + squat_floor_height/squat_floor_collision_gain.
-            dof_pos_limits = 0.0             # OFF: was the wrong tool (never fired; the squat "wall" is ground, not joints).
+            dof_pos_limits = -5.0            # ENABLE (was 0/off): penalize joints folding past the soft limit
+                                             # (soft_dof_pos_limit=0.9 below = last 10% before the hard URDF limit).
+                                             # Fix for the over-deep squat (base ~0.13) jamming the knees to the
+                                             # "wall" + stalling, which also dropped peak. Stops the dip ~10% short
+                                             # of the hard limit -> smoother push, should recover height. Tunable.
             landing_impact = -2.0            # (2) Olsen Ground-force/Soft-impact: penalize the vertical foot-force
                                              # SPIKE at touchdown (bounded, soft floor at ~standing weight) -> cushion,
                                              # don't slam. KEEP MODEST: too negative incentivizes jumping LOWER
@@ -335,7 +341,7 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
             "rew_landing_impact",    # (2) touchdown force-spike penalty — cushion vs slam
             "rew_pitch_level",       # pitch-specific tilt penalty — fix persistent nose-down
             "rew_tracking_angular_velocity",  # OmniNet yaw-rate damping (hold heading) — watch it stays < jump rewards
-            "rew_collision",         # now includes the over-deep-squat ground-scrape — watch it -> ~0 as dip stays >0.16
+            "rew_dof_pos_limits",    # joint-limit penalty — watch it shrinks as the over-deep squat stops jamming
             "squat_qualified_rate",  # frac of takeoffs preceded by a HELD squat; compare to jump_flight_rate
         ]
 
