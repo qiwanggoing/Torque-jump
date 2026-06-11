@@ -6,6 +6,8 @@ unchanged and add a thin landing layer (landing target, yaw-frame error
 observation, dense projected-landing + sparse landing-position rewards).
 """
 
+import math
+
 import torch
 from isaacgym.torch_utils import get_euler_xyz
 
@@ -59,9 +61,32 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
         # Stage 2: widen the displacement ranges that the parent's
         # _resample_commands draws commands[0:2] from. Stage 1 leaves them [0,0]
         # (land in place -> behaviour identical to the proven vertical jumper).
-        if int(getattr(self.cfg.commands, "landing_stage", 1)) >= 2:
-            self.command_ranges["lin_vel_x"] = list(self.cfg.commands.landing_disp_x_stage2)
+        stage2 = int(getattr(self.cfg.commands, "landing_stage", 1)) >= 2
+        # Curriculum only ever runs in Stage 2 (so the EMA buffers below are always initialised
+        # before _update_dx_curriculum reads them).
+        self.landing_dx_curriculum = stage2 and bool(getattr(self.cfg.commands, "landing_dx_curriculum", False))
+        self.landing_dx_max = float(getattr(self.cfg.commands, "landing_dx_final", 0.40))
+        if stage2:
             self.command_ranges["lin_vel_y"] = list(self.cfg.commands.landing_disp_y_stage2)
+            if self.landing_dx_curriculum:
+                # DISTANCE CURRICULUM (Atanassov 2025 local-difficulty): start the forward dx
+                # range tiny (default 0 = pure in-place = the proven vertical-jump discovery)
+                # and grow the upper bound ONLY after the policy both LANDS SAFELY and LANDS ON
+                # TARGET at the current distance. Sidesteps the from-scratch discovery cliff: at
+                # dx=0 the landing target IS the spawn, so the (tight-sigma) landing reward is
+                # fully available during discovery; every later increment is a small adaptation
+                # of an already-competent jumper rather than a fresh discovery gamble.
+                self.landing_dx_max = float(getattr(self.cfg.commands, "landing_dx_start", 0.0))
+                self.command_ranges["lin_vel_x"] = [0.0, self.landing_dx_max]
+                self._dx_succ_ema = None
+                self._dx_hit_ema = None
+                self._dx_last_advance_step = 0
+            else:
+                self.command_ranges["lin_vel_x"] = list(self.cfg.commands.landing_disp_x_stage2)
+
+        # Per-episode accumulator: jumps that landed within tol of the commanded landing point
+        # (mirrors successful_jumps; consumed ONLY by the distance-curriculum advance gate).
+        self.jump_target_hits = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
 
     # ------------------------------------------------------------------ #
     # Reset — set landing target = spawn xy + commanded displacement.
@@ -76,6 +101,79 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
         init_y = float(self.cfg.init_state.pos[1])
         self.landing_target[env_ids, 0] = self.env_origins[env_ids, 0] + init_x + self.commands[env_ids, 0]
         self.landing_target[env_ids, 1] = self.env_origins[env_ids, 1] + init_y + self.commands[env_ids, 1]
+        self._update_dx_curriculum()
+
+    # ------------------------------------------------------------------ #
+    # Distance curriculum: jump-stat plumbing + advance logic.
+    # ------------------------------------------------------------------ #
+    def _reset_jump_buffers(self, env_ids):
+        super()._reset_jump_buffers(env_ids)
+        if hasattr(self, "jump_target_hits"):
+            self.jump_target_hits[env_ids] = 0.0
+
+    def _update_jump_state(self):
+        super()._update_jump_state()
+        # Accumulate "landed ON the commanded point" for the curriculum gate: a REAL jump
+        # (peak gate, same as landing_position) whose recorded touchdown xy (self.landing_root_xy,
+        # set by the parent at just_landed) is within tol of self.landing_target.
+        if hasattr(self, "jump_target_hits") and torch.any(self.just_landed):
+            tol = float(getattr(self.cfg.commands, "landing_dx_hit_tol", 0.12))
+            min_peak = float(getattr(self.cfg.rewards, "landing_real_jump_min_peak", 0.40))
+            err = torch.norm(self.landing_root_xy - self.landing_target[:, :2], dim=1)
+            hit = self.just_landed & (self.peak_base_height >= min_peak) & (err <= tol)
+            self.jump_target_hits += hit.float()
+
+    def _log_jump_episode_stats(self, env_ids):
+        super()._log_jump_episode_stats(env_ids)
+        jump_den = torch.clamp(self.jump_starts[env_ids], min=1.0)
+        self.extras["episode"]["landing_hit_rate"] = torch.mean(self.jump_target_hits[env_ids] / jump_den)
+
+    def _update_dx_curriculum(self):
+        # Grow command_ranges["lin_vel_x"][1] (forward dx) one step at a time, only once BOTH the
+        # safe-landing rate AND the land-on-target rate (EMA) clear their thresholds and the stage
+        # has been held a minimum number of steps. Requiring the HIT rate (not just success, which
+        # is height-only) stops the curriculum from outrunning the policy: distance opens only after
+        # the robot actually lands near the current target. Inert outside training / when disabled.
+        if not getattr(self, "landing_dx_curriculum", False):
+            return
+        if getattr(self.cfg.test, "use_test", False):
+            return
+        dx_final = float(getattr(self.cfg.commands, "landing_dx_final", 0.40))
+        episode = self.extras.get("episode", {})
+        succ = episode.get("successful_jump_rate", None)
+        hit = episode.get("landing_hit_rate", None)
+        if succ is not None and hit is not None:
+            succ = self._to_float(succ)
+            hit = self._to_float(hit)
+            if math.isfinite(succ) and math.isfinite(hit):
+                a = float(getattr(self.cfg.commands, "landing_dx_ema_alpha", 0.02))
+                self._dx_succ_ema = succ if self._dx_succ_ema is None else (1.0 - a) * self._dx_succ_ema + a * succ
+                self._dx_hit_ema = hit if self._dx_hit_ema is None else (1.0 - a) * self._dx_hit_ema + a * hit
+        # Surface the curriculum state to the training log.
+        ema_s = self._dx_succ_ema if self._dx_succ_ema is not None else 0.0
+        ema_h = self._dx_hit_ema if self._dx_hit_ema is not None else 0.0
+        self.extras["episode"]["landing_dx_max"] = torch.tensor(self.landing_dx_max, dtype=torch.float, device=self.device)
+        self.extras["episode"]["landing_dx_succ_ema"] = torch.tensor(ema_s, dtype=torch.float, device=self.device)
+        self.extras["episode"]["landing_dx_hit_ema"] = torch.tensor(ema_h, dtype=torch.float, device=self.device)
+        # Advance gate.
+        if self.landing_dx_max >= dx_final - 1e-6:
+            return
+        if self._dx_succ_ema is None or self._dx_hit_ema is None:
+            return
+        min_hold = int(getattr(self.cfg.commands, "landing_dx_min_hold_steps", 1500))
+        if (self.common_step_counter - self._dx_last_advance_step) < min_hold:
+            return
+        succ_thr = float(getattr(self.cfg.commands, "landing_dx_succ_threshold", 0.80))
+        hit_thr = float(getattr(self.cfg.commands, "landing_dx_hit_threshold", 0.50))
+        if self._dx_succ_ema >= succ_thr and self._dx_hit_ema >= hit_thr:
+            step = float(getattr(self.cfg.commands, "landing_dx_step", 0.10))
+            self.landing_dx_max = min(self.landing_dx_max + step, dx_final)
+            self.command_ranges["lin_vel_x"] = [0.0, self.landing_dx_max]
+            self._dx_last_advance_step = int(self.common_step_counter)
+            # Reset EMAs: the next advance must RE-EARN success+accuracy at the new, harder
+            # distance (both dip right after a bump).
+            self._dx_succ_ema = None
+            self._dx_hit_ema = None
 
     # ------------------------------------------------------------------ #
     # Pose-target override — during the post-touchdown landing buffer the parent leaves the

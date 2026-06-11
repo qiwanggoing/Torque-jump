@@ -68,8 +68,31 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
         # Set landing_stage = 2 to open the ranges below; the env widens
         # command_ranges["lin_vel_x"/"lin_vel_y"] accordingly at init.
         landing_stage = 2                      # STAGE 2 ON: env widens lin_vel_x/y ranges to the disp ranges below.
-        landing_disp_x_stage2 = [0.0, 0.40]    # forward landing distance (m), Stage 2
+        landing_disp_x_stage2 = [0.0, 0.40]    # forward landing distance (m), Stage 2 (final range when curriculum off)
         landing_disp_y_stage2 = [0.0, 0.0]     # FORWARD-ONLY start (lateral off). Open to [-0.20,0.20] once forward jumps land.
+
+        # ---- DISTANCE CURRICULUM (Atanassov 2025 local-difficulty) ----
+        # Start the forward dx range at 0 (pure in-place = the proven vertical-jump discovery; the
+        # landing reward is fully available because target==spawn) and grow the upper bound one
+        # `step` at a time. Advance ONLY when, at the current distance, the policy both lands safely
+        # (successful_jump_rate) AND lands near the commanded point (landing_hit_rate, |land-target|
+        # <= hit_tol) — the hit gate stops the curriculum from outrunning the policy (success alone
+        # is height-only and would let an in-place policy keep advancing). After each bump both rates
+        # dip and must be re-earned at the new distance. Trains forward jumping in ONE from-scratch
+        # run without the discovery cliff that a one-shot dx[0,0.40] open hits.
+        landing_dx_curriculum = True
+        landing_dx_start = 0.0                 # initial dx upper bound (0 = in-place)
+        landing_dx_final = 0.40                # final dx upper bound (the Stage-2 target)
+        landing_dx_step = 0.10                 # increment per advance: 0 -> 0.1 -> 0.2 -> 0.3 -> 0.4
+        landing_dx_succ_threshold = 0.80       # advance needs successful_jump_rate EMA >= this
+        landing_dx_hit_threshold = 0.55        # AND landing_hit_rate EMA >= this (lands ON target)
+        landing_dx_hit_tol = 0.10              # a jump "hits" if |landing_xy - target| <= this (m).
+                                               # KEEP < landing_dx_step: else an in-place policy stays
+                                               # within tol of the newly-opened distance and the gate
+                                               # passes without real forward motion. At tol 0.10/step
+                                               # 0.10/thr 0.55 forward is forced from dx>=0.20.
+        landing_dx_ema_alpha = 0.02            # EMA smoothing on the per-reset-batch rates
+        landing_dx_min_hold_steps = 1500       # min policy-steps held at a stage before it may advance (~30 iters)
         single_jump_command_prob = 1.0         # SINGLE JUMP per episode (reverted from 0.0=continuous). Continuous
                                                # (Jun09_13-24-40) gave a noisy, bistable training signal (succ/flght
                                                # oscillating 0.28-0.56) and lower peak; single-jump (Jun06_13-53-04) is
@@ -345,6 +368,11 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
             "rew_tracking_angular_velocity",  # OmniNet yaw-rate damping (hold heading) — watch it stays < jump rewards
             "rew_dof_pos_limits",    # joint-limit penalty — watch it shrinks as the over-deep squat stops jamming
             "squat_qualified_rate",  # frac of takeoffs preceded by a HELD squat; compare to jump_flight_rate
+            # ---- distance curriculum (watch these to see the dx ramp progress) ----
+            "landing_hit_rate",      # frac of jumps landing within hit_tol of the commanded point — the accuracy gate
+            "landing_dx_max",        # current forward dx upper bound (0 -> 0.40 as the curriculum advances)
+            "landing_dx_succ_ema",   # smoothed successful_jump_rate the advance gate reads
+            "landing_dx_hit_ema",    # smoothed landing_hit_rate the advance gate reads
         ]
 
     class test(GO2OmniJumpCurriculumTorqueCfg.test):
@@ -371,7 +399,7 @@ class GO2OmniJumpLandingTorqueCfgPPO(GO2OmniJumpCurriculumTorqueCfgPPO):
         load_run = -1
         checkpoint = -1
         resume_path = None
-        max_iterations = 6000
+        max_iterations = 10000   # distance curriculum needs room: ~in-place discovery + 4 dx stages
         # entropy_coef ANNEALS 0.005 -> 0.001 at iter2800 (re-enabled; "disable the anneal" was a misdiagnosis).
         # Data: constant 0.005 (Jun06_07-41-08) cracked the gate then noise RAN AWAY (0.45->1.33) -> degraded@3000,
         # collapsed@5400 as PD faded. Constant 0.003 -> noise 0.32 -> stuck. Neither constant works. The anneal is the
