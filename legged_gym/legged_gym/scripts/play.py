@@ -142,7 +142,10 @@ def play(args):
     # cmd layout: [lin_vel_x, lin_vel_y, ang_vel_yaw, jump_height, jump_command]
     # 修改下面这行即可改变跳跃高度（保持在训练范围 [0.40, 0.70] 内）
     env_cfg.test.vel[3] = 0.7
-    print(f"[Play] cmd[3] (jump_height) = {float(env_cfg.test.vel[3]):.2f}")
+    # Stage-2: cmd[0] = 前向落点位移 (m)，训练范围 [0.0, 0.40]；设 0 则原地跳
+    env_cfg.test.vel[0] = 0.40
+    print(f"[Play] cmd[3] (jump_height) = {float(env_cfg.test.vel[3]):.2f}, "
+          f"cmd[0] (forward dx) = {float(env_cfg.test.vel[0]):.2f}")
     # ============================================================================
 
     if checkpoint_iter is not None:
@@ -298,6 +301,7 @@ def play(args):
 
     play_phase = "pre_idle"
     play_phase_step = 0
+    jump_start_xy = env.root_states[robot_index, :2].clone()   # captured at each jump start for fwd-displacement readout
 
     # Initialize: cmd[4]=0, robot stays idle until pre_idle timer elapses.
     if single_jump_play and env.commands.shape[1] > 4:
@@ -351,6 +355,7 @@ def play(args):
                         # Transition to jumping: enable cmd[4]=target
                         play_phase = "jumping"
                         play_phase_step = 0
+                        jump_start_xy = env.root_states[robot_index, :2].clone()
                         env_cfg.test.vel[4] = target_jump_cmd
                         if env.commands.shape[1] > 4:
                             env.commands[:, 4] = target_jump_cmd
@@ -396,10 +401,15 @@ def play(args):
                             env.commands[:, 4] = 0.0
                         if hasattr(env, "single_jump_play_done"):
                             env.single_jump_play_done[:] = True   # lock cmd[4]=0 in env
+                        _disp = (env.root_states[robot_index, :2] - jump_start_xy).cpu()
+                        _cmd_dx = float(env_cfg.test.vel[0]) if len(env_cfg.test.vel) > 0 else 0.0
+                        _cmd_dy = float(env_cfg.test.vel[1]) if len(env_cfg.test.vel) > 1 else 0.0
                         print(
                             f"[Play] Step {i}: jump cycle done ({exit_reason})"
                             f" peak={env.peak_base_height[robot_index].item():.3f}"
                             f" base={env.root_states[robot_index, 2].item():.3f}"
+                            f" | fwd_moved={_disp[0].item():.3f}m lat={_disp[1].item():.3f}m"
+                            f" (cmd dx={_cmd_dx:.2f} dy={_cmd_dy:.2f})"
                             f" → post_stand ({POST_JUMP_STAND_SECONDS}s)"
                         )
                 elif play_phase == "post_stand":
@@ -428,8 +438,20 @@ def play(args):
                             #      spawn -> huge landing_err obs -> policy thinks it must jump back
                             #      toward spawn (Stage-2 behaviour it never trained). Pin to current xy.
                             if hasattr(env, "landing_target"):
-                                env.landing_target[:, 0] = env.root_states[:, 0]
-                                env.landing_target[:, 1] = env.root_states[:, 1]
+                                # Stage-2: command the NEXT landing point forward of the current
+                                # position (in the robot's current heading), so continuous play
+                                # keeps hopping toward the commanded displacement instead of
+                                # re-pinning to the spot it just landed on (Stage-1 behaviour).
+                                if int(getattr(env.cfg.commands, "landing_stage", 1)) >= 2:
+                                    _, _, _yaw = get_euler_xyz(env.base_quat)
+                                    _cy, _sy = torch.cos(_yaw), torch.sin(_yaw)
+                                    _dx = float(env_cfg.test.vel[0]) if len(env_cfg.test.vel) > 0 else 0.0
+                                    _dy = float(env_cfg.test.vel[1]) if len(env_cfg.test.vel) > 1 else 0.0
+                                    env.landing_target[:, 0] = env.root_states[:, 0] + _cy * _dx - _sy * _dy
+                                    env.landing_target[:, 1] = env.root_states[:, 1] + _sy * _dx + _cy * _dy
+                                else:
+                                    env.landing_target[:, 0] = env.root_states[:, 0]
+                                    env.landing_target[:, 1] = env.root_states[:, 1]
                             if hasattr(env, "atan_p_des"):
                                 env.atan_p_des[:, 0] = env.root_states[:, 0]
                                 env.atan_p_des[:, 1] = env.root_states[:, 1]
@@ -446,6 +468,7 @@ def play(args):
                                 env.single_jump_play_done[:] = False
                             play_phase = "jumping"
                             play_phase_step = 0
+                            jump_start_xy = env.root_states[robot_index, :2].clone()
                             env.compute_observations()
                             obs = env.get_observations()
                             print(f"[Play] Step {i}: post_stand done → next jump (continuous)")

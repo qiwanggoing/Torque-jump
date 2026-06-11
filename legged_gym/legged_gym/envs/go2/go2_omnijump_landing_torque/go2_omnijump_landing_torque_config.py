@@ -88,10 +88,12 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
 
     class rewards(GO2OmniJumpCurriculumTorqueCfg.rewards):
         # Landing-reward kernel widths + real-jump gate for the sparse terminal term.
-        sigma_pos_landing = 0.12            # was 0.05 (too tight -> landing_position earned ~0, dead despite w30).
-                                            # REVIVED: loosened so the sparse landing-point bonus actually fires. Landing-POINT
-                                            # is a CORE reward for the upcoming open-command (controllable landing target) stage.
-        sigma_landing_proj = 0.10           # in-flight ballistic estimate — looser (noisy)
+        sigma_pos_landing = 0.06            # Stage-2: TIGHTENED from 0.12. At 0.12 an in-place jump at cmd dx=0.40
+                                            # (err=0.16) still earned exp(-1.33)=0.26, and at the avg cmd dx=0.20
+                                            # (err=0.04) earned 0.72 -> in-place farmed ~70% of the landing bonus.
+                                            # 0.06 cuts those to 0.07 / 0.51 -> forces real forward motion to score.
+        sigma_landing_proj = 0.05           # Stage-2: TIGHTENED from 0.10 (same reason). In-place at cmd dx=0.40
+                                            # drops exp(-1.6)=0.20 -> exp(-3.2)=0.04; gradient at in-place still alive.
         landing_real_jump_min_peak = 0.40   # peak gate for the SPARSE landing_position reward
                                             # (omnijump squat settles ~0.31, real jump peaks ~0.56)
         landing_buffer_steps = 150          # was 25 (=0.125s, inherited). A jump only "finishes" (success
