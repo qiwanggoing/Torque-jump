@@ -139,8 +139,11 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
         sigma_landing_proj_norm = 0.025     # kernel width on RELATIVE squared err (proj). ~5% miss->0.90, 15%->0.41
         sigma_pos_landing_norm = 0.04       # kernel width on RELATIVE squared err (terminal landing_position)
         landing_norm_dist_floor = 0.30      # min distance used in the normalizer (in-place/near cmds judged vs 0.30m)
-        first_jump_delay_steps = 200        # was 55 (0.275s): STAND ~1s after reset before the jump fires, so the
-                                            # policy launches from a settled idle stance (more natural + cleaner jump).
+        # first_jump_delay_steps stays at the inherited 55 (0.275s). A 1s pre-jump idle (200) was
+        # tried and BROKE from-scratch discovery (iter774 flight=0 vs the proven run's 0.914 by
+        # iter500): 1s of standing rewards makes "don't jump" too comfortable -> the policy never
+        # risks the squat-then-push (same failure mode as Jun09_11-29-05 strong default_pos/yaw).
+        # The 1s settled-stance is a PLAY/visual nicety only -> set it in play_landing, not training.
         landing_real_jump_min_peak = 0.40   # peak gate for the landing_position reward
                                             # (omnijump squat settles ~0.31, real jump peaks ~0.56)
         landing_buffer_steps = 150          # was 25 (=0.125s, inherited). A jump only "finishes" (success
