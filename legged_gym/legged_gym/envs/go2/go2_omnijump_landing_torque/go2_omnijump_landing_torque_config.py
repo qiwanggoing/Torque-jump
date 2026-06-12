@@ -68,7 +68,7 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
         # Set landing_stage = 2 to open the ranges below; the env widens
         # command_ranges["lin_vel_x"/"lin_vel_y"] accordingly at init.
         landing_stage = 2                      # STAGE 2 ON: env widens lin_vel_x/y ranges to the disp ranges below.
-        landing_disp_x_stage2 = [0.0, 0.40]    # forward landing distance (m), Stage 2 (final range when curriculum off)
+        landing_disp_x_stage2 = [0.0, 2.0]    # forward landing distance (m), Stage 2 (final range when curriculum off)
         landing_disp_y_stage2 = [0.0, 0.0]     # FORWARD-ONLY start (lateral off). Open to [-0.20,0.20] once forward jumps land.
 
         # ---- DISTANCE CURRICULUM (Atanassov 2025 local-difficulty) ----
@@ -82,17 +82,26 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
         # run without the discovery cliff that a one-shot dx[0,0.40] open hits.
         landing_dx_curriculum = True
         landing_dx_start = 0.0                 # initial dx upper bound (0 = in-place)
-        landing_dx_final = 0.40                # final dx upper bound (the Stage-2 target)
+        landing_dx_final = 2.0                # final dx upper bound (the Stage-2 target)
         landing_dx_step = 0.10                 # increment per advance: 0 -> 0.1 -> 0.2 -> 0.3 -> 0.4
-        landing_dx_succ_threshold = 0.80       # advance needs successful_jump_rate EMA >= this
-        landing_dx_hit_threshold = 0.55        # AND landing_hit_rate EMA >= this (lands ON target)
+        # COMBINED advance gate: advance only when the SAME jump both lands on target AND lands
+        # stably (landing_stable_hit_rate). Replaces the old two separate thresholds (succ + hit),
+        # which let "hit-then-topple + short-but-stable" pass without any jump being both -> the
+        # curriculum blew through to the cap. (succ/hit thresholds below are now unused.)
+        landing_dx_stable_hit_threshold = 0.70 # advance needs landing_stable_hit_rate EMA >= this
+        landing_dx_succ_threshold = 0.80       # [unused — superseded by landing_dx_stable_hit_threshold]
+        landing_dx_hit_threshold = 0.55        # [unused — superseded by landing_dx_stable_hit_threshold]
         landing_dx_hit_tol = 0.10              # a jump "hits" if |landing_xy - target| <= this (m).
-                                               # KEEP < landing_dx_step: else an in-place policy stays
-                                               # within tol of the newly-opened distance and the gate
-                                               # passes without real forward motion. At tol 0.10/step
-                                               # 0.10/thr 0.55 forward is forced from dx>=0.20.
-        landing_dx_ema_alpha = 0.02            # EMA smoothing on the per-reset-batch rates
+                                               # KEEP < landing_dx_step (else in-place stays within tol of
+                                               # the newly-opened distance and passes without forward motion).
+        landing_dx_ema_alpha = 0.02            # EMA smoothing on the per-reset-batch stable-hit rate
         landing_dx_min_hold_steps = 1500       # min policy-steps held at a stage before it may advance (~30 iters)
+        # Per-resample STAND probability: each resample (every resampling_time=1.8s) the robot STANDS
+        # if commands[4] <= jump_command_threshold (0.5). Default range [0,1] -> 50% stand. Narrow to
+        # [0.45,1.0] -> ~9% stand, so the robot idles far less and jumps almost every resample. (The
+        # IMPORTANT standing — recovering to a stable stand after landing — is still trained in every
+        # jump episode's post-landing buffer.)
+        jump_command_range = [0.45, 1.0]
         single_jump_command_prob = 1.0         # SINGLE JUMP per episode (reverted from 0.0=continuous). Continuous
                                                # (Jun09_13-24-40) gave a noisy, bistable training signal (succ/flght
                                                # oscillating 0.28-0.56) and lower peak; single-jump (Jun06_13-53-04) is
@@ -369,10 +378,10 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
             "rew_dof_pos_limits",    # joint-limit penalty — watch it shrinks as the over-deep squat stops jamming
             "squat_qualified_rate",  # frac of takeoffs preceded by a HELD squat; compare to jump_flight_rate
             # ---- distance curriculum (watch these to see the dx ramp progress) ----
-            "landing_hit_rate",      # frac of jumps landing within hit_tol of the commanded point — the accuracy gate
-            "landing_dx_max",        # current forward dx upper bound (0 -> 0.40 as the curriculum advances)
-            "landing_dx_succ_ema",   # smoothed successful_jump_rate the advance gate reads
-            "landing_dx_hit_ema",    # smoothed landing_hit_rate the advance gate reads
+            "landing_dx_max",            # current forward dx upper bound (grows as the curriculum advances)
+            "landing_stable_hit_rate",   # frac of jumps that BOTH hit target AND landed stably — the gate metric
+            "landing_dx_stable_ema",     # smoothed landing_stable_hit_rate the advance gate reads
+            "landing_hit_rate",          # (diagnostic) on-target rate ignoring stability; compare to successful_jump_rate above
         ]
 
     class test(GO2OmniJumpCurriculumTorqueCfg.test):

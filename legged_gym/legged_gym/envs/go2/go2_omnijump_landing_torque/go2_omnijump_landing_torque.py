@@ -68,18 +68,24 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
         self.landing_dx_max = float(getattr(self.cfg.commands, "landing_dx_final", 0.40))
         if stage2:
             self.command_ranges["lin_vel_y"] = list(self.cfg.commands.landing_disp_y_stage2)
+            # Reduce time spent IDLING. Each resample (every resampling_time s) draws commands[4] and
+            # STANDS if it is <= jump_command_threshold (0.5). The default range [0,1] -> 50% stand
+            # per resample. Narrow it so the per-resample stand prob ~= 0.1, so the robot jumps almost
+            # every resample (the IMPORTANT standing — returning to a stable stand AFTER landing — is
+            # still trained in every jump episode's post-landing buffer).
+            jc = getattr(self.cfg.commands, "jump_command_range", None)
+            if jc is not None:
+                self.command_ranges["jump_command"] = list(jc)
             if self.landing_dx_curriculum:
                 # DISTANCE CURRICULUM (Atanassov 2025 local-difficulty): start the forward dx
                 # range tiny (default 0 = pure in-place = the proven vertical-jump discovery)
-                # and grow the upper bound ONLY after the policy both LANDS SAFELY and LANDS ON
-                # TARGET at the current distance. Sidesteps the from-scratch discovery cliff: at
-                # dx=0 the landing target IS the spawn, so the (tight-sigma) landing reward is
-                # fully available during discovery; every later increment is a small adaptation
-                # of an already-competent jumper rather than a fresh discovery gamble.
+                # and grow the upper bound ONLY after the policy STABLY LANDS ON TARGET at the
+                # current distance (combined hit-AND-success rate, see _update_dx_curriculum).
+                # Sidesteps the from-scratch discovery cliff: at dx=0 the landing target IS the
+                # spawn, so the (tight-sigma) landing reward is fully available during discovery.
                 self.landing_dx_max = float(getattr(self.cfg.commands, "landing_dx_start", 0.0))
                 self.command_ranges["lin_vel_x"] = [0.0, self.landing_dx_max]
-                self._dx_succ_ema = None
-                self._dx_hit_ema = None
+                self._dx_stable_ema = None
                 self._dx_last_advance_step = 0
             else:
                 self.command_ranges["lin_vel_x"] = list(self.cfg.commands.landing_disp_x_stage2)
@@ -127,53 +133,53 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
         super()._log_jump_episode_stats(env_ids)
         jump_den = torch.clamp(self.jump_starts[env_ids], min=1.0)
         self.extras["episode"]["landing_hit_rate"] = torch.mean(self.jump_target_hits[env_ids] / jump_den)
+        # COMBINED curriculum gate metric: a jump counts ONLY if the SAME jump BOTH landed on target
+        # (jump_target_hits) AND ended in a stable/successful landing (successful_jumps). Single-jump
+        # episodes -> each count is 0/1, so the AND of (>=1) is "this episode's jump did both". This
+        # closes the loophole where "some jumps hit then topple + others land short but stable" cleared
+        # the old separate hit/succ averages without any jump being both.
+        stable_hit = (self.successful_jumps[env_ids] >= 1.0) & (self.jump_target_hits[env_ids] >= 1.0)
+        self.extras["episode"]["landing_stable_hit_rate"] = torch.mean(stable_hit.float() / jump_den)
 
     def _update_dx_curriculum(self):
-        # Grow command_ranges["lin_vel_x"][1] (forward dx) one step at a time, only once BOTH the
-        # safe-landing rate AND the land-on-target rate (EMA) clear their thresholds and the stage
-        # has been held a minimum number of steps. Requiring the HIT rate (not just success, which
-        # is height-only) stops the curriculum from outrunning the policy: distance opens only after
-        # the robot actually lands near the current target. Inert outside training / when disabled.
+        # Grow the forward dx range one step at a time, ONLY once the policy, at the current distance,
+        # STABLY LANDS ON THE TARGET -- measured by a SINGLE combined rate (landing_stable_hit_rate:
+        # the same jump both lands on target AND ends in a successful/stable landing), held a minimum
+        # number of steps. A combined metric (not separate hit/succ averages) is what makes the gate
+        # mean "reach AND stand", so the curriculum cannot outrun the policy / blow through to the cap.
+        # Inert outside training / when disabled.
         if not getattr(self, "landing_dx_curriculum", False):
             return
         if getattr(self.cfg.test, "use_test", False):
             return
         dx_final = float(getattr(self.cfg.commands, "landing_dx_final", 0.40))
         episode = self.extras.get("episode", {})
-        succ = episode.get("successful_jump_rate", None)
-        hit = episode.get("landing_hit_rate", None)
-        if succ is not None and hit is not None:
-            succ = self._to_float(succ)
-            hit = self._to_float(hit)
-            if math.isfinite(succ) and math.isfinite(hit):
+        sh = episode.get("landing_stable_hit_rate", None)
+        if sh is not None:
+            sh = self._to_float(sh)
+            if math.isfinite(sh):
                 a = float(getattr(self.cfg.commands, "landing_dx_ema_alpha", 0.02))
-                self._dx_succ_ema = succ if self._dx_succ_ema is None else (1.0 - a) * self._dx_succ_ema + a * succ
-                self._dx_hit_ema = hit if self._dx_hit_ema is None else (1.0 - a) * self._dx_hit_ema + a * hit
+                self._dx_stable_ema = sh if self._dx_stable_ema is None else (1.0 - a) * self._dx_stable_ema + a * sh
         # Surface the curriculum state to the training log.
-        ema_s = self._dx_succ_ema if self._dx_succ_ema is not None else 0.0
-        ema_h = self._dx_hit_ema if self._dx_hit_ema is not None else 0.0
+        ema = self._dx_stable_ema if self._dx_stable_ema is not None else 0.0
         self.extras["episode"]["landing_dx_max"] = torch.tensor(self.landing_dx_max, dtype=torch.float, device=self.device)
-        self.extras["episode"]["landing_dx_succ_ema"] = torch.tensor(ema_s, dtype=torch.float, device=self.device)
-        self.extras["episode"]["landing_dx_hit_ema"] = torch.tensor(ema_h, dtype=torch.float, device=self.device)
+        self.extras["episode"]["landing_dx_stable_ema"] = torch.tensor(ema, dtype=torch.float, device=self.device)
         # Advance gate.
         if self.landing_dx_max >= dx_final - 1e-6:
             return
-        if self._dx_succ_ema is None or self._dx_hit_ema is None:
+        if self._dx_stable_ema is None:
             return
         min_hold = int(getattr(self.cfg.commands, "landing_dx_min_hold_steps", 1500))
         if (self.common_step_counter - self._dx_last_advance_step) < min_hold:
             return
-        succ_thr = float(getattr(self.cfg.commands, "landing_dx_succ_threshold", 0.80))
-        hit_thr = float(getattr(self.cfg.commands, "landing_dx_hit_threshold", 0.50))
-        if self._dx_succ_ema >= succ_thr and self._dx_hit_ema >= hit_thr:
+        thr = float(getattr(self.cfg.commands, "landing_dx_stable_hit_threshold", 0.70))
+        if self._dx_stable_ema >= thr:
             step = float(getattr(self.cfg.commands, "landing_dx_step", 0.10))
             self.landing_dx_max = min(self.landing_dx_max + step, dx_final)
             self.command_ranges["lin_vel_x"] = [0.0, self.landing_dx_max]
             self._dx_last_advance_step = int(self.common_step_counter)
-            # Reset EMAs: the next advance must RE-EARN success+accuracy at the new, harder
-            # distance (both dip right after a bump).
-            self._dx_succ_ema = None
-            self._dx_hit_ema = None
+            # Reset the EMA: the next advance must RE-EARN "stably on target" at the new, harder distance.
+            self._dx_stable_ema = None
 
     # ------------------------------------------------------------------ #
     # Pose-target override — during the post-touchdown landing buffer the parent leaves the
