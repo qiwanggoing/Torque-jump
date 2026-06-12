@@ -93,6 +93,9 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
         # Per-episode accumulator: jumps that landed within tol of the commanded landing point
         # (mirrors successful_jumps; consumed ONLY by the distance-curriculum advance gate).
         self.jump_target_hits = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
+        # Commanded displacement magnitude of the episode's jump (recorded at touchdown), used to
+        # filter the FAR-BAND advance gate (only jumps near dx_max count).
+        self._last_jump_cmd_dx = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
 
     # ------------------------------------------------------------------ #
     # Reset — set landing target = spawn xy + commanded displacement.
@@ -128,6 +131,8 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
             err = torch.norm(self.landing_root_xy - self.landing_target[:, :2], dim=1)
             hit = self.just_landed & (self.peak_base_height >= min_peak) & (err <= tol)
             self.jump_target_hits += hit.float()
+            # remember this jump's commanded distance (for the far-band advance gate)
+            self._last_jump_cmd_dx[self.just_landed] = torch.norm(self.commands[self.just_landed, 0:2], dim=1)
 
     def _log_jump_episode_stats(self, env_ids):
         super()._log_jump_episode_stats(env_ids)
@@ -139,7 +144,17 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
         # closes the loophole where "some jumps hit then topple + others land short but stable" cleared
         # the old separate hit/succ averages without any jump being both.
         stable_hit = (self.successful_jumps[env_ids] >= 1.0) & (self.jump_target_hits[env_ids] >= 1.0)
-        self.extras["episode"]["landing_stable_hit_rate"] = torch.mean(stable_hit.float() / jump_den)
+        self.extras["episode"]["landing_stable_hit_uniform"] = torch.mean(stable_hit.float() / jump_den)  # diagnostic (all dx)
+        # FAR-BAND gate metric: only jumps whose commanded dx was in the top band [dx_max*(1-frac),
+        # dx_max] count, so the curriculum advances only when the NEWEST/farthest distances are
+        # stably hit -- not when the easy near commands carry a uniform average. (n pushed so the
+        # gate can skip batches with no far-band jumps instead of biasing the EMA to 0.)
+        far_frac = float(getattr(self.cfg.commands, "landing_dx_far_frac", 0.40))
+        jumped = self.jump_starts[env_ids] >= 1.0
+        far = jumped & (self._last_jump_cmd_dx[env_ids] >= self.landing_dx_max * (1.0 - far_frac))
+        far_n = far.float().sum()
+        self.extras["episode"]["landing_farband_n"] = far_n
+        self.extras["episode"]["landing_stable_hit_rate"] = (stable_hit & far).float().sum() / torch.clamp(far_n, min=1.0)
 
     def _update_dx_curriculum(self):
         # Grow the forward dx range one step at a time, ONLY once the policy, at the current distance,
@@ -155,7 +170,10 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
         dx_final = float(getattr(self.cfg.commands, "landing_dx_final", 0.40))
         episode = self.extras.get("episode", {})
         sh = episode.get("landing_stable_hit_rate", None)
-        if sh is not None:
+        fn = episode.get("landing_farband_n", None)
+        # Only fold a batch into the EMA if it actually contained FAR-BAND jumps (else the rate is a
+        # meaningless 0/clamp(0,1)=0 that would drag the gate down).
+        if sh is not None and fn is not None and self._to_float(fn) > 0.0:
             sh = self._to_float(sh)
             if math.isfinite(sh):
                 a = float(getattr(self.cfg.commands, "landing_dx_ema_alpha", 0.02))
@@ -273,6 +291,21 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
             return self.commands[:, 4] > float(self.cfg.commands.jump_command_threshold)
         return torch.ones(self.num_envs, dtype=torch.bool, device=self.device)
 
+    def _landing_kernel(self, err_sq, base_sigma_key, norm_sigma_key):
+        # exp kernel on a squared landing error, with optional DISTANCE-NORMALIZATION (Yang 2023):
+        # divide err by the commanded displacement^2 so the reward is SCALE-INVARIANT -- a 15% miss
+        # at 1.2m is judged like a 15% miss at 0.4m. A FIXED-sigma absolute kernel instead vanishes
+        # at far targets (exp(-large) ~ 0), which is exactly why the policy plateaus at a ~constant
+        # RELATIVE undershoot (lands at ~85% of the command). Floor avoids blow-up for in-place cmd.
+        if bool(getattr(self.cfg.rewards, "landing_err_normalize", False)):
+            floor = float(getattr(self.cfg.rewards, "landing_norm_dist_floor", 0.30))
+            denom = torch.clamp(torch.norm(self.commands[:, 0:2], dim=1), min=floor) ** 2
+            err_sq = err_sq / denom
+            sigma = float(getattr(self.cfg.rewards, norm_sigma_key, 0.025))
+        else:
+            sigma = float(getattr(self.cfg.rewards, base_sigma_key, 0.10))
+        return torch.exp(-err_sq / max(sigma, 1e-4))
+
     def _reward_projected_landing(self):
         # Olsen 2025 densification: while airborne, project the final landing xy
         # from ballistic motion and reward closeness to the commanded landing
@@ -299,19 +332,20 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
         t_land = (vz + torch.sqrt(disc)) / g
         proj_xy = self.root_states[:, :2] + self.root_states[:, 7:9] * t_land.unsqueeze(1)
         err = torch.sum(torch.square(proj_xy - self.landing_target[:, :2]), dim=1)
-        sigma = max(float(getattr(self.cfg.rewards, "sigma_landing_proj", 0.10)), 1e-4)
-        return active * torch.exp(-err / sigma)
+        return active * self._landing_kernel(err, "sigma_landing_proj", "sigma_landing_proj_norm")
 
     def _reward_landing_position(self):
-        # Sparse terminal reward: fires on the touchdown step, exp kernel on the
-        # actual landing xy vs the commanded landing point. Gated by a real-jump
-        # peak so the body must genuinely rise (no farming via a tucked fake jump).
+        # DENSE over the landing/settling phase (Atanassov 2025 'base position landing'), using the
+        # FIXED touchdown xy (self.landing_root_xy, set at just_landed) so it cannot be farmed by
+        # crawling toward the target after a short landing. Rewards "touched down on target" held
+        # through the whole landing buffer -> revives this signal (the old SPARSE 1-step version
+        # earned ~0 and was dead weight despite w30). Distance-normalized like projected_landing.
+        # NOTE: dense -> ~150x the old per-jump magnitude, so its WEIGHT was cut hard in config.
         min_peak = float(getattr(self.cfg.rewards, "landing_real_jump_min_peak", 0.40))
         real_jump = self.peak_base_height >= min_peak
-        active = self.just_landed.float() * self._jump_commanded().float() * real_jump.float() * self._squat_deep_enough().float()
-        err = torch.sum(torch.square(self.root_states[:, :2] - self.landing_target[:, :2]), dim=1)
-        sigma = max(float(getattr(self.cfg.rewards, "sigma_pos_landing", 0.05)), 1e-4)
-        return active * torch.exp(-err / sigma)
+        active = self.landing.float() * real_jump.float()
+        err = torch.sum(torch.square(self.landing_root_xy - self.landing_target[:, :2]), dim=1)
+        return active * self._landing_kernel(err, "sigma_pos_landing", "sigma_pos_landing_norm")
 
     def _reward_default_pos(self):
         # Strengthened pose anchor (weight raised in config) to hold posture after PD

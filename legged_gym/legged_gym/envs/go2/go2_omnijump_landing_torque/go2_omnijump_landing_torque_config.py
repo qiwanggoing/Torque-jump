@@ -89,6 +89,11 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
         # which let "hit-then-topple + short-but-stable" pass without any jump being both -> the
         # curriculum blew through to the cap. (succ/hit thresholds below are now unused.)
         landing_dx_stable_hit_threshold = 0.70 # advance needs landing_stable_hit_rate EMA >= this
+        # FAR-BAND: the stable-hit rate is measured ONLY over jumps whose commanded dx fell in the
+        # top fraction [dx_max*(1-far_frac), dx_max] of the open range -> the gate requires the
+        # NEWEST/farthest distances to be stably hit, not the easy near commands carrying a uniform
+        # average. (uniform averaging let dx_max reach 1.2 while really mastering ~0.9.)
+        landing_dx_far_frac = 0.40
         landing_dx_succ_threshold = 0.80       # [unused — superseded by landing_dx_stable_hit_threshold]
         landing_dx_hit_threshold = 0.55        # [unused — superseded by landing_dx_stable_hit_threshold]
         landing_dx_hit_tol = 0.10              # a jump "hits" if |landing_xy - target| <= this (m).
@@ -126,7 +131,17 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
                                             # 0.06 cuts those to 0.07 / 0.51 -> forces real forward motion to score.
         sigma_landing_proj = 0.05           # Stage-2: TIGHTENED from 0.10 (same reason). In-place at cmd dx=0.40
                                             # drops exp(-1.6)=0.20 -> exp(-3.2)=0.04; gradient at in-place still alive.
-        landing_real_jump_min_peak = 0.40   # peak gate for the SPARSE landing_position reward
+        # DISTANCE-NORMALIZE the landing kernels (Yang 2023): err is divided by the commanded
+        # displacement^2 so the reward is SCALE-INVARIANT. Fixes the ~constant RELATIVE undershoot
+        # (lands at ~85% of cmd) -- a fixed-sigma kernel's gradient vanishes at far targets, so the
+        # policy plateaus short; normalized, a 15% miss at 1.2m is pushed as hard as at 0.4m.
+        landing_err_normalize = True
+        sigma_landing_proj_norm = 0.025     # kernel width on RELATIVE squared err (proj). ~5% miss->0.90, 15%->0.41
+        sigma_pos_landing_norm = 0.04       # kernel width on RELATIVE squared err (terminal landing_position)
+        landing_norm_dist_floor = 0.30      # min distance used in the normalizer (in-place/near cmds judged vs 0.30m)
+        first_jump_delay_steps = 200        # was 55 (0.275s): STAND ~1s after reset before the jump fires, so the
+                                            # policy launches from a settled idle stance (more natural + cleaner jump).
+        landing_real_jump_min_peak = 0.40   # peak gate for the landing_position reward
                                             # (omnijump squat settles ~0.31, real jump peaks ~0.56)
         landing_buffer_steps = 150          # was 25 (=0.125s, inherited). A jump only "finishes" (success
                                             # credited + next jump re-enabled) after the robot stays stable
@@ -276,7 +291,10 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
                                              # (~0.25; it's also ALREADY graded by height_score≈0.45 since peak
                                              # 0.5 < cmd 0.7). Paired with success_use_velocity_score=True so it's
                                              # graded by landing-drift too (less binary -> less oscillation amplify).
-            landing_position = 30.0          # sparse terminal landing-at-target bonus (real-jump gated)
+            landing_position = 5.0           # was 30 (sparse=1 step, earned ~0). Now DENSE over the landing
+                                             # buffer (~150 steps, fixed touchdown xy) -> ~150x magnitude, so the
+                                             # weight is cut to ~5. TUNE: if rew_landing_position dominates
+                                             # projected_landing, lower further; if it stays tiny, raise.
             # ---- Stage2-ready: DISABLE takeoff_direction (was inherited 3.0) ----
             # takeoff_direction = vz/‖v‖ rewards a PURELY VERTICAL takeoff — the only Stage1-specific
             # reward. It is redundant at command 0 (takeoff_vz + projected_landing already give the
@@ -379,9 +397,9 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
             "squat_qualified_rate",  # frac of takeoffs preceded by a HELD squat; compare to jump_flight_rate
             # ---- distance curriculum (watch these to see the dx ramp progress) ----
             "landing_dx_max",            # current forward dx upper bound (grows as the curriculum advances)
-            "landing_stable_hit_rate",   # frac of jumps that BOTH hit target AND landed stably — the gate metric
-            "landing_dx_stable_ema",     # smoothed landing_stable_hit_rate the advance gate reads
-            "landing_hit_rate",          # (diagnostic) on-target rate ignoring stability; compare to successful_jump_rate above
+            "landing_dx_stable_ema",     # smoothed FAR-BAND stable-hit the advance gate reads (>= threshold -> advance)
+            "landing_stable_hit_uniform",# (diagnostic) stable-hit over ALL dx (uniform); > far-band, shows near-vs-far gap
+            "landing_hit_rate",          # (diagnostic) on-target rate ignoring stability
         ]
 
     class test(GO2OmniJumpCurriculumTorqueCfg.test):
