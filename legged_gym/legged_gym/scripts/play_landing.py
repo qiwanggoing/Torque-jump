@@ -25,7 +25,7 @@ from legged_gym.envs import *
 from legged_gym.utils import task_registry, get_args
 
 # === command to visualise (training ranges: dx in [0,0.40], height in [0.40,0.70]) ===
-DX = 0.6       # forward landing displacement (m)
+DX = 1.0       # forward landing displacement (m)
 DY = 0.0        # lateral landing displacement (m)
 HEIGHT = 0.70   # jump-height command
 # ====================================================================================

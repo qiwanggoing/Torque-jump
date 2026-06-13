@@ -88,7 +88,11 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
         # stably (landing_stable_hit_rate). Replaces the old two separate thresholds (succ + hit),
         # which let "hit-then-topple + short-but-stable" pass without any jump being both -> the
         # curriculum blew through to the cap. (succ/hit thresholds below are now unused.)
-        landing_dx_stable_hit_threshold = 0.70 # advance needs landing_stable_hit_rate EMA >= this
+        landing_dx_stable_hit_threshold = 0.70 # advance needs CUMULATIVE far-band stable-hit rate >= this
+        landing_dx_min_far_samples = 150       # ...over >= this many far-band jumps (post-adaptation), so the
+                                               # gate reflects SUSTAINED mastery, not a noisy few-sample spike
+                                               # (the old per-batch EMA spiked to thr on 1-2 jumps -> over-advanced
+                                               # dx_max to 1.6 with only ~0.5 real far-band rate -> late collapse).
         # FAR-BAND: the stable-hit rate is measured ONLY over jumps whose commanded dx fell in the
         # top fraction [dx_max*(1-far_frac), dx_max] of the open range -> the gate requires the
         # NEWEST/farthest distances to be stably hit, not the easy near commands carrying a uniform
@@ -400,7 +404,8 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
             "squat_qualified_rate",  # frac of takeoffs preceded by a HELD squat; compare to jump_flight_rate
             # ---- distance curriculum (watch these to see the dx ramp progress) ----
             "landing_dx_max",            # current forward dx upper bound (grows as the curriculum advances)
-            "landing_dx_stable_ema",     # smoothed FAR-BAND stable-hit the advance gate reads (>= threshold -> advance)
+            "landing_dx_stable_cum",     # CUMULATIVE far-band stable-hit the gate reads (>= thr AND enough samples -> advance)
+            "landing_dx_farsamples",     # far-band jumps accumulated this stage (must reach min_far_samples to advance)
             "landing_stable_hit_uniform",# (diagnostic) stable-hit over ALL dx (uniform); > far-band, shows near-vs-far gap
             "landing_hit_rate",          # (diagnostic) on-target rate ignoring stability
         ]

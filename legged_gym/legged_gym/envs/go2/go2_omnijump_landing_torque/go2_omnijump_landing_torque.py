@@ -85,7 +85,8 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
                 # spawn, so the (tight-sigma) landing reward is fully available during discovery.
                 self.landing_dx_max = float(getattr(self.cfg.commands, "landing_dx_start", 0.0))
                 self.command_ranges["lin_vel_x"] = [0.0, self.landing_dx_max]
-                self._dx_stable_ema = None
+                self._far_stable_sum = 0.0   # cumulative far-band stable-hits since last advance
+                self._far_n_sum = 0.0        # cumulative far-band attempts since last advance
                 self._dx_last_advance_step = 0
             else:
                 self.command_ranges["lin_vel_x"] = list(self.cfg.commands.landing_disp_x_stage2)
@@ -153,51 +154,61 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
         jumped = self.jump_starts[env_ids] >= 1.0
         far = jumped & (self._last_jump_cmd_dx[env_ids] >= self.landing_dx_max * (1.0 - far_frac))
         far_n = far.float().sum()
+        far_hit = (stable_hit & far).float().sum()
         self.extras["episode"]["landing_farband_n"] = far_n
-        self.extras["episode"]["landing_stable_hit_rate"] = (stable_hit & far).float().sum() / torch.clamp(far_n, min=1.0)
+        self.extras["episode"]["landing_farband_hit"] = far_hit
+        self.extras["episode"]["landing_stable_hit_rate"] = far_hit / torch.clamp(far_n, min=1.0)  # per-batch (noisy) — diagnostic only
 
     def _update_dx_curriculum(self):
-        # Grow the forward dx range one step at a time, ONLY once the policy, at the current distance,
-        # STABLY LANDS ON THE TARGET -- measured by a SINGLE combined rate (landing_stable_hit_rate:
-        # the same jump both lands on target AND ends in a successful/stable landing), held a minimum
-        # number of steps. A combined metric (not separate hit/succ averages) is what makes the gate
-        # mean "reach AND stand", so the curriculum cannot outrun the policy / blow through to the cap.
-        # Inert outside training / when disabled.
+        # Advance the forward dx range ONLY once the policy has TRULY mastered the far end of the
+        # current range -- i.e. a CUMULATIVE far-band stable-hit rate (same jump lands on target AND
+        # lands stably), over MANY samples, AFTER an adaptation window. The earlier per-batch EMA was
+        # fooled by tiny far-band batches (rate 0/1) spiking to threshold -> it advanced on NOISE,
+        # not mastery (pushed dx_max to 1.6 with only ~0.5 real far-band rate, then training on the
+        # unreachable far commands collapsed the policy back to in-place). This robust gate:
+        #   (a) skips the first min_hold steps after an advance (policy still adapting -> don't count),
+        #   (b) then ACCUMULATES far-band hits/attempts,
+        #   (c) advances only when >= min_far_samples have accumulated AND the cumulative rate >= thr,
+        #   (d) resets the accumulators on advance.
+        # -> the curriculum self-limits at the distance the policy can SUSTAINABLY hit; it cannot
+        #    over-advance past the achievable ceiling. Inert outside training / when disabled.
         if not getattr(self, "landing_dx_curriculum", False):
             return
         if getattr(self.cfg.test, "use_test", False):
             return
         dx_final = float(getattr(self.cfg.commands, "landing_dx_final", 0.40))
         episode = self.extras.get("episode", {})
-        sh = episode.get("landing_stable_hit_rate", None)
         fn = episode.get("landing_farband_n", None)
-        # Only fold a batch into the EMA if it actually contained FAR-BAND jumps (else the rate is a
-        # meaningless 0/clamp(0,1)=0 that would drag the gate down).
-        if sh is not None and fn is not None and self._to_float(fn) > 0.0:
-            sh = self._to_float(sh)
-            if math.isfinite(sh):
-                a = float(getattr(self.cfg.commands, "landing_dx_ema_alpha", 0.02))
-                self._dx_stable_ema = sh if self._dx_stable_ema is None else (1.0 - a) * self._dx_stable_ema + a * sh
+        fh = episode.get("landing_farband_hit", None)
+        min_hold = int(getattr(self.cfg.commands, "landing_dx_min_hold_steps", 1500))
+        adapting = (self.common_step_counter - self._dx_last_advance_step) < min_hold
+        if (not adapting) and fn is not None and fh is not None:
+            self._far_n_sum += self._to_float(fn)
+            self._far_stable_sum += self._to_float(fh)
+        cum_rate = self._far_stable_sum / max(self._far_n_sum, 1.0)
         # Surface the curriculum state to the training log.
-        ema = self._dx_stable_ema if self._dx_stable_ema is not None else 0.0
         self.extras["episode"]["landing_dx_max"] = torch.tensor(self.landing_dx_max, dtype=torch.float, device=self.device)
-        self.extras["episode"]["landing_dx_stable_ema"] = torch.tensor(ema, dtype=torch.float, device=self.device)
-        # Advance gate.
+        self.extras["episode"]["landing_dx_stable_cum"] = torch.tensor(cum_rate, dtype=torch.float, device=self.device)
+        self.extras["episode"]["landing_dx_farsamples"] = torch.tensor(self._far_n_sum, dtype=torch.float, device=self.device)
+        # Advance gate: enough SUSTAINED far-band samples AND cumulative rate cleared.
         if self.landing_dx_max >= dx_final - 1e-6:
             return
-        if self._dx_stable_ema is None:
-            return
-        min_hold = int(getattr(self.cfg.commands, "landing_dx_min_hold_steps", 1500))
-        if (self.common_step_counter - self._dx_last_advance_step) < min_hold:
-            return
+        min_samples = float(getattr(self.cfg.commands, "landing_dx_min_far_samples", 150))
         thr = float(getattr(self.cfg.commands, "landing_dx_stable_hit_threshold", 0.70))
-        if self._dx_stable_ema >= thr:
-            step = float(getattr(self.cfg.commands, "landing_dx_step", 0.10))
-            self.landing_dx_max = min(self.landing_dx_max + step, dx_final)
-            self.command_ranges["lin_vel_x"] = [0.0, self.landing_dx_max]
-            self._dx_last_advance_step = int(self.common_step_counter)
-            # Reset the EMA: the next advance must RE-EARN "stably on target" at the new, harder distance.
-            self._dx_stable_ema = None
+        if self._far_n_sum >= min_samples:
+            # A full WINDOW of far-band jumps accumulated -> evaluate. Advance if it cleared the bar;
+            # EITHER WAY reset the window so the rate tracks the MOST RECENT window, not the whole
+            # stage history. (Bug it fixes: a pure cumulative-since-advance never resets at the FIRST
+            # stage -- no advance has happened -- so the early pre-/mid-discovery failures permanently
+            # drag the average below thr and the gate stays stuck at dx_max=0 forever even after the
+            # policy masters in-place: observed farsamples~950k, cum 0.26 while per-batch hit 0.93.)
+            if cum_rate >= thr:
+                step = float(getattr(self.cfg.commands, "landing_dx_step", 0.10))
+                self.landing_dx_max = min(self.landing_dx_max + step, dx_final)
+                self.command_ranges["lin_vel_x"] = [0.0, self.landing_dx_max]
+                self._dx_last_advance_step = int(self.common_step_counter)  # re-adapt at the new distance
+            self._far_stable_sum = 0.0
+            self._far_n_sum = 0.0
 
     # ------------------------------------------------------------------ #
     # Pose-target override — during the post-touchdown landing buffer the parent leaves the
