@@ -283,6 +283,10 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
                                             # discovery / PD-fade window; the stutter only emerges ~iter6000+,
                                             # so the gate is active long before it yet never terminates the
                                             # from-scratch jumping discovery, whose failed pushes also re-plant).
+        landing_pitch_extra = 5.0           # EXTRA pitch-leveling multiplier on prelanding+landing (see _reward_pitch_level):
+                                            # the whole-cycle pitch term is diluted by the long level cruise + the fast post-tumble
+                                            # termination, so it barely presses the touchdown. At 5.0 the descent/touchdown pitch is
+                                            # penalized (1+5)x -> land PARALLEL to the ground, all four feet together.
 
         class scales(GO2OmniJumpCurriculumTorqueCfg.rewards.scales):
             # ---- proven jump-driving stack inherited UNCHANGED ----
@@ -305,15 +309,13 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
                                              # in-flight reward and let the landing POINT be driven by the accuracy-
                                              # graded successful_jump (which REQUIRES landing stably). (was 10 before
                                              # the drift-fix bump to 20; back to 10 now that aim is solid.)
-            projected_peak = 25.0            # 20 -> 25 (gentler than the 30 that, bundled with default_pos -0.7, tanked succ).
-                                             # PUSH HEIGHT: reward-share analysis (Jun09_15-14-50) showed height was only ~35%
-                                             # of positives (projected_peak 20% + takeoff_vz 15%) vs projected_landing 39%, and
-                                             # projected_peak had headroom (earned 0.29 vs landing's 0.57 at same w20). peak 0.7
-                                             # is physically reachable (older Jun05_23-55-11 play hit 0.706; the ~0.6 "Hill cap"
-                                             # was wrong). ISOLATED change: only projected_peak moves (default_pos kept tight at
-                                             # -1.0). Watch: peak climbs vs the stable 0.517 baseline AND succ stays ~0.9 (height
-                                             # & landing-success are coupled via buffer150; if succ drops, height is being bought
-                                             # with landing failures -> back off / add pitch_level instead).
+            projected_peak = 15.0            # 25 -> 15: REVERSE the height push. iter9999 reward-share: height
+                                             # (projected_peak+takeoff_vz+all_feet) = 40.6% of positives = the BIGGEST block, vs
+                                             # successful_jump (the only stability-coupled term) just 17% -> the policy jumped HIGH
+                                             # (peak 0.51) and tolerated toppling on the forward landing (succ stuck 0.74, curriculum
+                                             # stuck at dx0.9, far-band stable_cum 0.29). dx0.9 doesn't need peak 0.51; a lower jump
+                                             # lands far easier. (The old note here literally warned: "if succ drops, height is bought
+                                             # with landing failures -> back off / add pitch_level" -- now doing exactly both.)
             successful_jump = 1000.0          # 400 -> 700: raise the completion reward to ~rank3 (just below
                                              # landing/peak). It's sparse so weight is big but earned modest
                                              # (~0.25; it's also ALREADY graded by height_score≈0.45 since peak
@@ -394,7 +396,9 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
                                              # attitude for jump magnitude). Vertical (Stage1) jump wants body level throughout.
                                              # the main landing-stability lever after joint_angle_landing removed. (pitch also via pitch_level.)
             # ---- (1)+(2) landing stability from the papers: stop "lands then flips" ----
-            base_ang_vel_xy = -0.15          # (1) PENALTY on base roll/pitch angular velocity in flight+landing
+            base_ang_vel_xy = -0.4           # -0.15 -> -0.4: damp pitch/roll ROTATION harder (earned ~-0.02 at -0.15 = negligible,
+                                             #     no pressure vs the nose-down rotation that lands front-feet-first; pairs w/ landing pitch_level)
+                                             # (1) PENALTY on base roll/pitch angular velocity in flight+landing
                                              # (Olsen ϕσ(‖ω‖) / Atanassov "track zero ω after landing"). We had NO
                                              # ω damping -> body tumbled into touchdown. Penalty (not bell kernel) so
                                              # it bites; penalizes spin RATE not airborne time -> clean high jump unhurt.

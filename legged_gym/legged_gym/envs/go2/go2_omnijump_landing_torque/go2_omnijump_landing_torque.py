@@ -477,4 +477,12 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
         # of it so pitch ends up weighted more than roll. yaw/roll unaffected.
         active = self.jumping_state.float()
         pitch_tilt = torch.square(self.projected_gravity[:, 0])
-        return active * pitch_tilt
+        # LANDING-FOCUSED leveling: the whole-cycle term above is diluted by the long level cruise, and a
+        # nose-down touchdown (front-feet-first -> tumble) ends the episode fast -> that brief-but-FATAL
+        # moment barely registers in the time-average, so there's almost no pressure exactly where it matters.
+        # Pile an EXTRA pitch penalty on prelanding+landing so the body arrives & lands PARALLEL to the ground
+        # (all four feet together). prelanding (the descent) accrues steps BEFORE a tumble can end the episode,
+        # so this pressure actually lands. Symmetric (pushes toward LEVEL), not directional.
+        land = (self.prelanding | self.landing).float()
+        extra = float(getattr(self.cfg.rewards, "landing_pitch_extra", 5.0))
+        return active * pitch_tilt + extra * land * pitch_tilt
