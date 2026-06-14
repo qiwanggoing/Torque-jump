@@ -81,6 +81,13 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
         # dip and must be re-earned at the new distance. Trains forward jumping in ONE from-scratch
         # run without the discovery cliff that a one-shot dx[0,0.40] open hits.
         landing_dx_curriculum = True
+        # BIASED command sampling (Atanassov local-difficulty): concentrate most jump commands at the FAR
+        # frontier (the goal = farthest landing point) instead of uniform over [0, dx_max]. The policy then
+        # practices mostly where it counts; a spread fraction is kept for the easy->hard gradient + retention.
+        # Only DISTANCE is biased (height untouched -- goal is a STABLE landing at the farthest point).
+        landing_dx_biased = True
+        landing_dx_frontier_frac = 0.7         # fraction of commands drawn from the frontier band [lo*dx_max, dx_max]
+        landing_dx_frontier_lo = 0.8           # frontier band = top (1-lo)=20%; the remaining frac stays uniform [0,dx_max]
         landing_dx_start = 0.0                 # initial dx upper bound (0 = in-place)
         landing_dx_final = 2.0                # final dx upper bound (the Stage-2 target)
         landing_dx_step = 0.10                 # increment per advance: 0 -> 0.1 -> 0.2 -> 0.3 -> 0.4

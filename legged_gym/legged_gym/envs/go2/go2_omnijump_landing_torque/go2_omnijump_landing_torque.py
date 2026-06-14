@@ -113,6 +113,28 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
         self.landing_target[env_ids, 1] = self.env_origins[env_ids, 1] + init_y + self.commands[env_ids, 1]
         self._update_dx_curriculum()
 
+    def _resample_commands(self, env_ids):
+        # BIASED command sampling (Atanassov local-difficulty): after the parent draws dx uniformly from
+        # [0, dx_max], RE-DRAW a fraction (landing_dx_frontier_frac) of envs into the FAR frontier
+        # [landing_dx_frontier_lo * dx_max, dx_max] so the policy practices mostly at the GOAL distance
+        # (the farthest landing point), not spread thin over easy near commands. The remaining fraction
+        # keeps the uniform draw -> retains the easy->hard gradient + near-distance skill. Runs INSIDE
+        # super().reset_idx (BEFORE landing_target is computed from commands[0:2]), so the target matches.
+        # Only DISTANCE is biased (height untouched -- the goal is a stable landing at the farthest point,
+        # not the highest jump). In-place phase (dx_max == 0) is a no-op, so discovery is untouched.
+        super()._resample_commands(env_ids)
+        if len(env_ids) == 0 or not getattr(self.cfg.commands, "landing_dx_biased", False):
+            return
+        dx_max = float(self.command_ranges["lin_vel_x"][1])
+        if dx_max <= 1e-6:
+            return
+        frac = float(getattr(self.cfg.commands, "landing_dx_frontier_frac", 0.7))
+        lo = float(getattr(self.cfg.commands, "landing_dx_frontier_lo", 0.8)) * dx_max
+        pick = torch.rand(len(env_ids), device=self.device) < frac
+        front_ids = env_ids[pick]
+        if len(front_ids) > 0:
+            self.commands[front_ids, 0] = lo + (dx_max - lo) * torch.rand(len(front_ids), device=self.device)
+
     # ------------------------------------------------------------------ #
     # Distance curriculum: jump-stat plumbing + advance logic.
     # ------------------------------------------------------------------ #
