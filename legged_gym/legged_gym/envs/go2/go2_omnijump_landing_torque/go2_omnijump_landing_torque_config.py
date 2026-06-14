@@ -85,9 +85,15 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
         # frontier (the goal = farthest landing point) instead of uniform over [0, dx_max]. The policy then
         # practices mostly where it counts; a spread fraction is kept for the easy->hard gradient + retention.
         # Only DISTANCE is biased (height untouched -- goal is a STABLE landing at the farthest point).
-        landing_dx_biased = True
-        landing_dx_frontier_frac = 0.7         # fraction of commands drawn from the frontier band [lo*dx_max, dx_max]
-        landing_dx_frontier_lo = 0.8           # frontier band = top (1-lo)=20%; the remaining frac stays uniform [0,dx_max]
+        landing_dx_biased = False              # DISABLED: 70/30 biased BACKFIRED (run iter4803) -- hit crashed 0.64->0.12,
+                                               # dx_max regressed 1.1->0.9, stable_cum ~0. Concentrating on far STARVED the
+                                               # near/mid commands that bootstrap distance-conditioning, and at far an UNDERSHOOT
+                                               # makes the distance-normalized accuracy reward VANISH (exp(-big)~0) -> no gradient
+                                               # -> the policy never learned to modulate distance (fixed high jump, lands off-target).
+                                               # Uniform provides the easy->hard learning ladder -- keep it. The far-accuracy ceiling
+                                               # (~1.1, hit 0.64) is a REWARD-gradient problem, not a sampling one.
+        landing_dx_frontier_frac = 0.7         # (inert while landing_dx_biased=False)
+        landing_dx_frontier_lo = 0.8           # (inert while landing_dx_biased=False)
         landing_dx_start = 0.0                 # initial dx upper bound (0 = in-place)
         landing_dx_final = 2.0                # final dx upper bound (the Stage-2 target)
         landing_dx_step = 0.10                 # increment per advance: 0 -> 0.1 -> 0.2 -> 0.3 -> 0.4
@@ -309,28 +315,29 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
                                              # so the error term = wz^2 = damp spin during flight -> fixes the heading
                                              # drift. Kept WELL below the main jump rewards (peak25/vz15/landing20); it's
                                              # a stabilizer. Stage2: open commands[2] -> same term becomes turn-tracking.
-            projected_landing = 10.0         # 20 -> 10: HALVED. projected_landing is paid IN FLIGHT (ballistic aim)
-                                             # regardless of whether the touchdown HOLDS, so at w20 (~0.52, the single
-                                             # biggest positive) the policy over-optimized AIM and toppled (accurate
-                                             # hit 0.84 but succ 0.59). Aim is now LEARNED (over-served), so cut the
-                                             # in-flight reward and let the landing POINT be driven by the accuracy-
-                                             # graded successful_jump (which REQUIRES landing stably). (was 10 before
-                                             # the drift-fix bump to 20; back to 10 now that aim is solid.)
-            projected_peak = 25.0            # REVERTED 15 -> 25: cutting to 15 BROKE discovery (flight 0 at iter526). projected_peak is a
-                                             # key jump-UP discovery driver; weakening it + the base_ang_vel_xy -0.4 flight penalty below made
-                                             # "don't jump" safer -> no takeoff. The height-over-dominance (40.6% of positives -> high jump ->
-                                             # hard forward landing -> topple) is a LATE problem: if it resurfaces AFTER discovery, trim height
-                                             # GATED to post-discovery, NOT from step 1. For now the nose-down is handled by the (discovery-safe)
-                                             # landing-focused pitch_level alone.
+            projected_landing = 15.0         # 10 -> 15: BOOST. USER PRINCIPLE: jump-DISTANCE/accuracy rewards must OUTRANK jump-HEIGHT
+                                             # rewards. After projected_peak 25->20, height earned ~0.60 (pp 0.38 + takeoff_vz 0.22) still
+                                             # exceeded distance ~0.43 (landing_position + this), so raise the distance side above height.
+                                             # The earlier 20->10 HALVING was to curb a "precise-but-topple" farm -- but stability is now SOLVED
+                                             # (succ 0.90 via landing-focused pitch), so the topple risk is gone and boosting AIM is safe; it now
+                                             # drives the forward launch toward the target. Discovery-safe (gated on a real jump peak>=0.40).
+            projected_peak = 20.0            # 25 -> 20: modest OVERALL height trim. Run trend showed the policy FARMS height (projected_peak
+                                             # rose 0.30->0.50 while landing accuracy collapsed to ~0 once far accuracy got hard) -- height is
+                                             # the biggest reward AND paid regardless of landing, so the policy dumps accuracy for it. A mild 20%
+                                             # cut eases that without gating. NOTE: an earlier 25->15 broke discovery, but that was BUNDLED with
+                                             # base_ang_vel_xy -0.4 (the real flight-penalty killer), now reverted to -0.15 -> a mild 20 should keep
+                                             # discovery. If 20 is too mild (still farms height / 1.1 plateau holds) go lower or add a non-vanishing
+                                             # far-accuracy pull. WATCH iter~500 flight recovers; if flight 0, 20 is still too low -> revert to 25.
             successful_jump = 1000.0          # 400 -> 700: raise the completion reward to ~rank3 (just below
                                              # landing/peak). It's sparse so weight is big but earned modest
                                              # (~0.25; it's also ALREADY graded by height_score≈0.45 since peak
                                              # 0.5 < cmd 0.7). Paired with success_use_velocity_score=True so it's
                                              # graded by landing-drift too (less binary -> less oscillation amplify).
-            landing_position = 5.0           # was 30 (sparse=1 step, earned ~0). Now DENSE over the landing
-                                             # buffer (~150 steps, fixed touchdown xy) -> ~150x magnitude, so the
-                                             # weight is cut to ~5. TUNE: if rew_landing_position dominates
-                                             # projected_landing, lower further; if it stays tiny, raise.
+            landing_position = 8.0           # 5 -> 8: BOOST (with projected_landing 15) so jump-DISTANCE/accuracy OUTRANKS height
+                                             # (user principle). DENSE over the landing buffer (~150 steps, fixed touchdown xy). Target:
+                                             # distance earned (landing_position + projected_landing ~0.67) > height (~0.60). Discovery-safe
+                                             # (gated on a real jump peak>=0.40 -> can't be farmed by standing). VERIFY the earned balance in
+                                             # the retrain (height < distance); if height still wins, boost these more / trim height further.
             # ---- Stage2-ready: DISABLE takeoff_direction (was inherited 3.0) ----
             # takeoff_direction = vz/‖v‖ rewards a PURELY VERTICAL takeoff — the only Stage1-specific
             # reward. It is redundant at command 0 (takeoff_vz + projected_landing already give the
