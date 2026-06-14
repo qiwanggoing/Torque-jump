@@ -163,6 +163,12 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
         landing_lin_pull = True
         landing_lin_coef = 0.5              # weight of the linear pull RELATIVE to the exp term (0..1 each)
         landing_lin_ref = 1.5              # m: linear runs from 1 (on target) down to 0 at this miss distance
+        # Takeoff-omega suppression (see _reward_base_ang_vel_xy): once succ_rate EMA >= gate, LATCH a stronger
+        # ω penalty that also covers the PUSH -> kill the nose-down spin at the SOURCE (takeoff) so the body
+        # flies level and lands flat. succ-rate gate (not a fixed step) = adapts to discovery speed, never
+        # blocks the messy from-scratch pushes (an ungated strong ω penalty broke discovery, iter526 flight0).
+        takeoff_omega_succ_gate = 0.80     # latch the stronger ω penalty once succ_rate EMA clears this
+        takeoff_omega_gain = 4.0           # post-gate multiplier on base_ang_vel_xy (-0.15 -> ~-0.6 effective)
         # first_jump_delay_steps stays at the inherited 55 (0.275s). A 1s pre-jump idle (200) was
         # tried and BROKE from-scratch discovery (iter774 flight=0 vs the proven run's 0.914 by
         # iter500): 1s of standing rewards makes "don't jump" too comfortable -> the policy never

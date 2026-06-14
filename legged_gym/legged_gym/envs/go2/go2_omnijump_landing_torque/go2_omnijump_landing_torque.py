@@ -97,6 +97,12 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
         # Commanded displacement magnitude of the episode's jump (recorded at touchdown), used to
         # filter the FAR-BAND advance gate (only jumps near dx_max count).
         self._last_jump_cmd_dx = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
+        # Takeoff-omega gate: once the policy can jump (succ_rate EMA >= threshold), LATCH on a stronger
+        # base_ang_vel_xy that ALSO covers the push -> suppress the nose-down spin AT TAKEOFF (it can't be
+        # undone in flight). Gated on succ_rate (not a fixed step) so it adapts to discovery speed and never
+        # penalizes the messy exploratory pushes before the robot can jump (that broke discovery before).
+        self._succ_rate_ema = 0.0
+        self._takeoff_omega_on = False
 
     # ------------------------------------------------------------------ #
     # Reset — set landing target = spawn xy + commanded displacement.
@@ -159,6 +165,13 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
 
     def _log_jump_episode_stats(self, env_ids):
         super()._log_jump_episode_stats(env_ids)
+        # Smooth the successful-jump rate and LATCH the takeoff-omega gate once it clears the threshold
+        # (one-way: stays on, never flickers off on a noisy dip). Discovery-safe: succ ~0 until the robot
+        # can jump, so the gate only opens post-discovery regardless of how long discovery took.
+        if "successful_jump_rate" in self.extras.get("episode", {}):
+            self._succ_rate_ema = 0.99 * self._succ_rate_ema + 0.01 * float(self.extras["episode"]["successful_jump_rate"])
+            if self._succ_rate_ema >= float(getattr(self.cfg.rewards, "takeoff_omega_succ_gate", 0.80)):
+                self._takeoff_omega_on = True
         jump_den = torch.clamp(self.jump_starts[env_ids], min=1.0)
         self.extras["episode"]["landing_hit_rate"] = torch.mean(self.jump_target_hits[env_ids] / jump_den)
         # COMBINED curriculum gate metric: a jump counts ONLY if the SAME jump BOTH landed on target
@@ -483,8 +496,15 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
         # sitting at ~0). It penalizes rotation RATE, not airborne time, so a CLEAN high jump (w~=0)
         # pays nothing -> it does not bias toward shorter/lower jumps. yaw (w_z) is excluded because it
         # may be commanded in Stage 2.
-        active = (self.airborne | self.prelanding | self.landing).float()
         ang_vel_sq = torch.sum(torch.square(self.base_ang_vel[:, :2]), dim=1)
+        if getattr(self, "_takeoff_omega_on", False):
+            # POST-DISCOVERY (succ_rate gate latched): ALSO penalize ω during the PUSH/extension (where the
+            # nose-down spin is IMPARTED -- it can't be undone in flight) and apply a STRONGER weight, so the
+            # policy launches WITHOUT the spin -> level flight -> flat landing (Atanassov: control ω, drive it
+            # to 0 at landing). Excluded before the gate so it never blocks the messy from-scratch pushes.
+            active = (self.phase_extended | self.airborne | self.prelanding | self.landing).float()
+            return float(getattr(self.cfg.rewards, "takeoff_omega_gain", 4.0)) * active * ang_vel_sq
+        active = (self.airborne | self.prelanding | self.landing).float()
         return active * ang_vel_sq
 
     def _reward_landing_impact(self):
