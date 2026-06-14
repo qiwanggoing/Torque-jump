@@ -309,13 +309,12 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
                                              # in-flight reward and let the landing POINT be driven by the accuracy-
                                              # graded successful_jump (which REQUIRES landing stably). (was 10 before
                                              # the drift-fix bump to 20; back to 10 now that aim is solid.)
-            projected_peak = 15.0            # 25 -> 15: REVERSE the height push. iter9999 reward-share: height
-                                             # (projected_peak+takeoff_vz+all_feet) = 40.6% of positives = the BIGGEST block, vs
-                                             # successful_jump (the only stability-coupled term) just 17% -> the policy jumped HIGH
-                                             # (peak 0.51) and tolerated toppling on the forward landing (succ stuck 0.74, curriculum
-                                             # stuck at dx0.9, far-band stable_cum 0.29). dx0.9 doesn't need peak 0.51; a lower jump
-                                             # lands far easier. (The old note here literally warned: "if succ drops, height is bought
-                                             # with landing failures -> back off / add pitch_level" -- now doing exactly both.)
+            projected_peak = 25.0            # REVERTED 15 -> 25: cutting to 15 BROKE discovery (flight 0 at iter526). projected_peak is a
+                                             # key jump-UP discovery driver; weakening it + the base_ang_vel_xy -0.4 flight penalty below made
+                                             # "don't jump" safer -> no takeoff. The height-over-dominance (40.6% of positives -> high jump ->
+                                             # hard forward landing -> topple) is a LATE problem: if it resurfaces AFTER discovery, trim height
+                                             # GATED to post-discovery, NOT from step 1. For now the nose-down is handled by the (discovery-safe)
+                                             # landing-focused pitch_level alone.
             successful_jump = 1000.0          # 400 -> 700: raise the completion reward to ~rank3 (just below
                                              # landing/peak). It's sparse so weight is big but earned modest
                                              # (~0.25; it's also ALREADY graded by height_score≈0.45 since peak
@@ -396,8 +395,9 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
                                              # attitude for jump magnitude). Vertical (Stage1) jump wants body level throughout.
                                              # the main landing-stability lever after joint_angle_landing removed. (pitch also via pitch_level.)
             # ---- (1)+(2) landing stability from the papers: stop "lands then flips" ----
-            base_ang_vel_xy = -0.4           # -0.15 -> -0.4: damp pitch/roll ROTATION harder (earned ~-0.02 at -0.15 = negligible,
-                                             #     no pressure vs the nose-down rotation that lands front-feet-first; pairs w/ landing pitch_level)
+            base_ang_vel_xy = -0.15          # REVERTED -0.4 -> -0.15: -0.4 penalized the MESSY exploratory flight so hard that "don't jump"
+                                             #     won -> discovery died (flight 0 at iter526). -0.15 is the discovery-proven value. The nose-down
+                                             #     ROTATION is a LATE concern -> if needed, re-add stronger damping GATED to post-discovery, not step 1.
                                              # (1) PENALTY on base roll/pitch angular velocity in flight+landing
                                              # (Olsen ϕσ(‖ω‖) / Atanassov "track zero ω after landing"). We had NO
                                              # ω damping -> body tumbled into touchdown. Penalty (not bell kernel) so
