@@ -227,16 +227,21 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
         squat_gate_height = 0.24            # must dip base to <=0.24m (idle ~0.31) to unlock jump rewards
         successful_jump_min_peak_height = 0.40  # was 0.30: a ~0.34 "low pop" no longer counts as success
                                                 # (= command floor 0.40; kills the low-jump shortcut)
-        # Grade successful_jump by the landing-drift score (was forced to 1 = pure binary). Stage1 cmd=0
-        # -> zero_cmd_score = exp(-gain*||flight horiz vel||^2): ~1.0 for an in-place jump, lower if it
-        # drifts (floor 0.20). = anti-drift + less-binary success reward. Stage2: becomes velocity tracking.
-        success_use_velocity_score = False  # STAGE 2: OFF. velocity_score compares avg_vel (m/s) to commands[0:2],
-                                            # but those are now landing DISPLACEMENT (m) -> unit mismatch that penalizes
-                                            # correct forward jumps (0.40m jump ~0.8 m/s vs "0.40" target). successful_jump
-                                            # now = land-safely (binary x height_score); the landing POINT is driven by
-                                            # projected_landing (dense, dominant ~0.63) + landing_position (sparse). Clean
-                                            # separation: successful_jump=land safely, projected_landing=land on target.
-                                            # (Stage 1 used True as an anti-drift in-place signal; N/A once we go forward.)
+        # Grade successful_jump by a LANDING-ACCURACY score (the landing env OVERRIDES the parent's
+        # velocity hook -- see _get_successful_jump_velocity_score there). Without this, successful_jump
+        # is pure binary x height and is DECOUPLED from the landing point -> the policy farms the dense
+        # in-flight projected_landing for AIM, then topples on touchdown (observed hit 0.84 but succ 0.59).
+        success_use_velocity_score = True   # STAGE 2: ON, via the landing-accuracy OVERRIDE (NOT the parent's
+                                            # velocity-tracking score, which is unit-wrong here: commands[0:2] are
+                                            # landing DISPLACEMENT (m), not m/s). The override returns a distance-
+                                            # normalized exp on touchdown xy vs target, so:
+                                            #   successful_jump = stay-upright(binary) x height_score x landing-accuracy
+                                            # -> the big completion bonus pays ONLY for landing ON the commanded point
+                                            # AND staying standing. COUPLES precision with stability (precise-but-topple
+                                            # -> 0 via the binary; stable-but-off-target -> low via the accuracy term).
+        success_landing_min_score = 0.2     # floor on the landing-accuracy score: a stable but off-target jump still
+                                            # earns 0.2*height (keeps stability rewarded while not yet on target); an
+                                            # on-target stable jump earns the full height_score.
         # DECOUPLE success from the squat_qualified HOLD gate (which flickers under pure-torque noise ->
         # made succ oscillate 0.01-0.89 while flight/peak were stable). peak>=0.40 already guarantees a
         # real countermovement, so the gate is redundant FOR SUCCESS. It still gates the jump-REWARD chain.
@@ -265,6 +270,19 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
         # (2) landing_impact regularization knobs (see _reward_landing_impact):
         landing_impact_force_floor = 150.0  # N total vertical foot force below which no impact penalty (~standing weight)
         landing_impact_force_norm = 1500.0  # N normalizer; impact penalty saturates at (floor + norm)
+        # (clean single jump) TERMINATE the episode on a load-phase foot RE-PLANT (stutter-step / run-up):
+        # the jump must be ONE clean push (all feet leave together; no shuffling/stepping before takeoff).
+        # WHY: as the dx curriculum pushed to 1.5-1.6 the policy invented a run-up (squat_qualified eroded
+        # 0.90->0.73, play showed it stutter-stepping to build momentum) which also rotted the near commands
+        # (cmd 1.0 undershot to 0.72 at model_9700 vs 0.98 at the clean model_5000). Forbidding the re-plant
+        # makes the only way to reach far a clean push -> the dx curriculum SELF-LIMITS at the clean-jump
+        # range (no artificial dx_final cap). Pure termination: a stutter loses the whole jump reward, and a
+        # clean-but-short jump still earns more, so terminating is never an escape hatch.
+        clean_takeoff_terminate = True
+        clean_takeoff_min_step = 60000      # ...but ONLY after this many env-steps (well past the ~iter500
+                                            # discovery / PD-fade window; the stutter only emerges ~iter6000+,
+                                            # so the gate is active long before it yet never terminates the
+                                            # from-scratch jumping discovery, whose failed pushes also re-plant).
 
         class scales(GO2OmniJumpCurriculumTorqueCfg.rewards.scales):
             # ---- proven jump-driving stack inherited UNCHANGED ----
@@ -280,10 +298,13 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
                                              # so the error term = wz^2 = damp spin during flight -> fixes the heading
                                              # drift. Kept WELL below the main jump rewards (peak25/vz15/landing20); it's
                                              # a stabilizer. Stage2: open commands[2] -> same term becomes turn-tracking.
-            projected_landing = 20.0         # was 10: STRENGTHEN the dense landing-point gradient to break the drift.
-                                             # Calc: per-unit-weight yield ~0.021 (from projected_peak w15->earned 0.31);
-                                             # on-target potential at w20 ~0.42 > projected_peak 0.31, so landing accuracy
-                                             # now outweighs the marginal height gained by drifting. (was 8-15x too weak.)
+            projected_landing = 10.0         # 20 -> 10: HALVED. projected_landing is paid IN FLIGHT (ballistic aim)
+                                             # regardless of whether the touchdown HOLDS, so at w20 (~0.52, the single
+                                             # biggest positive) the policy over-optimized AIM and toppled (accurate
+                                             # hit 0.84 but succ 0.59). Aim is now LEARNED (over-served), so cut the
+                                             # in-flight reward and let the landing POINT be driven by the accuracy-
+                                             # graded successful_jump (which REQUIRES landing stably). (was 10 before
+                                             # the drift-fix bump to 20; back to 10 now that aim is solid.)
             projected_peak = 25.0            # 20 -> 25 (gentler than the 30 that, bundled with default_pos -0.7, tanked succ).
                                              # PUSH HEIGHT: reward-share analysis (Jun09_15-14-50) showed height was only ~35%
                                              # of positives (projected_peak 20% + takeoff_vz 15%) vs projected_landing 39%, and
@@ -293,7 +314,7 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
                                              # -1.0). Watch: peak climbs vs the stable 0.517 baseline AND succ stays ~0.9 (height
                                              # & landing-success are coupled via buffer150; if succ drops, height is being bought
                                              # with landing failures -> back off / add pitch_level instead).
-            successful_jump = 700.0          # 400 -> 700: raise the completion reward to ~rank3 (just below
+            successful_jump = 1000.0          # 400 -> 700: raise the completion reward to ~rank3 (just below
                                              # landing/peak). It's sparse so weight is big but earned modest
                                              # (~0.25; it's also ALREADY graded by height_score≈0.45 since peak
                                              # 0.5 < cmd 0.7). Paired with success_use_velocity_score=True so it's
@@ -359,13 +380,21 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
                                              # deterministic play idled/landed in a deep crouch (base_z~0.149). That
                                              # sustained high noise is what tipped the iter~2475 collapse. (zeroed
                                              # during push-off so it doesn't fight the jump.)
+            default_hip_pos = 1.0            # 0.3 -> 1.0: the policy slid the front feet INWARD (hip adduction) to shuffle
+                                             # forward momentum (the stutter/run-up morphed into a SLIDE once the re-plant
+                                             # termination forbade stepping). default_hip_pos keeps the 4 hip-abduction joints
+                                             # near default; at 0.3 it earned only ~0.05 (hips drifting ~0.46 rad) -- too weak to
+                                             # hold them. Raised so deviating forfeits a meaningful reward -> legs stay vertical
+                                             # in the frontal plane (no inward collapse). Safe: a clean forward jump is sagittal
+                                             # (thigh/calf) and never needs hip abduction. Tune up (1.5-2.0) if the slide persists;
+                                             # if it persists even then it's pure ground-slip (not hip) -> add a foot_slip penalty.
             orientation = -3.5               # -3.0 -> -3.5 (DISCOVERY-SAFE: -4.5 + the strong default_pos made not-jumping
                                              # too comfortable from scratch, Jun09_11-29-05). Mild strengthen of the level-body
                                              # hold (late training showed g_xy^2 creeping 0.017->0.038 as the policy traded
                                              # attitude for jump magnitude). Vertical (Stage1) jump wants body level throughout.
                                              # the main landing-stability lever after joint_angle_landing removed. (pitch also via pitch_level.)
             # ---- (1)+(2) landing stability from the papers: stop "lands then flips" ----
-            base_ang_vel_xy = -0.05          # (1) PENALTY on base roll/pitch angular velocity in flight+landing
+            base_ang_vel_xy = -0.15          # (1) PENALTY on base roll/pitch angular velocity in flight+landing
                                              # (Olsen ϕσ(‖ω‖) / Atanassov "track zero ω after landing"). We had NO
                                              # ω damping -> body tumbled into touchdown. Penalty (not bell kernel) so
                                              # it bites; penalizes spin RATE not airborne time -> clean high jump unhurt.
@@ -390,7 +419,12 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
                                              # more negative; jump gets stiff/weak or peak drops -> back off.
 
     class logging(GO2OmniJumpCurriculumTorqueCfg.logging):
-        print_episode_keys = GO2OmniJumpCurriculumTorqueCfg.logging.print_episode_keys + [
+        # Decluttered TERMINAL print: drop the redundant metrics (jump_landing_rate / jump_completed_cycles
+        # ≈ jump_flight_rate). EVERYTHING still goes to tensorboard/wandb -- this only filters the terminal.
+        print_episode_keys = [
+            k for k in GO2OmniJumpCurriculumTorqueCfg.logging.print_episode_keys
+            if k not in ("jump_landing_rate", "jump_completed_cycles")
+        ] + [
             "rew_projected_landing",
             "rew_landing_position",
             "rew_foot_contact_sync",
@@ -405,9 +439,8 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
             # ---- distance curriculum (watch these to see the dx ramp progress) ----
             "landing_dx_max",            # current forward dx upper bound (grows as the curriculum advances)
             "landing_dx_stable_cum",     # CUMULATIVE far-band stable-hit the gate reads (>= thr AND enough samples -> advance)
-            "landing_dx_farsamples",     # far-band jumps accumulated this stage (must reach min_far_samples to advance)
-            "landing_stable_hit_uniform",# (diagnostic) stable-hit over ALL dx (uniform); > far-band, shows near-vs-far gap
-            "landing_hit_rate",          # (diagnostic) on-target rate ignoring stability
+            "landing_stable_hit_uniform",# 又准又稳 over all dx (uniform)
+            "landing_hit_rate",          # accuracy (ignores stability)
         ]
 
     class test(GO2OmniJumpCurriculumTorqueCfg.test):

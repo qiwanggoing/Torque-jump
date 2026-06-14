@@ -358,6 +358,24 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
         err = torch.sum(torch.square(self.landing_root_xy - self.landing_target[:, :2]), dim=1)
         return active * self._landing_kernel(err, "sigma_pos_landing", "sigma_pos_landing_norm")
 
+    def _get_successful_jump_velocity_score(self):
+        # LANDING-TASK OVERRIDE of the parent's success grading hook. The parent compares the average
+        # FLIGHT VELOCITY (m/s) to commands[0:2] -- but here commands[0:2] are landing DISPLACEMENT (m),
+        # so that score is unit-wrong (the bug that forced success_use_velocity_score=False). Instead
+        # return a LANDING-ACCURACY score on the recorded touchdown xy, reusing the SAME distance-
+        # normalized kernel as landing_position. The base then forms
+        #     successful_jump = stay-upright(binary) x height_score x THIS
+        # so the big completion bonus is paid ONLY for a jump that lands ON the commanded point AND
+        # stays standing -- COUPLING precision with stability. A precise-but-topple jump scores 0 (the
+        # binary), a stable-but-off-target jump scores low (this term, down to the floor). Kills the
+        # farm where the policy banked the dense in-flight projected_landing for good AIM, then toppled
+        # on touchdown (observed: hit 0.84 but succ 0.59). landing_root_xy is set at just_landed, one
+        # line before the base reads this score, so it is the fresh touchdown position.
+        err = torch.sum(torch.square(self.landing_root_xy - self.landing_target[:, :2]), dim=1)
+        score = self._landing_kernel(err, "sigma_pos_landing", "sigma_pos_landing_norm")
+        floor = float(getattr(self.cfg.rewards, "success_landing_min_score", 0.2))
+        return floor + (1.0 - floor) * score
+
     def _reward_default_pos(self):
         # Strengthened pose anchor (weight raised in config) to hold posture after PD
         # has faded — the rear legs were drifting from the pose at pd_alpha=0 because

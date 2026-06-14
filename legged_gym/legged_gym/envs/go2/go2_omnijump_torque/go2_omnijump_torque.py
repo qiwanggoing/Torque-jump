@@ -92,6 +92,8 @@ class GO2OmniJumpTorque(GO2Torque):
         self.peak_base_height = self.root_states[:, 2].clone()
         self.jump_min_base_z = self.root_states[:, 2].clone()   # lowest base z before takeoff (squat-depth gate)
         self.jump_min_pose_err = torch.full((self.num_envs,), 1e3, device=self.device)  # min |dof-q_squat| before takeoff (squat-POSE gate); 1e3 = not-yet-reached
+        self.jump_min_contact = torch.full((self.num_envs,), 4, dtype=torch.long, device=self.device)  # min #feet in contact during the load (4 = no foot lifted yet); clean-takeoff re-plant detector
+        self.jump_replant = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)           # a foot RE-CONTACTED during the load after lifting (stutter-step / run-up) -> clean-takeoff violation
         self.squat_hold_counter = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)  # consecutive steps held within squat_pose_threshold this jump (resets on pop-out)
         self.squat_qualified = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)      # latched once squat HELD >= squat_hold_steps: the real squat-POSE gate (no flick-through)
         self.landing_min_height = self.root_states[:, 2].clone()
@@ -187,6 +189,8 @@ class GO2OmniJumpTorque(GO2Torque):
         self.peak_base_height[env_ids] = self.root_states[env_ids, 2]
         self.jump_min_base_z[env_ids] = self.root_states[env_ids, 2]
         self.jump_min_pose_err[env_ids] = 1e3  # squat-POSE gate: reset to not-yet-reached sentinel
+        self.jump_min_contact[env_ids] = 4     # clean-takeoff re-plant detector: reset to "no foot lifted yet"
+        self.jump_replant[env_ids] = False
         self.squat_hold_counter[env_ids] = 0
         self.squat_qualified[env_ids] = False
         self.landing_min_height[env_ids] = self.root_states[env_ids, 2]
@@ -390,6 +394,8 @@ class GO2OmniJumpTorque(GO2Torque):
         self.peak_base_height[env_ids] = self.root_states[env_ids, 2]
         self.jump_min_base_z[env_ids] = self.root_states[env_ids, 2]
         self.jump_min_pose_err[env_ids] = 1e3  # squat-POSE gate: reset to not-yet-reached sentinel
+        self.jump_min_contact[env_ids] = 4     # clean-takeoff re-plant detector: reset to "no foot lifted yet"
+        self.jump_replant[env_ids] = False
         self.squat_hold_counter[env_ids] = 0
         self.squat_qualified[env_ids] = False
         self.landing_min_height[env_ids] = self.root_states[env_ids, 2]
@@ -418,6 +424,8 @@ class GO2OmniJumpTorque(GO2Torque):
         self.peak_base_height[env_ids] = self.root_states[env_ids, 2]
         self.jump_min_base_z[env_ids] = self.root_states[env_ids, 2]
         self.jump_min_pose_err[env_ids] = 1e3  # squat-POSE gate: reset to not-yet-reached sentinel
+        self.jump_min_contact[env_ids] = 4     # clean-takeoff re-plant detector: reset to "no foot lifted yet"
+        self.jump_replant[env_ids] = False
         self.squat_hold_counter[env_ids] = 0
         self.squat_qualified[env_ids] = False
         self.landing_min_height[env_ids] = self.root_states[env_ids, 2]
@@ -485,6 +493,15 @@ class GO2OmniJumpTorque(GO2Torque):
         )
         # Track lowest base height during the pre-takeoff load (the dip), for the squat-depth gate.
         loading = self.jumping_state & (~self.has_taken_off)
+        # CLEAN-TAKEOFF re-plant detector (one clean jump): during the load (jumping, pre-takeoff), once a
+        # foot has LIFTED (contact count dropped below 4), any foot RE-CONTACTING (count goes back UP) is a
+        # stutter-step / run-up -- the policy shuffling its feet to build forward momentum before the real
+        # all-feet-off takeoff. We FORBID it (check_termination ends the episode) so the jump is ONE clean
+        # push. Gated post-discovery in check_termination so early failed-push attempts, which also look
+        # like re-plants, do not block the from-scratch discovery of jumping.
+        _n_contact = contact_filt.sum(dim=1)
+        self.jump_replant |= loading & (self.jump_min_contact < 4) & (_n_contact > self.jump_min_contact)
+        self.jump_min_contact = torch.where(loading, torch.minimum(self.jump_min_contact, _n_contact), self.jump_min_contact)
         self.jump_min_base_z = torch.where(
             loading,
             torch.minimum(self.jump_min_base_z, self.root_states[:, 2]),
@@ -837,6 +854,14 @@ class GO2OmniJumpTorque(GO2Torque):
         self.reset_buf |= self.time_out_buf
         self.reset_buf |= collision_cutoff
         self.reset_buf |= roll_cutoff
+        # CLEAN-TAKEOFF: end the episode on a load-phase foot RE-PLANT (stutter-step / run-up). The policy
+        # can then only reach far via ONE clean push -> the dx curriculum SELF-LIMITS at the clean-jump
+        # range instead of cheating distance with a shuffle (no artificial dx_final cap needed). Gated to
+        # fire only AFTER discovery (clean_takeoff_min_step): early failed pushes also re-plant, and the
+        # stutter only emerges much later, so the gate never blocks discovery. Off by default (other tasks).
+        if getattr(self.cfg.rewards, "clean_takeoff_terminate", False):
+            if self.common_step_counter >= int(getattr(self.cfg.rewards, "clean_takeoff_min_step", 60000)):
+                self.reset_buf |= self.jump_replant
         if getattr(self.cfg.rewards, "one_jump_episode", False):
             self.reset_buf |= self.last_jump_success | self.jump_episode_failed
         elif getattr(self.cfg.rewards, "one_jump_reward_per_episode", False) and self.cfg.commands.num_commands > 4:
