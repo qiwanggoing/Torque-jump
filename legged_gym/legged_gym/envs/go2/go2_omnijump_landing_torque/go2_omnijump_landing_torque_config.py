@@ -156,6 +156,13 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
         sigma_landing_proj_norm = 0.025     # kernel width on RELATIVE squared err (proj). ~5% miss->0.90, 15%->0.41
         sigma_pos_landing_norm = 0.04       # kernel width on RELATIVE squared err (terminal landing_position)
         landing_norm_dist_floor = 0.30      # min distance used in the normalizer (in-place/near cmds judged vs 0.30m)
+        # NON-VANISHING far PULL on projected_landing (see _reward_projected_landing): the exp kernel ->0 for
+        # a big undershoot at a far target -> no gradient -> curriculum plateaus (~1.3). A linear term gives
+        # partial credit + a constant slope toward the target at any distance, so the policy keeps learning to
+        # reach far. exp = precision near; linear = "reach to it" far. Discovery-safe (gated on a real jump).
+        landing_lin_pull = True
+        landing_lin_coef = 0.5              # weight of the linear pull RELATIVE to the exp term (0..1 each)
+        landing_lin_ref = 1.5              # m: linear runs from 1 (on target) down to 0 at this miss distance
         # first_jump_delay_steps stays at the inherited 55 (0.275s). A 1s pre-jump idle (200) was
         # tried and BROKE from-scratch discovery (iter774 flight=0 vs the proven run's 0.914 by
         # iter500): 1s of standing rewards makes "don't jump" too comfortable -> the policy never

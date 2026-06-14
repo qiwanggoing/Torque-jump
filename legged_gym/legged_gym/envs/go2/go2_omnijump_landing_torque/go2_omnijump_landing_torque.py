@@ -365,7 +365,18 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
         t_land = (vz + torch.sqrt(disc)) / g
         proj_xy = self.root_states[:, :2] + self.root_states[:, 7:9] * t_land.unsqueeze(1)
         err = torch.sum(torch.square(proj_xy - self.landing_target[:, :2]), dim=1)
-        return active * self._landing_kernel(err, "sigma_landing_proj", "sigma_landing_proj_norm")
+        reward = self._landing_kernel(err, "sigma_landing_proj", "sigma_landing_proj_norm")  # exp: precision near
+        # NON-VANISHING far PULL: the exp kernel ~0 for a big undershoot at a FAR target -> no gradient -> the
+        # policy never learns to launch far enough and the curriculum plateaus where the gradient dies (~1.3).
+        # Add a LINEAR term on the actual projected miss: clamp(1 - dist/d_ref) gives PARTIAL CREDIT + a CONSTANT
+        # gradient pulling the ballistic projection toward the target at ANY distance (e.g. undershoot 1.3m by
+        # 0.3m -> 0.8, still a slope to reduce it). exp keeps doing precision near; linear does "reach to it" far.
+        if bool(getattr(self.cfg.rewards, "landing_lin_pull", False)):
+            dist = torch.sqrt(err + 1e-8)
+            d_ref = float(getattr(self.cfg.rewards, "landing_lin_ref", 1.5))
+            lin = torch.clamp(1.0 - dist / max(d_ref, 1e-3), min=0.0)
+            reward = reward + float(getattr(self.cfg.rewards, "landing_lin_coef", 0.5)) * lin
+        return active * reward
 
     def _reward_landing_position(self):
         # DENSE over the landing/settling phase (Atanassov 2025 'base position landing'), using the
