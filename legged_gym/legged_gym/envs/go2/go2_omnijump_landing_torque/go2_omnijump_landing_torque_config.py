@@ -161,7 +161,12 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
         # partial credit + a constant slope toward the target at any distance, so the policy keeps learning to
         # reach far. exp = precision near; linear = "reach to it" far. Discovery-safe (gated on a real jump).
         landing_lin_pull = True
-        landing_lin_coef = 0.5              # weight of the linear pull RELATIVE to the exp term (0..1 each)
+        landing_lin_coef = 1.0              # 0.5 -> 1.0: STRENGTHEN the far pull. The far-band stalled at dx 1.0
+                                            # (far accuracy ~0.47 < 0.70 gate); the policy undershoots far cmds to
+                                            # ~0.85 because the reach-to-target pull was too soft vs the cost of a
+                                            # bigger launch. Doubling coef doubles the far-undershoot slope
+                                            # (coef/d_ref 0.33->0.67 /m) AND the far reward (cmd 1.0 land 0.6:
+                                            # projected_landing 0.37->0.73). exp precision peak near target unchanged.
         landing_lin_ref = 1.5              # m: linear runs from 1 (on target) down to 0 at this miss distance
         # Takeoff-omega suppression (see _reward_base_ang_vel_xy): once succ_rate EMA >= gate, LATCH a stronger
         # ω penalty that also covers the PUSH -> kill the nose-down spin at the SOURCE (takeoff) so the body
@@ -169,6 +174,13 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
         # blocks the messy from-scratch pushes (an ungated strong ω penalty broke discovery, iter526 flight0).
         takeoff_omega_succ_gate = 0.80     # latch the stronger ω penalty once succ_rate EMA clears this
         takeoff_omega_gain = 4.0           # post-gate multiplier on base_ang_vel_xy (-0.15 -> ~-0.6 effective)
+        # HARD pitch termination (see check_termination): end the episode if the base pitches NOSE-DOWN beyond
+        # this (projected_gravity[:,0], ~sin(tilt)) AT TOUCHDOWN (the landing phase). Forces a level touchdown
+        # (no front-feet-first), since soft penalties got traded off. Same succ-rate gate as takeoff_omega
+        # (only after the robot can jump). 0 = off. MEASURED (play, model_10000): touchdown ~0.47 (28deg) nose-
+        # down, consistently. 0.40 (~24deg) is a modest step below that -> forces ~4deg flatter (low collapse
+        # risk); tighten over runs (0.40->0.35->...) to progressively flatten; loosen if dx/succ collapse.
+        landing_tilt_terminate = 0.0       # OFF for now -- trying the SOFT (reward) route first (see below); flip to ~0.40 if soft fails
         # first_jump_delay_steps stays at the inherited 55 (0.275s). A 1s pre-jump idle (200) was
         # tried and BROKE from-scratch discovery (iter774 flight=0 vs the proven run's 0.914 by
         # iter500): 1s of standing rewards makes "don't jump" too comfortable -> the policy never
@@ -309,10 +321,22 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
                                             # discovery / PD-fade window; the stutter only emerges ~iter6000+,
                                             # so the gate is active long before it yet never terminates the
                                             # from-scratch jumping discovery, whose failed pushes also re-plant).
+        # CLEAN-LANDING (user request): no small hop / shuffle-step after touchdown -> ONE clean settle. Once
+        # all 4 feet HOLD contact for clean_landing_plant_hold steps (skips the impact chatter), any foot
+        # lifting is penalized per-step by _reward_clean_landing (weight `clean_landing` in scales). PENALTY,
+        # not termination (keeps the successful_jump bonus). Gated post-discovery (succ-latch _takeoff_omega_on).
+        clean_landing_plant_hold = 15       # consecutive all-4-contact steps (~0.075s) to latch "settled" before watching for re-lift
         landing_pitch_extra = 5.0           # EXTRA pitch-leveling multiplier on prelanding+landing (see _reward_pitch_level):
                                             # the whole-cycle pitch term is diluted by the long level cruise + the fast post-tumble
                                             # termination, so it barely presses the touchdown. At 5.0 the descent/touchdown pitch is
                                             # penalized (1+5)x -> land PARALLEL to the ground, all four feet together.
+        jump_pitch_extra = 12.0            # EXTRA pitch penalty across ALL JUMP PHASES (load->push->flight->landing; gated on
+                                            # the succ-latch). ROOT of the front-first landing: the body is already nose-down IN
+                                            # THE AIR (launches tilted; takeoff_omega froze the rotation so it stays tilted). A
+                                            # small per-step penalty did NOT change it (the lean buys reach), so penalize the tilt
+                                            # HARD ((1+12)x EVERY jump step, +landing_pitch_extra on top at landing) -> the body
+                                            # must be LEVEL the whole jump -> forces a level push/launch. Tune: still tilted ->
+                                            # raise (15/20); if level flight shortens the jump (dx drops) the lean bought reach -> ease.
 
         class scales(GO2OmniJumpCurriculumTorqueCfg.rewards.scales):
             # ---- proven jump-driving stack inherited UNCHANGED ----
@@ -359,6 +383,12 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
             # Removing it now makes the whole stack direction-general: switching to Stage2 = just open
             # the command ranges, zero reward surgery. Behaviour stays in-place while commands[0:2]=0.
             takeoff_direction = 0.0
+            # ---- MERGED takeoff launch: velocity-VECTOR match (height + distance in one), replaces vertical-only ----
+            takeoff_vertical_velocity = 0.0  # OFF: superseded by takeoff_velocity_match (which == it at dx=0)
+            takeoff_velocity_match = 15.0    # reward takeoff velocity matching the ballistic launch to (landing
+                                             # point + apex height). CAUSE-side "jump FAR and HIGH" driver — the
+                                             # closeness rewards can't push reach (diminishing returns at undershoot).
+                                             # = old takeoff_vz weight (15). At dx=0 it reduces to takeoff_vz (safe).
             # ---- structurally-inert rewards removed ----
             joint_angle_loaded = 0.0         # was 0.4: phase_loaded (jumping & ~taken_off & vz<=0) almost never
                                              # fires — the policy pre-squats during idle and pops straight up on
@@ -375,6 +405,12 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
             landing_stability = 0.0          # was 1.0: exp(-landing_velocity/0.25) but touchdown velocities are
                                              # >> 0.25, so it floors at ~0 and never fires (contributed 0.0002).
                                              # If landing damping is wanted later, re-add with a much looser sigma.
+            # ---- clean landing: no hop / shuffle-step after touchdown (user request, STRONG penalty) ----
+            clean_landing = -8.0             # per-step penalty while a foot is OFF the ground AFTER the feet
+                                             # latched "planted" (4 feet held clean_landing_plant_hold steps,
+                                             # impact chatter skipped). Soft mirror of clean-takeoff one-push,
+                                             # as a PENALTY (keeps the successful_jump bonus). Gated on the
+                                             # succ-latch (discovery-safe). Tune via rew_clean_landing earned + play hops.
             # ---- four-foot contact-timing sync (penalty on staggered takeoff/landing) ----
             foot_contact_sync = -4.0         # was -3.0: STRENGTHEN four-foot takeoff/landing sync (less body tilt
                                              # at touchdown). config note: if peak drops too much, back off.
@@ -456,6 +492,7 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
             k for k in GO2OmniJumpCurriculumTorqueCfg.logging.print_episode_keys
             if k not in ("jump_landing_rate", "jump_completed_cycles")
         ] + [
+            "rew_takeoff_velocity_match",  # merged launch driver (jump far+high) — watch vs dx_max advancing
             "rew_projected_landing",
             "rew_landing_position",
             "rew_foot_contact_sync",
@@ -463,6 +500,7 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
             # inherited-active but missing from the parent's print list — surface them
             "rew_base_ang_vel_xy",   # (1) flight+landing roll/pitch ω damping — the anti-tumble lever
             "rew_landing_impact",    # (2) touchdown force-spike penalty — cushion vs slam
+            "rew_clean_landing",     # post-touchdown hop/shuffle penalty — watch it ->0 (no small hops after landing)
             "rew_pitch_level",       # pitch-specific tilt penalty — fix persistent nose-down
             "rew_tracking_angular_velocity",  # OmniNet yaw-rate damping (hold heading) — watch it stays < jump rewards
             "rew_dof_pos_limits",    # joint-limit penalty — watch it shrinks as the over-deep squat stops jamming

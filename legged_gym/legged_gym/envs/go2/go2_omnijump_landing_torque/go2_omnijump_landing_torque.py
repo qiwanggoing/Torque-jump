@@ -32,6 +32,8 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
         "landing_impact",    # landing stability: touchdown force-spike penalty
         "pitch_level",       # landing stability: pitch-specific tilt penalty
         "dof_pos_limits",    # penalize folding joints to the limit (over-deep squat hits the "wall")
+        "clean_landing",     # no hop / shuffle-step after touchdown (post-plant foot-relift penalty)
+        "takeoff_velocity_match",  # merged launch: takeoff velocity-vector match to (landing point + apex) — jump far+high
     }
 
     # Curriculum gate table requires an entry for every active reward. Curriculum
@@ -47,6 +49,8 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
         "landing_impact": 0,
         "pitch_level": 0,
         "dof_pos_limits": 0,
+        "clean_landing": 0,     # active from step 1 (its own succ-latch gate is INSIDE the reward fn)
+        "takeoff_velocity_match": 0,   # active from step 1 (replaces takeoff_vertical_velocity)
     }
 
     # ------------------------------------------------------------------ #
@@ -391,6 +395,36 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
             reward = reward + float(getattr(self.cfg.rewards, "landing_lin_coef", 0.5)) * lin
         return active * reward
 
+    def _reward_takeoff_velocity_match(self):
+        # MERGED launch reward (REPLACES takeoff_vertical_velocity): reward the takeoff velocity VECTOR matching
+        # the ballistic launch needed to land on the commanded point AT the commanded apex height -> drives jump
+        # HEIGHT (vz) and DISTANCE (forward v) together, as ONE reward. Fills the gap the closeness rewards
+        # cannot: landing-accuracy already pays most of its value at an undershoot (diminishing returns), so
+        # nothing CAUSE-side pushed the launch FAR enough. Vector-MATCH (not a direction dot-product) so a too-
+        # vertical over-launch can't fake the forward requirement; LINEAR (not exp) so there's a gradient from
+        # zero velocity (discovery). At dx=0 the required vector is purely vertical -> reduces to
+        # takeoff_vertical_velocity (discovery-safe) and subsumes horizontal_drift (sideways = mismatch).
+        base_height = self.root_states[:, 2]
+        min_height = float(getattr(self.cfg.rewards, "ascending_min_base_height", 0.18))
+        vz = self.root_states[:, 9]
+        ascending = self.jumping_state & (vz > 0) & (~self.has_landed) & (base_height > min_height)
+        ascending = ascending & self._squat_deep_enough()           # same squat-depth gate as takeoff_vz
+        # required LAUNCH velocity (world frame): vz from the height cmd (== takeoff_vz target); horizontal =
+        # commanded displacement / ballistic flight time (symmetric arc, land ~ launch height -> T = 2 vz/g).
+        h_stand = float(getattr(self.cfg.rewards, "stance_standing_height", 0.30))
+        vz_req = torch.sqrt((2.0 * 9.81 * (self.commands[:, 3] - h_stand)).clamp(min=0.01)).clamp(min=0.5)
+        horiz_disp = self.landing_target[:, :2] - self.takeoff_root_xy   # world-frame intended displacement
+        d = torch.norm(horiz_disp, dim=1)
+        flight_t = (2.0 * vz_req / 9.81).clamp(min=1e-3)
+        dir_xy = horiz_disp / d.clamp(min=1e-6).unsqueeze(1)
+        v_req = torch.cat([(d / flight_t).unsqueeze(1) * dir_xy, vz_req.unsqueeze(1)], dim=1)   # (N,3)
+        v_act = torch.cat([self.root_states[:, 7:9], vz.unsqueeze(1)], dim=1)                   # (N,3) world vel
+        match = torch.clamp(
+            1.0 - torch.norm(v_act - v_req, dim=1) / torch.norm(v_req, dim=1).clamp(min=1e-3),
+            min=0.0, max=1.0,
+        )
+        return ascending.float() * match
+
     def _reward_landing_position(self):
         # DENSE over the landing/settling phase (Atanassov 2025 'base position landing'), using the
         # FIXED touchdown xy (self.landing_root_xy, set at just_landed) so it cannot be farmed by
@@ -538,4 +572,13 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
         # so this pressure actually lands. Symmetric (pushes toward LEVEL), not directional.
         land = (self.prelanding | self.landing).float()
         extra = float(getattr(self.cfg.rewards, "landing_pitch_extra", 5.0))
-        return active * pitch_tilt + extra * land * pitch_tilt
+        r = active * pitch_tilt + extra * land * pitch_tilt
+        # ROOT FIX -- the body is already nose-down IN THE AIR (it LAUNCHES tilted; takeoff_omega froze the
+        # rotation, so the tilt stays). A per-step penalty that didn't change the behaviour is simply too SMALL
+        # vs the forward reach the nose-down buys -> penalize the pitch HARD across ALL JUMP PHASES (load ->
+        # push -> flight -> landing). The tilt is IMPARTED at the push and can't be fixed mid-flight, so making
+        # every jump step costly forces a LEVEL push/launch -> level flight -> level landing. Gated on the
+        # succ-latch (_takeoff_omega_on) -> off for the messy from-scratch jumps.
+        if getattr(self, "_takeoff_omega_on", False):
+            r = r + float(getattr(self.cfg.rewards, "jump_pitch_extra", 12.0)) * active * pitch_tilt
+        return r

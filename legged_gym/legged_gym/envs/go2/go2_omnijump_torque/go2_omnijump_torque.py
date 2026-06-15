@@ -94,6 +94,9 @@ class GO2OmniJumpTorque(GO2Torque):
         self.jump_min_pose_err = torch.full((self.num_envs,), 1e3, device=self.device)  # min |dof-q_squat| before takeoff (squat-POSE gate); 1e3 = not-yet-reached
         self.jump_min_contact = torch.full((self.num_envs,), 4, dtype=torch.long, device=self.device)  # min #feet in contact during the load (4 = no foot lifted yet); clean-takeoff re-plant detector
         self.jump_replant = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)           # a foot RE-CONTACTED during the load after lifting (stutter-step / run-up) -> clean-takeoff violation
+        self.landing_plant_hold = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)     # consecutive all-4-feet-contact steps in the landing buffer (clean-landing settle detector)
+        self.landing_planted = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)        # latched once the feet HELD (clean_landing_plant_hold steps) -> "settled, now watch for re-lift"
+        self.landing_relift = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)         # a foot LIFTED after the clean plant (hop / shuffle-step) -> clean-landing violation
         self.squat_hold_counter = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)  # consecutive steps held within squat_pose_threshold this jump (resets on pop-out)
         self.squat_qualified = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)      # latched once squat HELD >= squat_hold_steps: the real squat-POSE gate (no flick-through)
         self.landing_min_height = self.root_states[:, 2].clone()
@@ -191,6 +194,9 @@ class GO2OmniJumpTorque(GO2Torque):
         self.jump_min_pose_err[env_ids] = 1e3  # squat-POSE gate: reset to not-yet-reached sentinel
         self.jump_min_contact[env_ids] = 4     # clean-takeoff re-plant detector: reset to "no foot lifted yet"
         self.jump_replant[env_ids] = False
+        self.landing_plant_hold[env_ids] = 0     # clean-landing detector: reset
+        self.landing_planted[env_ids] = False
+        self.landing_relift[env_ids] = False
         self.squat_hold_counter[env_ids] = 0
         self.squat_qualified[env_ids] = False
         self.landing_min_height[env_ids] = self.root_states[env_ids, 2]
@@ -396,6 +402,9 @@ class GO2OmniJumpTorque(GO2Torque):
         self.jump_min_pose_err[env_ids] = 1e3  # squat-POSE gate: reset to not-yet-reached sentinel
         self.jump_min_contact[env_ids] = 4     # clean-takeoff re-plant detector: reset to "no foot lifted yet"
         self.jump_replant[env_ids] = False
+        self.landing_plant_hold[env_ids] = 0     # clean-landing detector: reset
+        self.landing_planted[env_ids] = False
+        self.landing_relift[env_ids] = False
         self.squat_hold_counter[env_ids] = 0
         self.squat_qualified[env_ids] = False
         self.landing_min_height[env_ids] = self.root_states[env_ids, 2]
@@ -426,6 +435,9 @@ class GO2OmniJumpTorque(GO2Torque):
         self.jump_min_pose_err[env_ids] = 1e3  # squat-POSE gate: reset to not-yet-reached sentinel
         self.jump_min_contact[env_ids] = 4     # clean-takeoff re-plant detector: reset to "no foot lifted yet"
         self.jump_replant[env_ids] = False
+        self.landing_plant_hold[env_ids] = 0     # clean-landing detector: reset
+        self.landing_planted[env_ids] = False
+        self.landing_relift[env_ids] = False
         self.squat_hold_counter[env_ids] = 0
         self.squat_qualified[env_ids] = False
         self.landing_min_height[env_ids] = self.root_states[env_ids, 2]
@@ -540,6 +552,22 @@ class GO2OmniJumpTorque(GO2Torque):
         self.just_landed = self.jumping_state & self.has_taken_off & (~self.has_landed) & any_foot_contact
         self.has_landed |= self.just_landed
         self.landing = self.jumping_state & self.has_landed
+        # CLEAN-LANDING settle detector (mirror of the clean-takeoff re-plant, opposite direction): once all
+        # four feet have HELD contact for clean_landing_plant_hold steps in the landing buffer, LATCH
+        # landing_planted ("settled"); thereafter any foot LIFTING (hop / shuffle-step) trips landing_relift.
+        # The hold-then-latch (like the squat-HOLD gate) skips the touchdown impact chatter -> only a
+        # DELIBERATE re-lift after a real plant counts. Penalized via _reward_clean_landing (NOT terminated);
+        # that reward is gated on the succ-latch so messy from-scratch landings are never punished.
+        _n_contact_land = contact_filt.sum(dim=1)
+        _planted_now = self.landing & (_n_contact_land >= 4)
+        self.landing_plant_hold = torch.where(
+            _planted_now,
+            self.landing_plant_hold + 1,
+            torch.where(self.landing, torch.zeros_like(self.landing_plant_hold), self.landing_plant_hold),
+        )
+        _plant_hold_steps = int(getattr(self.cfg.rewards, "clean_landing_plant_hold", 15))
+        self.landing_planted = self.landing_planted | (self.landing_plant_hold >= _plant_hold_steps)
+        self.landing_relift = self.landing_relift | (self.landing_planted & (_n_contact_land < 4))
 
         # Two-phase pose guidance — fold during squat-down, extend through pushoff/flight/landing.
         # Pose-latched boundary (was vz<=0): stay in the FOLD phase until this jump has actually
@@ -862,6 +890,15 @@ class GO2OmniJumpTorque(GO2Torque):
         if getattr(self.cfg.rewards, "clean_takeoff_terminate", False):
             if self.common_step_counter >= int(getattr(self.cfg.rewards, "clean_takeoff_min_step", 60000)):
                 self.reset_buf |= self.jump_replant
+        # PITCH/TILT TERMINATION (hard, user request): the soft pitch penalties got traded off and the body
+        # still descends/lands NOSE-DOWN (front-feet-first, topple risk). End the episode if the base pitches
+        # nose-down beyond a hard limit during the descent/landing -> "stay level into touchdown" becomes
+        # NON-NEGOTIABLE (lose the whole jump reward if you don't). projected_gravity[:,0] > 0 is nose-down;
+        # nose-UP (lean-back, protective) is left free. Gated on the SAME succ-rate latch as the takeoff-omega
+        # damping (_takeoff_omega_on) -> never kills the messy from-scratch jumps. Off by default (thr<=0).
+        tilt_thr = float(getattr(self.cfg.rewards, "landing_tilt_terminate", 0.0))
+        if tilt_thr > 0.0 and getattr(self, "_takeoff_omega_on", False):
+            self.reset_buf |= self.landing & (self.projected_gravity[:, 0] > tilt_thr)
         if getattr(self.cfg.rewards, "one_jump_episode", False):
             self.reset_buf |= self.last_jump_success | self.jump_episode_failed
         elif getattr(self.cfg.rewards, "one_jump_reward_per_episode", False) and self.cfg.commands.num_commands > 4:
@@ -1039,6 +1076,20 @@ class GO2OmniJumpTorque(GO2Torque):
         grace_elapsed = self.jump_step_counter > self.cfg.rewards.grounded_grace_steps
         stuck_on_ground = self.jumping_state & (~self.has_taken_off) & grace_elapsed & all_feet_contact
         return stuck_on_ground.float() * (0.5 + self._get_height_progress())
+
+    def _reward_clean_landing(self):
+        # CLEAN-LANDING penalty (user request, strong): after landing_planted latches (all 4 feet HELD for
+        # clean_landing_plant_hold steps -> the touchdown impact chatter is skipped), penalize per-step ANY
+        # foot off the ground (hop / shuffle-step) so the landing is ONE clean settle -- the soft mirror of
+        # the clean-takeoff one-push rule (here a PENALTY, not a termination, so the successful_jump bonus is
+        # kept and a late foot-shift is not catastrophic). Penalty magnitude ~ how long/much it hops.
+        # Gated on the succ-rate latch (_takeoff_omega_on) -> never penalizes the messy from-scratch landings
+        # (discovery-safe), the SAME gate as the takeoff-omega damping / jump_pitch_extra.
+        if not getattr(self, "_takeoff_omega_on", False):
+            return torch.zeros(self.num_envs, device=self.device)
+        contact = self._get_contact_state()
+        lifted = (contact.sum(dim=1) < 4).float()
+        return self.landing_planted.float() * lifted
 
     def _reward_maintain_contact(self):
         # Atanassov-style: reward all-feet contact whenever not airborne.
