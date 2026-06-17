@@ -123,7 +123,22 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
         # [0.45,1.0] -> ~9% stand, so the robot idles far less and jumps almost every resample. (The
         # IMPORTANT standing — recovering to a stable stand after landing — is still trained in every
         # jump episode's post-landing buffer.)
-        jump_command_range = [0.45, 1.0]
+        jump_command_range = [0.45, 1.0]   # now ONLY sets the stand/jump SPLIT prob (~9% draws <=0.5 -> stand)
+        # BINARY jump command: 1.0 = jump, 0.0 = stand. The old scheme put STAND at the sampled [0.45,0.5]
+        # band -- right under the 0.5 threshold -- and at a near-threshold stand command (e.g. 0.49) the
+        # policy HESITATES and twitches a foot off (the stand-episode in-place hop). Pinning stand->0 and
+        # jump->1 makes cmd4 an unambiguous binary far from the threshold, and drops the meaningless (0.5,1.0]
+        # jitter from the cmd4 obs feature (its magnitude is never used as effort -- only cmd4>threshold).
+        # Verified: at cmd4=0.45 the trained policy stands 800 steps dead still; 0.49 twitches. Needs RETRAIN
+        # (the current model never saw a clean 0/1 -> OOD in play).
+        stand_command_value = 0.0
+        jump_command_value = 1.0
+        # The moment the robot touches down, flip the jump command to STAND for the whole 0.75s landing
+        # buffer (instead of holding cmd4=1 until the jump "finishes"). Without this the policy sees cmd4=1 +
+        # the residual landing error during the buffer and HOPS to chase the undershot target. Verified in
+        # play (force cmd4=0 at touchdown) that this kills the post-landing chase-hop. Landing-accuracy
+        # rewards key off self.landing / touchdown-locked landing_root_xy, not cmd4, so scoring is unaffected.
+        disable_jump_on_landing = True
         single_jump_command_prob = 1.0         # SINGLE JUMP per episode (reverted from 0.0=continuous). Continuous
                                                # (Jun09_13-24-40) gave a noisy, bistable training signal (succ/flght
                                                # oscillating 0.28-0.56) and lower peak; single-jump (Jun06_13-53-04) is
@@ -212,6 +227,12 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
         # phase. Otherwise the strong (1.5) yaw reward pays the policy to sit in the squat holding still
         # and never jump -> discovery collapse (Jun10_12-47-57).
         ang_vel_damp_airborne_only = True
+        # FIX: tracking_linear_velocity_all_time inherits True from omnijump_torque, but in
+        # _reward_tracking_angular_velocity that branch is checked FIRST and OVERRIDES ang_vel_damp_airborne_only
+        # above -> the 1.5-weight yaw damp wrongly stayed active during squat + landing (not just the air).
+        # Force False here so the airborne-only gate actually takes effect (yaw damp in the air only, as
+        # intended). The linear-velocity reward that also reads this flag is weight 0, so this is a no-op there.
+        tracking_linear_velocity_all_time = False
         projected_landing_min_height = 0.40 # instantaneous height gate for the DENSE projected_landing:
                                             # blocks the legs-tucked sprawl farm (body ~0.13, feet off ground)
                                             # while keeping dense in-place landing control during real apex.
@@ -402,15 +423,25 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
                                              # projected_peak is the real forcing function (no dip -> no main rewards).
                                              # Farm-safe: stops at the gate, and squatting-without-jumping earns no
                                              # successful_jump anyway. (history: 0.5/2.0 weight-only + time-window all failed.)
-            landing_stability = 0.0          # was 1.0: exp(-landing_velocity/0.25) but touchdown velocities are
-                                             # >> 0.25, so it floors at ~0 and never fires (contributed 0.0002).
-                                             # If landing damping is wanted later, re-add with a much looser sigma.
-            # ---- clean landing: no hop / shuffle-step after touchdown (user request, STRONG penalty) ----
-            clean_landing = -8.0             # per-step penalty while a foot is OFF the ground AFTER the feet
-                                             # latched "planted" (4 feet held clean_landing_plant_hold steps,
-                                             # impact chatter skipped). Soft mirror of clean-takeoff one-push,
-                                             # as a PENALTY (keeps the successful_jump bonus). Gated on the
-                                             # succ-latch (discovery-safe). Tune via rew_clean_landing earned + play hops.
+            # ---- air-time + stay-planted boosts (user) ----
+            all_feet_airborne = 3.0          # 2.0 -> 3.0: more air-time pressure. Gated (squat_deep + height_progress)
+                                             # so it can't be farmed by a tucked sprawl. The policy currently UNDERSHOOTS
+                                             # the commanded apex (peak ~0.50 vs cmd ~0.55) -> this pushes it to the FULL
+                                             # commanded height -> longer flight -> more reach when vx is calf-capped
+                                             # (range = vx*T). MODERATE on purpose: over-boosting pushes jumping ABOVE
+                                             # the command and fights projected_peak. Watch mean_peak_height + hit_rate.
+            maintain_contact = 0.3           # 0.10 -> 0.3: POSITIVE "four feet planted when not airborne" — the incentive
+                                             # complement to clean_landing for the post-touchdown shuffle (lifting a foot
+                                             # in the settle now costs this). MODERATE: a big value also pays the pre-jump
+                                             # STAND -> could make "don't jump" comfy (discovery risk). Watch jump_flight_rate.
+            landing_stability = 1.0          # RE-ENABLED to BRAKE the landing momentum: per-step trace showed the
+                                             # robot lands at vx~1.3 m/s, bounces (all feet off, +0.06m) and coasts
+                                             # ~0.30m forward to a stop (the "post-landing slide"). This rewards LOW
+                                             # base velocity during the landing buffer -> absorb/stop on the spot.
+            landing_stability_lin_sigma = 2.0  # loosen from default 0.25 (which floors at ~0 for vx~1.3 -> no gradient)
+            landing_stability_ang_sigma = 1.0  # loosen from default 0.5
+            # clean_landing REMOVED (ineffective: detector never armed -> reward ~0). Post-landing slide handled by
+            # landing_stability (brake momentum) + disable_jump_on_landing (no commanded re-jump); error obs real-time.
             # ---- four-foot contact-timing sync (penalty on staggered takeoff/landing) ----
             foot_contact_sync = -4.0         # was -3.0: STRENGTHEN four-foot takeoff/landing sync (less body tilt
                                              # at touchdown). config note: if peak drops too much, back off.
@@ -428,6 +459,11 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
             # ---- general joint-accel smoothness: REDUCED (overrides inherited -2.5e-7). It competes with the
             #      explosive pure-torque pushoff; halving frees the jump. aerial_dof_acc kept at -3e-6 (unchanged, per call).
             dof_acc = -1.25e-7
+            # ---- action_rate: -0.03 (inherited from curriculum) -> -0.001. The anti-twitch penalty also damps
+            #      the RAPID action ramp the explosive push-off needs. Hill model + torque/velocity limits already
+            #      cap the FORCE physically, so this soft penalty was a removable BURST limiter -> lower it to free
+            #      the burst (back to the omnijump_torque base value). Watch action_rate earned + jitter if it twitches.
+            action_rate = -0.001
             # ---- pose-shaping joint_angle_* REMOVED (cleanup, audit): each earned ~0 (robot never reached
             #      q_air/q_pre/q_ground) = dead weight. Landing ATTITUDE now held by orientation + foot_contact_sync
             #      (strengthened below); landing-POINT by projected_landing + landing_position (kept / revived).
@@ -500,7 +536,6 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
             # inherited-active but missing from the parent's print list — surface them
             "rew_base_ang_vel_xy",   # (1) flight+landing roll/pitch ω damping — the anti-tumble lever
             "rew_landing_impact",    # (2) touchdown force-spike penalty — cushion vs slam
-            "rew_clean_landing",     # post-touchdown hop/shuffle penalty — watch it ->0 (no small hops after landing)
             "rew_pitch_level",       # pitch-specific tilt penalty — fix persistent nose-down
             "rew_tracking_angular_velocity",  # OmniNet yaw-rate damping (hold heading) — watch it stays < jump rewards
             "rew_dof_pos_limits",    # joint-limit penalty — watch it shrinks as the over-deep squat stops jamming

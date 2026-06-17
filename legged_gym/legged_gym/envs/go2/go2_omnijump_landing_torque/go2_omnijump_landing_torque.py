@@ -32,9 +32,11 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
         "landing_impact",    # landing stability: touchdown force-spike penalty
         "pitch_level",       # landing stability: pitch-specific tilt penalty
         "dof_pos_limits",    # penalize folding joints to the limit (over-deep squat hits the "wall")
-        "clean_landing",     # no hop / shuffle-step after touchdown (post-plant foot-relift penalty)
         "takeoff_velocity_match",  # merged launch: takeoff velocity-vector match to (landing point + apex) — jump far+high
-    }
+        "landing_stability", # ABSORB the landing: reward low base velocity during the landing buffer so the forward
+                             # momentum (vx~1.3 at touchdown) is BRAKED, not bounced+coasted (the post-landing slide)
+    }   # clean_landing REMOVED (detector never armed -> ~0). Post-landing slide handled by landing_stability
+        # (brake momentum) + disable_jump_on_landing (no commanded re-jump); error obs is real-time (no obs-hold).
 
     # Curriculum gate table requires an entry for every active reward. Curriculum
     # is disabled (one-stage), so the stage value only needs to exist; 0 = active
@@ -49,9 +51,9 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
         "landing_impact": 0,
         "pitch_level": 0,
         "dof_pos_limits": 0,
-        "clean_landing": 0,     # active from step 1 (its own succ-latch gate is INSIDE the reward fn)
         "takeoff_velocity_match": 0,   # active from step 1 (replaces takeoff_vertical_velocity)
-    }
+        "landing_stability": 0,   # active from step 1 (override parent's stage 3, which never fires one-stage)
+    }   # clean_landing REMOVED (see whitelist note above)
 
     # ------------------------------------------------------------------ #
     # Buffers
@@ -279,6 +281,12 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
         cos_y, sin_y = torch.cos(yaw), torch.sin(yaw)
         err_fwd = cos_y * err_world[:, 0] + sin_y * err_world[:, 1]
         err_lat = -sin_y * err_world[:, 0] + cos_y * err_world[:, 1]
+        # Landing error is always the REAL-TIME value (no obs-hold): the policy must always know its true
+        # position relative to the target -- zeroing it post-touchdown lies about the position AND injects a
+        # DISCONTINUITY at touchdown (err snaps to 0) that spikes the value-function loss / exploration std.
+        # What stops the post-landing "chase" hop is the COMMAND, not hiding the error: after landing cmd4=0
+        # (binary stand) and NO jump reward is collectable, so hopping toward the still-distant target earns
+        # nothing and only costs -> a policy trained on the clean 0/1 command learns to HOLD despite the error.
         landing_err_obs = torch.stack((err_fwd, err_lat, torch.zeros_like(err_fwd)), dim=-1)
 
         height_obs = torch.cat(
@@ -573,12 +581,15 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
         land = (self.prelanding | self.landing).float()
         extra = float(getattr(self.cfg.rewards, "landing_pitch_extra", 5.0))
         r = active * pitch_tilt + extra * land * pitch_tilt
-        # ROOT FIX -- the body is already nose-down IN THE AIR (it LAUNCHES tilted; takeoff_omega froze the
-        # rotation, so the tilt stays). A per-step penalty that didn't change the behaviour is simply too SMALL
-        # vs the forward reach the nose-down buys -> penalize the pitch HARD across ALL JUMP PHASES (load ->
-        # push -> flight -> landing). The tilt is IMPARTED at the push and can't be fixed mid-flight, so making
-        # every jump step costly forces a LEVEL push/launch -> level flight -> level landing. Gated on the
-        # succ-latch (_takeoff_omega_on) -> off for the messy from-scratch jumps.
+        # AIR+LANDING leveling (was ALL-PHASE): keep the body level THROUGH THE AIR and at touchdown, but FREE
+        # the load/push. A torque_diag of the stuck dx=1.0 policy showed the calves + FRONT thighs flooring it
+        # (throttle 1.0, joint-vel at the Hill limit) while the REAR thighs sat at ~35% -- the rear-HIP push (the
+        # main forward propulsion, which necessarily PITCHES the body) was being suppressed by penalizing pitch
+        # during the push. So the all-phase term capped reach by forbidding the very push that reaches far.
+        # Restrict the strong term to airborne|prelanding|landing -> the push may pitch (rear hips engage ->
+        # reach), and the body must still be level once airborne and at touchdown (where it matters; the mild
+        # ×1 whole-cycle term above + takeoff_omega still gently shape the push). Gated on the succ-latch.
         if getattr(self, "_takeoff_omega_on", False):
-            r = r + float(getattr(self.cfg.rewards, "jump_pitch_extra", 12.0)) * active * pitch_tilt
+            air = (self.airborne | self.prelanding | self.landing).float()
+            r = r + float(getattr(self.cfg.rewards, "jump_pitch_extra", 12.0)) * air * pitch_tilt
         return r

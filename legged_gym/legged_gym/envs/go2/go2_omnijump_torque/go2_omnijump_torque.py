@@ -371,11 +371,28 @@ class GO2OmniJumpTorque(GO2Torque):
                 stand_env_ids = env_ids[stand_mask]
                 self.commands[stand_env_ids, 0] = 0.0
                 self.commands[stand_env_ids, 1] = 0.0
+                # Pin the STAND command to a clean value (default: keep the sampled ~0.45 for back-compat).
+                # stand_command_value=0 separates "stand" far from the 0.5 jump threshold so the policy does
+                # not HESITATE / twitch a foot off at a near-threshold stand command (the stand-episode hop).
+                stand_val = float(getattr(self.cfg.commands, "stand_command_value", -1.0))
+                if stand_val >= 0.0:
+                    self.commands[stand_env_ids, 4] = stand_val
+            # Pin the JUMP command to a clean value too (default off = keep the sampled (0.5,1.0]). With
+            # stand_command_value=0 and jump_command_value=1 the command becomes a clean BINARY 1=jump /
+            # 0=stand: no near-threshold ambiguity, and the cmd4 obs feature stops carrying meaningless
+            # (0.5,1.0] jitter (cmd4's magnitude is never used as a force/effort scale -- only `cmd4 >
+            # threshold` and the raw obs). jump_command_range now only sets the stand/jump SPLIT probability.
+            jump_val = float(getattr(self.cfg.commands, "jump_command_value", -1.0))
+            if jump_val >= 0.0:
+                self.commands[env_ids[~stand_mask], 4] = jump_val
 
     def _disable_jump_command(self, env_ids):
         if len(env_ids) == 0 or self.cfg.commands.num_commands <= 4:
             return
-        self.commands[env_ids, 4] = self.command_ranges["jump_command"][0]
+        # Post-jump / timeout: drop back to the STAND command. Use stand_command_value when configured
+        # (e.g. 0.0 = a clean stand clearly below the jump threshold), else the legacy jump_command_range[0].
+        stand_val = float(getattr(self.cfg.commands, "stand_command_value", -1.0))
+        self.commands[env_ids, 4] = stand_val if stand_val >= 0.0 else self.command_ranges["jump_command"][0]
 
     def _start_jump(self, env_ids):
         if len(env_ids) == 0:
@@ -552,6 +569,14 @@ class GO2OmniJumpTorque(GO2Torque):
         self.just_landed = self.jumping_state & self.has_taken_off & (~self.has_landed) & any_foot_contact
         self.has_landed |= self.just_landed
         self.landing = self.jumping_state & self.has_landed
+        # DISABLE-JUMP-ON-LANDING: the moment the robot has touched down, flip the jump command to STAND
+        # (cmd4 -> stand value) for the WHOLE landing buffer, instead of holding cmd4=1 until the jump
+        # "finishes" 0.75s later. Otherwise, during the buffer the policy sees cmd4=1 ("jump!") + the residual
+        # landing error and HOPS forward to chase the target it undershot (the post-landing in-place hop).
+        # The landing rewards key off self.landing / the touchdown-locked landing_root_xy, NOT cmd4, so this
+        # does not affect landing-accuracy scoring. (Verified in play: kills the buffer chase-hop.)
+        if getattr(self.cfg.commands, "disable_jump_on_landing", False):
+            self._disable_jump_command(self.has_landed.nonzero(as_tuple=False).flatten())
         # CLEAN-LANDING settle detector (mirror of the clean-takeoff re-plant, opposite direction): once all
         # four feet have HELD contact for clean_landing_plant_hold steps in the landing buffer, LATCH
         # landing_planted ("settled"); thereafter any foot LIFTING (hop / shuffle-step) trips landing_relift.
@@ -1293,11 +1318,16 @@ class GO2OmniJumpTorque(GO2Torque):
         return active * torch.exp(-pose_error / sigma)
 
     def _reward_landing_stability(self):
-        # Penalty for velocity during the landing observation period
+        # Reward LOW base velocity during the landing buffer = ABSORB/brake the landing momentum (forward
+        # vx + bounce vz) so the robot stops on the spot instead of bouncing and coasting forward. Sigmas are
+        # configurable: the default 0.25/0.5 floors at ~0 for real landing speeds (vx~1.3 -> exp(-7)~0), which
+        # is why it "never fired"; loosen them (landing task: ~2.0/1.0) so there is gradient across the brake.
         active = self.landing.float()
         lin_vel_error = torch.sum(torch.square(self.base_lin_vel), dim=1)
         ang_vel_error = torch.sum(torch.square(self.base_ang_vel[:, :2]), dim=1)
+        lin_sigma = max(float(getattr(self.cfg.rewards, "landing_stability_lin_sigma", 0.25)), 1e-3)
+        ang_sigma = max(float(getattr(self.cfg.rewards, "landing_stability_ang_sigma", 0.5)), 1e-3)
         return active * (
-            torch.exp(-lin_vel_error / 0.25) * torch.exp(-ang_vel_error / 0.5)
+            torch.exp(-lin_vel_error / lin_sigma) * torch.exp(-ang_vel_error / ang_sigma)
         )
 
