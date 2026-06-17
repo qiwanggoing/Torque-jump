@@ -406,10 +406,12 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
             takeoff_direction = 0.0
             # ---- MERGED takeoff launch: velocity-VECTOR match (height + distance in one), replaces vertical-only ----
             takeoff_vertical_velocity = 0.0  # OFF: superseded by takeoff_velocity_match (which == it at dx=0)
-            takeoff_velocity_match = 15.0    # reward takeoff velocity matching the ballistic launch to (landing
-                                             # point + apex height). CAUSE-side "jump FAR and HIGH" driver — the
-                                             # closeness rewards can't push reach (diminishing returns at undershoot).
-                                             # = old takeoff_vz weight (15). At dx=0 it reduces to takeoff_vz (safe).
+            takeoff_velocity_match = 22.0    # 15 -> 22: DISTANCE lever. earned only ~0.20 (low) while reach undershoots
+                                             # ~15-25% AND mean_peak is short too -> the LAUNCH is underpowered/under-
+                                             # aimed (vx below the ballistic v_req). Boosting this CAUSE-side driver
+                                             # pressures a stronger/more accurate launch. DIAGNOSTIC: if dx_max +
+                                             # mean_peak climb -> was reward-limited; if flat -> hit the Hill power
+                                             # ceiling (legs can't push faster), no further reward tuning helps.
             # ---- structurally-inert rewards removed ----
             joint_angle_loaded = 0.0         # was 0.4: phase_loaded (jumping & ~taken_off & vz<=0) almost never
                                              # fires — the policy pre-squats during idle and pops straight up on
@@ -434,10 +436,11 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
                                              # complement to clean_landing for the post-touchdown shuffle (lifting a foot
                                              # in the settle now costs this). MODERATE: a big value also pays the pre-jump
                                              # STAND -> could make "don't jump" comfy (discovery risk). Watch jump_flight_rate.
-            landing_stability = 1.0          # RE-ENABLED to BRAKE the landing momentum: per-step trace showed the
-                                             # robot lands at vx~1.3 m/s, bounces (all feet off, +0.06m) and coasts
-                                             # ~0.30m forward to a stop (the "post-landing slide"). This rewards LOW
-                                             # base velocity during the landing buffer -> absorb/stop on the spot.
+            landing_stability = 5.0          # 1.0 -> 5.0: at weight 1.0 it earned ~0.003 (capture <1%) -> policy
+                                             # IGNORED it (chose distance, lands hot vx~1.3, bounces+coasts ~0.30m).
+                                             # 5.0 gives it teeth: rewards LOW base velocity during the landing buffer
+                                             # = absorb/stop on the spot. Watch dx doesn't drop (it rewards braking
+                                             # AFTER touchdown, not landing slow, so it shouldn't shorten the jump).
             landing_stability_lin_sigma = 2.0  # loosen from default 0.25 (which floors at ~0 for vx~1.3 -> no gradient)
             landing_stability_ang_sigma = 1.0  # loosen from default 0.5
             # clean_landing REMOVED (ineffective: detector never armed -> reward ~0). Post-landing slide handled by
@@ -536,6 +539,7 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
             # inherited-active but missing from the parent's print list — surface them
             "rew_base_ang_vel_xy",   # (1) flight+landing roll/pitch ω damping — the anti-tumble lever
             "rew_landing_impact",    # (2) touchdown force-spike penalty — cushion vs slam
+            "rew_landing_stability", # (3) BRAKE landing momentum — watch it CLIMB (policy learning to stop on landing)
             "rew_pitch_level",       # pitch-specific tilt penalty — fix persistent nose-down
             "rew_tracking_angular_velocity",  # OmniNet yaw-rate damping (hold heading) — watch it stays < jump rewards
             "rew_dof_pos_limits",    # joint-limit penalty — watch it shrinks as the over-deep squat stops jamming
