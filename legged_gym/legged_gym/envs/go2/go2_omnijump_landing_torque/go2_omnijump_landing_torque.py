@@ -281,13 +281,13 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
         cos_y, sin_y = torch.cos(yaw), torch.sin(yaw)
         err_fwd = cos_y * err_world[:, 0] + sin_y * err_world[:, 1]
         err_lat = -sin_y * err_world[:, 0] + cos_y * err_world[:, 1]
-        # Landing error is always the REAL-TIME value (no obs-hold): the policy must always know its true
-        # position relative to the target -- zeroing it post-touchdown lies about the position AND injects a
-        # DISCONTINUITY at touchdown (err snaps to 0) that spikes the value-function loss / exploration std.
-        # What stops the post-landing "chase" hop is the COMMAND, not hiding the error: after landing cmd4=0
-        # (binary stand) and NO jump reward is collectable, so hopping toward the still-distant target earns
-        # nothing and only costs -> a policy trained on the clean 0/1 command learns to HOLD despite the error.
         landing_err_obs = torch.stack((err_fwd, err_lat, torch.zeros_like(err_fwd)), dim=-1)
+
+        # OBS IS UNTOUCHED: it always shows the REAL-TIME command (true landing error, real height target, real
+        # cmd4) through the entire episode -- no hiding/gating. The policy must always see the honest target +
+        # the cmd4 context. The post-landing chase (forward creep + height hop) is suppressed by the REWARD and
+        # the command, NOT by hiding the target: after touchdown cmd4=0 (stand context) and landing_stability
+        # rewards killing the residual velocity, so the policy learns "cmd4=0 -> hold despite the visible error".
 
         height_obs = torch.cat(
             (

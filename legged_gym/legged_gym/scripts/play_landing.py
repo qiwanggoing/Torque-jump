@@ -25,9 +25,12 @@ from legged_gym.envs import *
 from legged_gym.utils import task_registry, get_args
 
 # === command to visualise (training ranges: dx in [0,0.40], height in [0.40,0.70]) ===
-DX = 1.0       # forward landing displacement (m)
+DX = 0.9       # forward landing displacement (m)
 DY = 0.0        # lateral landing displacement (m)
-HEIGHT = 0.70   # jump-height command
+HEIGHT = 0.7   # jump-height command
+STAND_ONLY = False  # PURE-STAND test: command cmd4=0.45 (<=0.5 threshold -> NEVER jumps) + zero displacement,
+                    # so the robot is told to just stand quietly at spawn (landing_target=spawn -> err=0).
+                    # Watch how stable the stand is / how often it twitches a foot off. Set False for normal jumps.
 # ====================================================================================
 
 
@@ -40,16 +43,25 @@ def main():
 
     # Fixed forward landing command — fed through the env's NORMAL command ranges so the
     # jump fires and evolves exactly as in training (no test-mode override / state machine).
+    env_cfg.commands.resampling_time = 20.0   # hold the FIRST command for the whole episode -> no mid-episode resample
+                                              # that flips STAND->JUMP without updating landing_target (= the in-place-hop bug)
     env_cfg.commands.landing_dx_curriculum = False
     env_cfg.commands.landing_disp_x_stage2 = [DX, DX]
     env_cfg.commands.landing_disp_y_stage2 = [DY, DY]
     env_cfg.commands.ranges.jump_height = [HEIGHT, HEIGHT]
-    env_cfg.commands.ranges.jump_command = [1.0, 1.0]    # always > jump_command_threshold (0.5) -> always jump
+    env_cfg.commands.ranges.jump_command = [1.0, 1.0]    # (legacy key)
+    if STAND_ONLY:
+        env_cfg.commands.jump_command_range = [0.49, 0.49]   # cmd4 always 0.45 <= 0.5 -> NEVER fires a jump (pure stand)
+        env_cfg.commands.landing_disp_x_stage2 = [0.0, 0.0]  # landing_target = spawn -> zero landing error
+        env_cfg.commands.landing_disp_y_stage2 = [0.0, 0.0]
+    # NOTE: leaving jump_command_range at the config DEFAULT [0.45,1.0] -> cmd4 varies, so post-landing the robot
+    # gets STAND commands (cmd4<=0.5) and holds. Forcing [1.0,1.0] removes stand cmds -> it never stops -> drifts.
     # Clean conditions (the eval that scored 0.98 used these; isolates the policy).
     env_cfg.noise.add_noise = False
     env_cfg.domain_rand.randomize_friction = False
     env_cfg.domain_rand.push_robots = False
     env_cfg.domain_rand.randomize_base_mass = False
+    env_cfg.rewards.landing_tilt_terminate = 0.0   # MEASURE mode: disable the tilt-reset so we see the TRUE max nose-down
     train_cfg.runner.resume = True
 
     env, _ = task_registry.make_env(name=args.task, args=args, env_cfg=env_cfg)
@@ -72,13 +84,101 @@ def main():
     obs = env.get_observations()
     print(f"[play_landing] cmd dx={DX} dy={DY} height={HEIGHT} | clean env, normal jump flow, pd_alpha=0", flush=True)
 
+    import math
+    pg2deg = lambda v: math.degrees(math.asin(max(-1.0, min(1.0, float(v)))))  # projected_gravity_x -> tilt deg
     n_jump = n_hit = 0
+    max_nd = 0.0   # worst NOSE-DOWN pitch (projected_gravity[:,0], >0 = nose-down) during this jump's flight+landing
+    resets_since = 0   # episode resets since the last logged landing (so we know if a reset happened between jumps)
+    STAND_CMD0 = False      # while STANDING (not jumping, cmd4<=0.5), force cmd4 to a CLEAR 0.0 (vs the 0.45 the env
+                            # pins, which sits just under the 0.5 jump threshold). Tests if the stand-hop is the
+                            # policy hesitating at a near-threshold command. Does NOT touch landing_target.
+    DISABLE_JUMP_ON_LAND = True  # TEST Option-1: the env keeps cmd4=1 through the whole 0.75s landing buffer (only
+                            # zeroes it at jump-FINISH), so post-touchdown the policy still sees "jump!" + a residual
+                            # landing error and HOPS to chase. Here we force cmd4=0 the instant has_landed -> if the
+                            # buffer-hop STOPS, the fix is "disable jump command AT TOUCHDOWN" (then bake into env+retrain).
+    DEBUG_HOP = False      # True = print the per-step feet-off / per-episode reset debug (hop diagnosis).
+                           # False = clean output: just the per-jump [land] line (peak height + forward reach).
+    MONITOR_CONTACT = True # True = once landed, print the FULL per-foot contact + height + drift + fwd vel EVERY
+                           # step until the next reset (to see exactly what the feet do during the hop-then-slide).
+    n_flights = 0          # all-feet-off phases this episode (1 = clean single jump; 2+ = extra in-place hop)
+    feet_off_prev = False
+    ep_len = 0             # python-side per-episode step counter (env.episode_length_buf is already 0 by reset-print time)
+    drift_dx = drift_dy = max_drift = 0.0   # POST-LANDING DRIFT from touchdown point (this episode)
+    landed_ep = False      # did the robot land this episode (so the drift line is meaningful)
+    pl_steps = pl_all4 = 0   # post-landing: total steps + steps with ALL 4 feet planted (all4_frac~1 => SLIDE,
+    pl_min_feet = 4          #   maintain_contact can't catch it; all4_frac low / min_feet<4 => STEP-creep, it can)
     for _ in range(100000):
         env.step_count = BIG
         env.common_step_counter = BIG
         with torch.no_grad():
             actions = policy(obs.detach())
         obs, _, _, dones, infos = env.step(actions.detach())
+        # TEST: while standing, force cmd4 to a CLEAR 0.0 (the env otherwise pins it to 0.45, just under the 0.5
+        # jump threshold). If the stand-hop STOPS -> it was near-threshold command hesitation (cheap fix);
+        # if it PERSISTS -> the policy has no stable stand fixed-point (needs a stand-hold reward / retrain).
+        if STAND_CMD0 and (not bool(env.jumping_state[0])) and float(env.commands[0, 4]) <= 0.5:
+            env.commands[0, 4] = 0.0
+        # TEST Option-1: once landed, force the jump command OFF (the env otherwise holds cmd4=1 for the whole
+        # 0.75s buffer). If the post-landing chase-hop stops -> disabling the jump command AT TOUCHDOWN is the fix.
+        if DISABLE_JUMP_ON_LAND and bool(env.has_landed[0]):
+            env.commands[0, 4] = 0.0
+        # POST-LANDING DRIFT: how far the base has slid from its touchdown point (landing_root_xy, locked at
+        # first touchdown). Tracked on live (non-reset) steps; reported at episode end. +dx = creep toward
+        # target (residual chase); large |dy| = lateral/yaw drift (the Stage-1 stand-drift).
+        if bool(env.has_landed[0]):
+            landed_ep = True
+            _dv = env.root_states[0, :2] - env.landing_root_xy[0]
+            drift_dx, drift_dy = float(_dv[0]), float(_dv[1])
+            max_drift = max(max_drift, (drift_dx ** 2 + drift_dy ** 2) ** 0.5)
+            # is the creep a STEP (a foot lifts) or a SLIDE (4 planted)? -> tells us if maintain_contact can catch it
+            _cs = env._get_contact_state()[0].int().tolist()   # per-foot contact [FL, FR, RL, RR] (1=down)
+            _nc = sum(_cs)
+            pl_steps += 1
+            pl_all4 += int(_nc >= 4)
+            pl_min_feet = min(pl_min_feet, _nc)
+            if MONITOR_CONTACT:
+                print(f"    land+{pl_steps:3d} contact={_cs} nfeet={_nc} h={float(env.root_states[0,2]):.3f} "
+                      f"dx={drift_dx:+.3f} dy={drift_dy:+.3f} vx={float(env.root_states[0,7]):+.2f} "
+                      f"cmd4={float(env.commands[0,4]):.2f} jumping={int(env.jumping_state[0])}", flush=True)
+        # Count distinct FLIGHT phases per episode: a clean single jump = 1 all-feet-off period; an EXTRA
+        # in-place HOP after landing = a 2nd all-feet-off period. Catches the post-landing hop that the
+        # land-event print misses (just_landed fires only on the FIRST touchdown).
+        feet_off = not bool(env._get_contact_state()[0].any())
+        if feet_off and not feet_off_prev:
+            n_flights += 1
+            # PROOF: at every all-feet-off transition, dump the state machine. jump_starts = how many times
+            # _start_jump fired this episode. If jump_starts stays 1 while n_flights climbs, the extra
+            # "flights" are POST-LANDING PHYSICAL BOUNCES (landed latched True), NOT commanded 2nd jumps.
+            if DEBUG_HOP:
+                print(f"  [feet-off #{n_flights}] step={int(env.episode_length_buf[0])} "
+                      f"jump_starts={float(env.jump_starts[0]):.0f} "
+                      f"jumping={int(env.jumping_state[0])} took_off={int(env.has_taken_off[0])} "
+                      f"landed={int(env.has_landed[0])} cmd4={float(env.commands[0,4]):.2f} "
+                      f"h={float(env.root_states[0,2]):.2f}", flush=True)
+        feet_off_prev = feet_off
+        ep_len += 1
+        if bool(dones.any()):
+            if DEBUG_HOP:
+                tilt = pg2deg(env.projected_gravity[0, 0])   # nose-down tilt at reset (>0 nose-down); large => tipped over
+                print(f"[reset] ep_len={ep_len} tilt={tilt:.0f}deg h={float(env.root_states[0,2]):.2f} "
+                      f"flight_phases={n_flights}  {'(clean: 1 jump)' if n_flights <= 1 else '<-- EXTRA HOP(s) after landing'}", flush=True)
+            if landed_ep:
+                _all4 = pl_all4 / max(pl_steps, 1)
+                print(f"  [post-land drift] dx={drift_dx:+.3f} dy={drift_dy:+.3f} "
+                      f"|d|={(drift_dx ** 2 + drift_dy ** 2) ** 0.5:.3f}m  max|d|={max_drift:.3f}m  "
+                      f"| all4_planted={_all4*100:.0f}% min_feet={pl_min_feet}  "
+                      f"({'SLIDE: maintain_contact wont catch' if _all4 > 0.9 else 'STEP-creep: maintain_contact can catch'})", flush=True)
+            resets_since += 1
+            n_flights = 0
+            feet_off_prev = False
+            ep_len = 0
+            drift_dx = drift_dy = max_drift = 0.0
+            landed_ep = False
+            pl_steps = pl_all4 = 0
+            pl_min_feet = 4
+        # track the worst nose-down tilt while airborne/landing (same units as cfg.rewards.landing_tilt_terminate)
+        if bool(env.airborne[0]) or bool(env.prelanding[0]) or bool(env.landing[0]):
+            max_nd = max(max_nd, float(env.projected_gravity[0, 0]))
         if hasattr(env, "just_landed") and bool(env.just_landed.any()):
             for idx in env.just_landed.nonzero(as_tuple=False).flatten().tolist():
                 land = env.root_states[idx, :2]
@@ -86,11 +186,16 @@ def main():
                 fwd = float(land[0] - spawn[idx, 0])
                 lat = float(land[1] - spawn[idx, 1])
                 peak = float(env.peak_base_height[idx])
+                td = float(env.projected_gravity[idx, 0])   # pitch tilt AT touchdown (>0 = nose-down)
                 hit = (err <= 0.10) and (peak >= 0.40)
                 n_jump += 1
                 n_hit += int(hit)
-                print(f"[land #{n_jump}] peak={peak:.3f} fwd={fwd:+.3f}m lat={lat:+.3f}m "
-                      f"land_err={err:.3f}m {'HIT ' if hit else 'miss'} | hit_rate={n_hit/n_jump:.2f}", flush=True)
+                # Clean per-jump readout: PEAK HEIGHT + 跳远 (forward reach) vs the command, plus accuracy.
+                print(f"[land #{n_jump}] cmd_dx={DX:.2f} | peak_height={peak:.3f}m  跳远 fwd={fwd:+.3f}m "
+                      f"(lat={lat:+.3f}) | land_err={err:.3f} {'HIT ' if hit else 'miss'} "
+                      f"hit_rate={n_hit/n_jump:.2f}", flush=True)
+                max_nd = 0.0
+                resets_since = 0
 
 
 if __name__ == "__main__":

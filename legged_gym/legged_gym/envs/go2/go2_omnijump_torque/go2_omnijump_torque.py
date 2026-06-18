@@ -577,6 +577,14 @@ class GO2OmniJumpTorque(GO2Torque):
         # does not affect landing-accuracy scoring. (Verified in play: kills the buffer chase-hop.)
         if getattr(self.cfg.commands, "disable_jump_on_landing", False):
             self._disable_jump_command(self.has_landed.nonzero(as_tuple=False).flatten())
+            # COMPLETE the post-landing STAND command: also drop the HEIGHT command to the standing height.
+            # cmd4->0 alone left a CONTRADICTORY command after touchdown ("don't jump" + "be at apex height
+            # 0.7") and the policy obeyed the height half -> HOPPED up to chase 0.7. Skip the touchdown step
+            # (just_landed) so the success-height eval (peak_err / height_score, gated on just_landed) still
+            # uses the REAL commanded apex; from the next step the command is a consistent stand (cmd4=0 AND
+            # height=standing). Flight is untouched (this only fires once has_landed), so aiming is unaffected.
+            _hold_h = self.has_landed & (~self.just_landed)
+            self.commands[_hold_h, 3] = float(self.cfg.rewards.base_height_target)
         # CLEAN-LANDING settle detector (mirror of the clean-takeoff re-plant, opposite direction): once all
         # four feet have HELD contact for clean_landing_plant_hold steps in the landing buffer, LATCH
         # landing_planted ("settled"); thereafter any foot LIFTING (hop / shuffle-step) trips landing_relift.
