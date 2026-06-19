@@ -312,7 +312,12 @@ class GO2Torque(LeggedRobot):
                 self.hip_indices.append(i)
             if 'thigh_joint' in name:
                 self.thigh_indices.append(i)
-        self.torque_limits = torch.ones(self.num_dofs, device=self.device) * 23.5
+        # torque_limits now come STRAIGHT from the official Go2 URDF (props["effort"], read in
+        # _process_dof_props): hip/thigh = 23.7 Nm, calf = 35.55 Nm. The calf is 1.5x stronger because the
+        # knee has a 1.5:1 reduction (same motor, geared down -> 1.5x torque, /1.5 speed). The old line here
+        # hardcoded a uniform 23.5 for all 12 joints, which threw away the calf's geared torque advantage
+        # (35.55 -> 23.5). Removing the override unifies the actuator model with the real hardware spec.
+        # self.torque_limits = torch.ones(self.num_dofs, device=self.device) * 23.5
         rigid_body_state_tensor = self.gym.acquire_rigid_body_state_tensor(self.sim)
         self.rigid_body_states = gymtorch.wrap_tensor(rigid_body_state_tensor).view(self.num_envs, -1, 13)
         self.general_scale = 0
