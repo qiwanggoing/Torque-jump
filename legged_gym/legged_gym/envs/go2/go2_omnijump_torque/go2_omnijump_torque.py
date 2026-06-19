@@ -377,6 +377,13 @@ class GO2OmniJumpTorque(GO2Torque):
                 stand_val = float(getattr(self.cfg.commands, "stand_command_value", -1.0))
                 if stand_val >= 0.0:
                     self.commands[stand_env_ids, 4] = stand_val
+                    # Keep the HEIGHT command CONSISTENT with cmd4: a stand command means stand at the standing
+                    # height, NOT jump to a sampled apex. Otherwise cmd4=0 + a random apex height is a
+                    # contradictory "stand" and the policy learns to chase the height even when told to stand
+                    # (same root as the post-landing hop). With this, cmd4=0 => height=standing EVERYWHERE
+                    # (stand episodes here + post-landing in the disable_jump_on_landing block), so the policy
+                    # can learn a clean "cmd4=0 = full stand" mapping.
+                    self.commands[stand_env_ids, 3] = float(self.cfg.rewards.base_height_target)
             # Pin the JUMP command to a clean value too (default off = keep the sampled (0.5,1.0]). With
             # stand_command_value=0 and jump_command_value=1 the command becomes a clean BINARY 1=jump /
             # 0=stand: no near-threshold ambiguity, and the cmd4 obs feature stops carrying meaningless
@@ -642,6 +649,17 @@ class GO2OmniJumpTorque(GO2Torque):
             | (torch.abs(self.projected_gravity[:, 1]) > tilt_threshold)
         )
         self.pending_success &= ~(self.landing & excessive_tilt)
+        # CLEAN-LANDING success gate: a jump that goes AIRBORNE again after touchdown (a hop / bounce) is NOT a
+        # clean jump -> cancel its success. Skip the first few buffer steps (touchdown-impact chatter) via a
+        # grace so only a DELIBERATE re-launch counts. This is the FORCING FUNCTION for a settle-and-stay
+        # landing: the post-landing hop is reward-negative but the velocity rewards leave too small a "hop vs
+        # stay" margin (the robot can't claim landing_stability either way when it lands hot), so the policy
+        # never learns to absorb cleanly. Making the hop forfeit the whole successful_jump bonus is a big,
+        # unambiguous margin. Gated (single-jump landing only) so continuous-jump tasks' legit re-jumps aren't hit.
+        if getattr(self.cfg.rewards, "landing_airborne_cancels_success", False):
+            _grace = int(getattr(self.cfg.rewards, "landing_airborne_grace_steps", 15))
+            post_land_airborne = self.landing & (~any_foot_contact) & (self.landing_step_counter > _grace)
+            self.pending_success &= ~post_land_airborne
 
         self.last_jump_success[:] = False
         self.jump_episode_failed[:] = False
@@ -733,7 +751,19 @@ class GO2OmniJumpTorque(GO2Torque):
         pose_gate = getattr(self.cfg.rewards, "next_jump_requires_default_pose", False)
         if torch.any(ready_to_finish):
             finish_ids = ready_to_finish.nonzero(as_tuple=False).flatten()
-            self.last_jump_success[finish_ids] = self.pending_success[finish_ids]
+            success_at_finish = self.pending_success[finish_ids]
+            # CLEAN-FINISH gate (option B): the jump counts as a success only if, at the END of the landing
+            # buffer, the robot has (1) RECOVERED to the default standing pose AND (2) stayed IN PLACE at the
+            # touchdown point (no drift). This ALLOWS an in-place hop/bounce during the buffer -- what matters
+            # is the END state (default pose, at the landing spot, not drifting), not whether it briefly left
+            # the ground. Replaces the per-step "any airborne cancels success" rule, which forced a low crouch.
+            if getattr(self.cfg.rewards, "landing_clean_finish_gate", False):
+                pose_tol = float(getattr(self.cfg.rewards, "landing_finish_pose_tol", 1.5))
+                drift_tol = float(getattr(self.cfg.rewards, "landing_finish_drift_tol", 0.15))
+                pose_err_f = torch.sum(torch.abs(self.dof_pos[finish_ids] - self.default_dof_pos), dim=1)
+                drift_f = torch.norm(self.root_states[finish_ids, :2] - self.landing_root_xy[finish_ids], dim=1)
+                success_at_finish = success_at_finish & (pose_err_f < pose_tol) & (drift_f < drift_tol)
+            self.last_jump_success[finish_ids] = success_at_finish
             self.last_success_velocity_score[finish_ids] = self.pending_velocity_score[finish_ids]
             self.successful_jumps[finish_ids] += self.last_jump_success[finish_ids].float()
             self._finish_jump(finish_ids, completed=True)
