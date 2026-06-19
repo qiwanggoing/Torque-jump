@@ -133,6 +133,11 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
         # (the current model never saw a clean 0/1 -> OOD in play).
         stand_command_value = 0.0
         jump_command_value = 1.0
+        # STAND-THEN-JUMP: a sampled jump first STANDS (cmd4=0) for first_jump_delay_steps, THEN cmd4 flips to
+        # jump_value and the jump triggers. Makes the pre-jump a real cmd4=0 stand (anchored by stand_still)
+        # instead of the old "cmd4=1 but trigger held" limbo, where the policy free-fell (feet up, body dropping
+        # 0.42->0.12) as its wind-up. The displacement/height TARGET stays visible during the stand so it can aim.
+        stand_before_jump = True
         # The moment the robot touches down, flip the jump command to STAND for the whole 0.75s landing
         # buffer (instead of holding cmd4=1 until the jump "finishes"). Without this the policy sees cmd4=1 +
         # the residual landing error during the buffer and HOPS to chase the undershot target. Verified in
@@ -326,22 +331,6 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
         success_fallover_tilt = 0.4       # was 0.7 inherited (~46 deg). projected_gravity_xy above this
                                           # during the landing buffer cancels the pending success. 0.4 ~ 24 deg:
                                           # the 400-wt successful_jump now only pays for a landing that STAYS upright.
-        # CLEAN-LANDING: also cancel success if the robot goes AIRBORNE again after touchdown (post-landing
-        # hop/bounce), after a grace that skips touchdown-impact chatter. Forces the policy to land-and-STAY
-        # (absorb the momentum without bottoming out + overshooting into a hop) -> the big successful_jump bonus
-        # only pays for a jump that lands clean and stays down. (Single-jump landing only; safe here since
-        # disable_jump_on_landing pins cmd4=0 post-touchdown so any post-landing airborne is a hop, not a re-jump.)
-        landing_airborne_cancels_success = False  # option-A (forbid any post-landing airborne) OFF -- it forced a
-                                                  # low safe crouch (the policy stayed down to avoid the
-                                                  # disqualifying hop, never recovering to a full stand).
-        landing_airborne_grace_steps = 15
-        # option-B CLEAN-FINISH gate: a hop is FINE; what must be clean is the END state. A jump counts as a
-        # success only if, at the end of the landing buffer, the robot (1) recovered to the default standing
-        # pose AND (2) is still at the touchdown point (no drift). Encodes "hop ok, but land back in place +
-        # recover to default pose + don't drift" directly into the successful_jump bonus.
-        landing_clean_finish_gate = True
-        landing_finish_pose_tol = 1.5     # sum|dof - default_dof_pos| over 12 joints (same scale as next_jump_default_pose_threshold)
-        landing_finish_drift_tol = 0.15   # m: max |root_xy - touchdown_xy| at finish (current run drifts ~0.14 -> tighten later)
         # (2) landing_impact regularization knobs (see _reward_landing_impact):
         landing_impact_force_floor = 150.0  # N total vertical foot force below which no impact penalty (~standing weight)
         landing_impact_force_norm = 1500.0  # N normalizer; impact penalty saturates at (floor + norm)
@@ -402,7 +391,7 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
                                              # base_ang_vel_xy -0.4 (the real flight-penalty killer), now reverted to -0.15 -> a mild 20 should keep
                                              # discovery. If 20 is too mild (still farms height / 1.1 plateau holds) go lower or add a non-vanishing
                                              # far-accuracy pull. WATCH iter~500 flight recovers; if flight 0, 20 is still too low -> revert to 25.
-            successful_jump = 1500.0          # 400 -> 700: raise the completion reward to ~rank3 (just below
+            successful_jump = 1000.0          # 400 -> 700: raise the completion reward to ~rank3 (just below
                                              # landing/peak). It's sparse so weight is big but earned modest
                                              # (~0.25; it's also ALREADY graded by height_score≈0.45 since peak
                                              # 0.5 < cmd 0.7). Paired with success_use_velocity_score=True so it's
@@ -452,6 +441,12 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
                                              # complement to clean_landing for the post-touchdown shuffle (lifting a foot
                                              # in the settle now costs this). MODERATE: a big value also pays the pre-jump
                                              # STAND -> could make "don't jump" comfy (discovery risk). Watch jump_flight_rate.
+            stand_still = 2.0                # STAND-THEN-JUMP anchor: reward a clean PLANTED stand (feet down +
+                                             # body at base_height_target + upright + still) whenever cmd4<=0.5 --
+                                             # i.e. the pre-jump stand AND the post-landing settle. Kills the
+                                             # free-fall wind-up (feet up, body dropping) + the low post-landing
+                                             # crouch. DISCOVERY-SAFE: zeroed until general_scale>=stand_still_discovery_scale
+                                             # (inside the reward), so it can't make "don't jump" comfy during discovery.
             landing_stability = 5.0          # 1.0 -> 5.0: at weight 1.0 it earned ~0.003 (capture <1%) -> policy
                                              # IGNORED it (chose distance, lands hot vx~1.3, bounces+coasts ~0.30m).
                                              # 5.0 gives it teeth: rewards LOW base velocity during the landing buffer
