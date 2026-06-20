@@ -1388,7 +1388,10 @@ class GO2OmniJumpTorque(GO2Torque):
         # vx + bounce vz) so the robot stops on the spot instead of bouncing and coasting forward. Sigmas are
         # configurable: the default 0.25/0.5 floors at ~0 for real landing speeds (vx~1.3 -> exp(-7)~0), which
         # is why it "never fired"; loosen them (landing task: ~2.0/1.0) so there is gradient across the brake.
-        active = self.landing.float()
+        # Gate on the squat: only reward braking the landing of a REAL (squatted) jump -- otherwise a no-squat
+        # pop+land farms it for free (gentle pop-land has no momentum to brake), which incentivizes popping
+        # before the policy has learned to squat. (Same hole that was closed on successful_jump / landing_position.)
+        active = self.landing.float() * self._squat_deep_enough().float()
         lin_vel_error = torch.sum(torch.square(self.base_lin_vel), dim=1)
         ang_vel_error = torch.sum(torch.square(self.base_ang_vel[:, :2]), dim=1)
         lin_sigma = max(float(getattr(self.cfg.rewards, "landing_stability_lin_sigma", 0.25)), 1e-3)
