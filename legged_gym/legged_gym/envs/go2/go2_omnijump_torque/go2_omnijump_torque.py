@@ -1251,6 +1251,13 @@ class GO2OmniJumpTorque(GO2Torque):
             # check (commands ~ 0) wrongly required a zero target, so a STAND with a pending jump-target got no
             # stand reward.
             no_command = jump_command_inactive
+            # NO stand reward DURING a jump cycle: jumping_state spans takeoff -> landing buffer -> finish, so
+            # this withholds stand_still from the moment the jump triggers until it has fully landed/finished.
+            # The pre-jump cmd4=0 stand (jumping_state still False) and the post-finish settle keep paying; the
+            # landing buffer is covered by landing_stability instead. Keeps stand_still a reward for a GENUINE
+            # stand, not something earnable mid-jump.
+            if getattr(self.cfg.rewards, "stand_still_exclude_jumping", True):
+                no_command = no_command & (~self.jumping_state)
         else:
             no_command = (
                 (torch.norm(self.commands[:, :3], dim=1) < 0.05)
