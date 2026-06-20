@@ -35,10 +35,10 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
         "takeoff_velocity_match",  # merged launch: takeoff velocity-vector match to (landing point + apex) — jump far+high
         "landing_stability", # ABSORB the landing: reward low base velocity during the landing buffer so the forward
                              # momentum (vx~1.3 at touchdown) is BRAKED, not bounced+coasted (the post-landing slide)
-        "stand_still",       # STAND-THEN-JUMP: reward a clean planted stand during the cmd4=0 pre-jump window so
-                             # the policy stops free-falling (feet up, body dropping) as its jump wind-up. Gated
-                             # discovery-safe (general_scale >= stand_still_discovery_scale) inside the reward.
-    }   # clean_landing REMOVED (detector never armed -> ~0). Post-landing slide handled by landing_stability
+    }   # clean_landing REMOVED. stand_still NOT activated: the random-delay decouple (jump_arm_delay_min/max)
+        # already forces a real pre-jump stand (the policy can't time a free-fall pre-load), so we rely on it +
+        # the existing maintain_contact/default_pos/orientation anchors. Re-activate stand_still (whitelist +
+        # weight) if the post-landing low crouch / stand height needs an explicit anchor. (detector never armed -> ~0). Post-landing slide handled by landing_stability
         # (brake momentum) + disable_jump_on_landing (no commanded re-jump); error obs is real-time (no obs-hold).
 
     # Curriculum gate table requires an entry for every active reward. Curriculum
@@ -56,7 +56,6 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
         "dof_pos_limits": 0,
         "takeoff_velocity_match": 0,   # active from step 1 (replaces takeoff_vertical_velocity)
         "landing_stability": 0,   # active from step 1 (override parent's stage 3, which never fires one-stage)
-        "stand_still": 0,         # whitelisted from step 1; the discovery-safe general_scale gate is inside the reward
     }   # clean_landing REMOVED (see whitelist note above)
 
     # ------------------------------------------------------------------ #

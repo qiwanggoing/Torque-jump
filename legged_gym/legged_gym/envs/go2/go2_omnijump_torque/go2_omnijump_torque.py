@@ -69,6 +69,11 @@ class GO2OmniJumpTorque(GO2Torque):
         # envs in that initial stand that still owe a jump (so the stand is a real cmd4=0 stand the stand
         # rewards can anchor, instead of the old cmd4=1 limbo where the policy free-fell as a wind-up).
         self.jump_armed = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        # RANDOM cmd4 0->1 flip time (episode-length step at which an armed env's jump triggers). Randomized
+        # per episode so the policy CANNOT predict/time the jump -> it cannot pre-load via a free-fall and must
+        # hold a real stand and REACT to cmd4=1. This is what truly DECOUPLES the stand (cmd4=0) command from
+        # the jump (cmd4=1) command: the policy can't exploit a known future flip to cheat the cmd4=0 stand.
+        self.jump_fire_at = torch.full((self.num_envs,), 1 << 30, dtype=torch.long, device=self.device)
         self.rsi_episode_mask = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         self.has_taken_off = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         self.has_landed = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
@@ -173,6 +178,7 @@ class GO2OmniJumpTorque(GO2Torque):
     def _reset_jump_buffers(self, env_ids):
         self.jumping_state[env_ids] = False
         self.jump_armed[env_ids] = False   # cleared here; _resample_commands re-arms if a jump is sampled
+        self.jump_fire_at[env_ids] = 1 << 30   # sentinel until _resample_commands arms a jump
         self.has_taken_off[env_ids] = False
         self.has_landed[env_ids] = False
         self.airborne[env_ids] = False
@@ -396,9 +402,18 @@ class GO2OmniJumpTorque(GO2Torque):
                 # real cmd4=0 stand (which the stand rewards anchor) instead of the old cmd4=1 limbo where the
                 # policy free-fell (feet up, body dropped) as its wind-up.
                 _stand_v = float(getattr(self.cfg.commands, "stand_command_value", 0.0))
-                self.commands[env_ids[~stand_mask], 4] = _stand_v if _stand_v >= 0.0 else 0.0
-                self.jump_armed[env_ids[~stand_mask]] = True
+                _jids = env_ids[~stand_mask]
+                self.commands[_jids, 4] = _stand_v if _stand_v >= 0.0 else 0.0
+                self.jump_armed[_jids] = True
                 self.jump_armed[env_ids[stand_mask]] = False
+                # RANDOM stand duration before the cmd4 0->1 flip: the policy can't time the jump -> can't
+                # pre-load via a free-fall -> must hold a real stand and REACT to cmd4=1. (delay_min should be
+                # >= first_jump_delay_steps so first_jump_ready is also satisfied when cmd4 flips.)
+                _dmin = int(getattr(self.cfg.commands, "jump_arm_delay_min", self.cfg.rewards.first_jump_delay_steps))
+                _dmax = int(getattr(self.cfg.commands, "jump_arm_delay_max", _dmin))
+                if len(_jids) > 0:
+                    _delay = torch.randint(_dmin, max(_dmax, _dmin) + 1, (len(_jids),), device=self.device)
+                    self.jump_fire_at[_jids] = self.episode_length_buf[_jids] + _delay
             elif jump_val >= 0.0:
                 self.commands[env_ids[~stand_mask], 4] = jump_val
 
@@ -512,7 +527,7 @@ class GO2OmniJumpTorque(GO2Torque):
             fire = (
                 self.jump_armed
                 & (~self.jumping_state)
-                & (self.episode_length_buf >= self.cfg.rewards.first_jump_delay_steps)
+                & (self.episode_length_buf >= self.jump_fire_at)   # RANDOM per-episode flip time (see jump_fire_at)
             )
             if torch.any(fire):
                 self.commands[fire, 4] = _jv

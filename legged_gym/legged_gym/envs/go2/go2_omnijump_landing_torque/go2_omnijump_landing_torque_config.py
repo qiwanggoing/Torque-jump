@@ -138,6 +138,12 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
         # instead of the old "cmd4=1 but trigger held" limbo, where the policy free-fell (feet up, body dropping
         # 0.42->0.12) as its wind-up. The displacement/height TARGET stays visible during the stand so it can aim.
         stand_before_jump = True
+        # RANDOM stand duration before the cmd4 0->1 flip (decouples stand from jump): the flip happens at a
+        # per-episode random step in [min, max], so the policy CANNOT time/predict the jump and therefore cannot
+        # pre-load via a free-fall -- it must hold a real stand and REACT when cmd4=1 actually arrives. min must
+        # be >= first_jump_delay_steps (55) so first_jump_ready is satisfied at the flip.
+        jump_arm_delay_min = 55
+        jump_arm_delay_max = 220
         # The moment the robot touches down, flip the jump command to STAND for the whole 0.75s landing
         # buffer (instead of holding cmd4=1 until the jump "finishes"). Without this the policy sees cmd4=1 +
         # the residual landing error during the buffer and HOPS to chase the undershot target. Verified in
@@ -441,12 +447,8 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
                                              # complement to clean_landing for the post-touchdown shuffle (lifting a foot
                                              # in the settle now costs this). MODERATE: a big value also pays the pre-jump
                                              # STAND -> could make "don't jump" comfy (discovery risk). Watch jump_flight_rate.
-            stand_still = 2.0                # STAND-THEN-JUMP anchor: reward a clean PLANTED stand (feet down +
-                                             # body at base_height_target + upright + still) whenever cmd4<=0.5 --
-                                             # i.e. the pre-jump stand AND the post-landing settle. Kills the
-                                             # free-fall wind-up (feet up, body dropping) + the low post-landing
-                                             # crouch. DISCOVERY-SAFE: zeroed until general_scale>=stand_still_discovery_scale
-                                             # (inside the reward), so it can't make "don't jump" comfy during discovery.
+            # stand_still NOT activated (no weight): the random-delay decouple forces the pre-jump stand instead.
+            # Add `stand_still = 2.0` back here (+ whitelist) if the post-landing low crouch needs a height anchor.
             landing_stability = 5.0          # 1.0 -> 5.0: at weight 1.0 it earned ~0.003 (capture <1%) -> policy
                                              # IGNORED it (chose distance, lands hot vx~1.3, bounces+coasts ~0.30m).
                                              # 5.0 gives it teeth: rewards LOW base velocity during the landing buffer
