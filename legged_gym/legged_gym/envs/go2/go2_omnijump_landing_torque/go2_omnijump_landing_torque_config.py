@@ -454,7 +454,12 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
                                              # complement to clean_landing for the post-touchdown shuffle (lifting a foot
                                              # in the settle now costs this). MODERATE: a big value also pays the pre-jump
                                              # STAND -> could make "don't jump" comfy (discovery risk). Watch jump_flight_rate.
-            stand_still = 5.0                # RE-ACTIVATED (was dropped, then proven NEEDED): play showed the policy
+            stand_still = 2.5                # 5.0 -> 2.5: at 5.0 rew_stand_still~0.18 ~= rew_successful_jump 0.19 (and
+                                             # rose to 0.34 vs jump 0 in the dx0.6 collapse) -> standing out-earned
+                                             # jumping. USER PRINCIPLE: the pre-jump stand must pay LESS than a
+                                             # successful jump. 2.5 -> ~0.09 ~= HALF of successful_jump 0.19. Still
+                                             # enough to discourage the free-fall, but jumping clearly wins.
+                                             # RE-ACTIVATED (was dropped, then proven NEEDED): play showed the policy
                                              # FREE-FALLS to a h0.11 crouch and WAITS there the whole cmd4=0 second
                                              # (crouch = free squat-gate = pre-loaded jump; random delay can't stop a
                                              # timing-independent crouch-wait). stand_still rewards STANDING at 0.42
