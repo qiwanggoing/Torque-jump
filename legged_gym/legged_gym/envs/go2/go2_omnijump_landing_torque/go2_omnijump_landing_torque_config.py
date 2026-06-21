@@ -286,18 +286,16 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
         squat_gate_height = 0.24            # must dip base to <=0.24m (idle ~0.31) to unlock jump rewards
         successful_jump_min_peak_height = 0.40  # was 0.30: a ~0.34 "low pop" no longer counts as success
                                                 # (= command floor 0.40; kills the low-jump shortcut)
-        # Grade successful_jump by a LANDING-ACCURACY score (the landing env OVERRIDES the parent's
-        # velocity hook -- see _get_successful_jump_velocity_score there). Without this, successful_jump
-        # is pure binary x height and is DECOUPLED from the landing point -> the policy farms the dense
-        # in-flight projected_landing for AIM, then topples on touchdown (observed hit 0.84 but succ 0.59).
-        success_use_velocity_score = True   # STAGE 2: ON, via the landing-accuracy OVERRIDE (NOT the parent's
-                                            # velocity-tracking score, which is unit-wrong here: commands[0:2] are
-                                            # landing DISPLACEMENT (m), not m/s). The override returns a distance-
-                                            # normalized exp on touchdown xy vs target, so:
-                                            #   successful_jump = stay-upright(binary) x height_score x landing-accuracy
-                                            # -> the big completion bonus pays ONLY for landing ON the commanded point
-                                            # AND staying standing. COUPLES precision with stability (precise-but-topple
-                                            # -> 0 via the binary; stable-but-off-target -> low via the accuracy term).
+        # DECOUPLED from landing accuracy (False) -> successful_jump = stay-upright(binary) x height_score,
+        # a real FLOOR that pays for any clean jump to the commanded HEIGHT regardless of WHERE it lands.
+        # WHY: with True, successful_jump was multiplied by the landing-accuracy score (0.2+0.8*acc), so ALL
+        # three jump rewards (projected_landing, landing_position, successful_jump) collapsed together on a
+        # landing miss -> jumping went net-negative once the (weak real-Go2 actuator) couldn't hit far targets
+        # -> death-spiral collapse to NOT jumping (Jun21_11-08-21: best iter500, collapse iter1100). Decoupling
+        # gives jumping a floor so it stays worthwhile through accuracy dips. Landing accuracy is STILL rewarded
+        # by projected_landing + landing_position (separate). The old farm (aim in-flight, topple on touchdown)
+        # is still blocked by the upright binary (topple -> 0) + landing_position gated on real_jump.
+        success_use_velocity_score = False
         success_landing_min_score = 0.2     # floor on the landing-accuracy score: a stable but off-target jump still
                                             # earns 0.2*height (keeps stability rewarded while not yet on target); an
                                             # on-target stable jump earns the full height_score.
