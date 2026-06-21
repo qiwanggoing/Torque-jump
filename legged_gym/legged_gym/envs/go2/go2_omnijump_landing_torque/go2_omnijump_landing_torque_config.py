@@ -133,17 +133,6 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
         # (the current model never saw a clean 0/1 -> OOD in play).
         stand_command_value = 0.0
         jump_command_value = 1.0
-        # STAND-THEN-JUMP: a sampled jump first STANDS (cmd4=0) for first_jump_delay_steps, THEN cmd4 flips to
-        # jump_value and the jump triggers. Makes the pre-jump a real cmd4=0 stand (anchored by stand_still)
-        # instead of the old "cmd4=1 but trigger held" limbo, where the policy free-fell (feet up, body dropping
-        # 0.42->0.12) as its wind-up. The displacement/height TARGET stays visible during the stand so it can aim.
-        stand_before_jump = True
-        # RANDOM stand duration before the cmd4 0->1 flip (decouples stand from jump): the flip happens at a
-        # per-episode random step in [min, max], so the policy CANNOT time/predict the jump and therefore cannot
-        # pre-load via a free-fall -- it must hold a real stand and REACT when cmd4=1 actually arrives. min must
-        # be >= first_jump_delay_steps (55) so first_jump_ready is satisfied at the flip.
-        jump_arm_delay_min = 55
-        jump_arm_delay_max = 220
         # The moment the robot touches down, flip the jump command to STAND for the whole 0.75s landing
         # buffer (instead of holding cmd4=1 until the jump "finishes"). Without this the policy sees cmd4=1 +
         # the residual landing error during the buffer and HOPS to chase the undershot target. Verified in
@@ -275,11 +264,7 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
         squat_pose_threshold = 3.2          # was 2.8: EASED (stuck @ squatQ~0.48). "in the squat" = pose_err<=3.2, shallower from
                                             # standing (7.1). THE depth knob: stuck-not-jumping (can't fold
                                             # enough) -> RAISE; jumps too shallow / want a deeper load -> LOWER.
-        squat_hold_steps = 15               # 25 -> 15: EASED again for the STAND-THEN-JUMP design. The policy now
-                                            # must fold REACTIVELY after cmd4=1 (no free-fall pre-fold), so a long
-                                            # 25-step hold is hard to reach before takeoff -> a shorter dwell makes
-                                            # the reactive squat qualify, then the gated jump rewards unlock. jump
-                                            # chain unlocks only after the squat POSE is HELD within
+        squat_hold_steps = 25               # was 40 (0.2s) -> 25 (0.125s): EASED to unstick. jump chain unlocks only after the squat POSE is HELD within
                                             # squat_pose_threshold for this many CONSECUTIVE steps (= 0.2s at
                                             # sim dt 0.005s). Closes the "flick through the pose for one frame
                                             # and harvest the flight" hole. THE dwell knob: collapses to
@@ -316,13 +301,10 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
         success_landing_min_score = 0.2     # floor on the landing-accuracy score: a stable but off-target jump still
                                             # earns 0.2*height (keeps stability rewarded while not yet on target); an
                                             # on-target stable jump earns the full height_score.
-        # RE-GATE success on the squat (2026-06-20): peak>=0.40 does NOT guarantee a countermovement -- a
-        # no-squat pop (or a hop near standing) can reach it, so the 1000-weight successful_jump became a hole
-        # that pays for POPPING and architects-out the squat gate on every other reward. Now success ALSO
-        # requires _squat_deep_enough (squat held), so NO jump reward fires before a real squat -> the only
-        # path to reward is stance_squat -> squat -> jump. (succ_rate METRIC will oscillate under the flickery
-        # HOLD gate, but that's a reading artifact, not a learning problem -- watch dx_stable_cum/dx_max.)
-        success_requires_squat_qualified = True
+        # DECOUPLE success from the squat_qualified HOLD gate (which flickers under pure-torque noise ->
+        # made succ oscillate 0.01-0.89 while flight/peak were stable). peak>=0.40 already guarantees a
+        # real countermovement, so the gate is redundant FOR SUCCESS. It still gates the jump-REWARD chain.
+        success_requires_squat_qualified = False
         # RSI static deep-squat air-drop (the EXPLORATION piece): half the RSI envs start AT REST in the
         # deep squat + jumping, so value learns "deep-squat-at-rest = high return" (they're gate-exempt
         # and earn jump rewards from the dip). This plants V(dip) that the squat-depth gate then makes the
@@ -424,12 +406,10 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
             takeoff_direction = 0.0
             # ---- MERGED takeoff launch: velocity-VECTOR match (height + distance in one), replaces vertical-only ----
             takeoff_vertical_velocity = 0.0  # OFF: superseded by takeoff_velocity_match (which == it at dx=0)
-            takeoff_velocity_match = 22.0    # 15 -> 22: DISTANCE lever. earned only ~0.20 (low) while reach undershoots
-                                             # ~15-25% AND mean_peak is short too -> the LAUNCH is underpowered/under-
-                                             # aimed (vx below the ballistic v_req). Boosting this CAUSE-side driver
-                                             # pressures a stronger/more accurate launch. DIAGNOSTIC: if dx_max +
-                                             # mean_peak climb -> was reward-limited; if flat -> hit the Hill power
-                                             # ceiling (legs can't push faster), no further reward tuning helps.
+            takeoff_velocity_match = 15.0    # reward takeoff velocity matching the ballistic launch to (landing
+                                             # point + apex height). CAUSE-side "jump FAR and HIGH" driver — the
+                                             # closeness rewards can't push reach (diminishing returns at undershoot).
+                                             # = old takeoff_vz weight (15). At dx=0 it reduces to takeoff_vz (safe).
             # ---- structurally-inert rewards removed ----
             joint_angle_loaded = 0.0         # was 0.4: phase_loaded (jumping & ~taken_off & vz<=0) almost never
                                              # fires — the policy pre-squats during idle and pops straight up on
@@ -454,24 +434,10 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
                                              # complement to clean_landing for the post-touchdown shuffle (lifting a foot
                                              # in the settle now costs this). MODERATE: a big value also pays the pre-jump
                                              # STAND -> could make "don't jump" comfy (discovery risk). Watch jump_flight_rate.
-            stand_still = 2.5                # 5.0 -> 2.5: at 5.0 rew_stand_still~0.18 ~= rew_successful_jump 0.19 (and
-                                             # rose to 0.34 vs jump 0 in the dx0.6 collapse) -> standing out-earned
-                                             # jumping. USER PRINCIPLE: the pre-jump stand must pay LESS than a
-                                             # successful jump. 2.5 -> ~0.09 ~= HALF of successful_jump 0.19. Still
-                                             # enough to discourage the free-fall, but jumping clearly wins.
-                                             # RE-ACTIVATED (was dropped, then proven NEEDED): play showed the policy
-                                             # FREE-FALLS to a h0.11 crouch and WAITS there the whole cmd4=0 second
-                                             # (crouch = free squat-gate = pre-loaded jump; random delay can't stop a
-                                             # timing-independent crouch-wait). stand_still rewards STANDING at 0.42
-                                             # (feet planted + upright + still) during cmd4<=0.5 -> crouch-wait costs
-                                             # the reward -> forces a real stand, squat only after cmd4=1. Strong (3.0)
-                                             # to outweigh the pre-load convenience. DISCOVERY-SAFE: zeroed until
-                                             # general_scale>=stand_still_discovery_scale (inside the reward).
-            landing_stability = 5.0          # 1.0 -> 5.0: at weight 1.0 it earned ~0.003 (capture <1%) -> policy
-                                             # IGNORED it (chose distance, lands hot vx~1.3, bounces+coasts ~0.30m).
-                                             # 5.0 gives it teeth: rewards LOW base velocity during the landing buffer
-                                             # = absorb/stop on the spot. Watch dx doesn't drop (it rewards braking
-                                             # AFTER touchdown, not landing slow, so it shouldn't shorten the jump).
+            landing_stability = 1.0          # RE-ENABLED to BRAKE the landing momentum: per-step trace showed the
+                                             # robot lands at vx~1.3 m/s, bounces (all feet off, +0.06m) and coasts
+                                             # ~0.30m forward to a stop (the "post-landing slide"). This rewards LOW
+                                             # base velocity during the landing buffer -> absorb/stop on the spot.
             landing_stability_lin_sigma = 2.0  # loosen from default 0.25 (which floors at ~0 for vx~1.3 -> no gradient)
             landing_stability_ang_sigma = 1.0  # loosen from default 0.5
             # clean_landing REMOVED (ineffective: detector never armed -> reward ~0). Post-landing slide handled by
@@ -570,7 +536,6 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
             # inherited-active but missing from the parent's print list — surface them
             "rew_base_ang_vel_xy",   # (1) flight+landing roll/pitch ω damping — the anti-tumble lever
             "rew_landing_impact",    # (2) touchdown force-spike penalty — cushion vs slam
-            "rew_landing_stability", # (3) BRAKE landing momentum — watch it CLIMB (policy learning to stop on landing)
             "rew_pitch_level",       # pitch-specific tilt penalty — fix persistent nose-down
             "rew_tracking_angular_velocity",  # OmniNet yaw-rate damping (hold heading) — watch it stays < jump rewards
             "rew_dof_pos_limits",    # joint-limit penalty — watch it shrinks as the over-deep squat stops jamming

@@ -104,6 +104,12 @@ class GO2TorqueCfg(GO2RoughCfg):
         activation_process = True
         hill_model = True
         motor_fatigue = True
+        
+        # UnitreeActuator Go2HV T-N curve parameters
+        use_tn_curve = True
+        tn_knee_speed_ratio = 13.5 / 30.0   # X1 / X2
+        tn_max_speed_ratio = 1.0            # Use URDF velocity limits as X2
+        tn_peak_eccentric_ratio = 23.4 / 20.2 # Y2 / Y1
         action_scale = 5
         decimation = 1
 

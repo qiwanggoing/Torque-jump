@@ -233,10 +233,26 @@ class GO2Torque(LeggedRobot):
             torch.rand(self.num_envs, device=self.device).unsqueeze(1) > self.cfg.domain_rand.loss_rate,
             activation_sign, self.activation_sign)
 
-        # hill model
-        if self.cfg.control.hill_model:
+        # hill model (T-N curve)
+        if getattr(self.cfg.control, 'use_tn_curve', False) and self.cfg.control.hill_model:
+            X1 = self.dof_vel_limits * self.cfg.control.tn_knee_speed_ratio
+            X2 = self.dof_vel_limits * self.cfg.control.tn_max_speed_ratio
+            Y1 = torques_limits
+            Y2 = torques_limits * self.cfg.control.tn_peak_eccentric_ratio
+            
+            same_direction = (self.dof_vel * self.activation_sign) > 0
+            max_effort = torch.where(same_direction, Y1, Y2)
+            
+            vel_abs = self.dof_vel.abs()
+            k = -max_effort / (X2 - X1)
+            decay_effort = k * (vel_abs - X1) + max_effort
+            decay_effort = decay_effort.clip(min=0.0)
+            
+            max_effort = torch.where(vel_abs < X1, max_effort, decay_effort)
+            self.torques = self.activation_sign * max_effort
+        elif self.cfg.control.hill_model:
             self.torques = self.activation_sign * torques_limits * (
-                    1 - torch.sign(self.activation_sign) * self.dof_vel / self.dof_vel_limits)
+                1 - torch.sign(self.activation_sign) * self.dof_vel / self.dof_vel_limits)
         else:
             self.torques = self.activation_sign * torques_limits
 
@@ -312,12 +328,25 @@ class GO2Torque(LeggedRobot):
                 self.hip_indices.append(i)
             if 'thigh_joint' in name:
                 self.thigh_indices.append(i)
-        # torque_limits now come STRAIGHT from the official Go2 URDF (props["effort"], read in
-        # _process_dof_props): hip/thigh = 23.7 Nm, calf = 35.55 Nm. The calf is 1.5x stronger because the
-        # knee has a 1.5:1 reduction (same motor, geared down -> 1.5x torque, /1.5 speed). The old line here
-        # hardcoded a uniform 23.5 for all 12 joints, which threw away the calf's geared torque advantage
-        # (35.55 -> 23.5). Removing the override unifies the actuator model with the real hardware spec.
-        # self.torque_limits = torch.ones(self.num_dofs, device=self.device) * 23.5
+        # ===== Actuator base values = real Go2 drivetrain (reconciled from two official Unitree sources) =====
+        #   - unitree_rl_lab UnitreeActuatorCfg_Go2HV = the MOTOR torque-speed curve:
+        #       Y1=20.2Nm (concentric) Y2=23.4Nm (eccentric)  X1=13.5 (knee point) X2=30 rad/s (no-load).
+        #   - official unitree_ros URDF = the JOINT limits: hip/thigh 23.7Nm/30.1rad/s, calf 45.43Nm/15.70rad/s.
+        # They AGREE once you account for a knee reduction: 30.1/15.70 = 45.43/23.7 = 1.917 -> the Go2 KNEE has a
+        # ~1.917:1 reduction (calf joint = motor scaled: torque x1.917, speed /1.917). hip/thigh: no reduction.
+        # rl_lab applies the bare MOTOR curve to ALL joints (".*"), omitting the knee reduction -- fine for walking
+        # (knee never saturates) but WRONG for jumping (torque_diag shows the knee saturates at push-off). So we
+        # model it PER-JOINT. With the cfg.control ratios global (knee X1/X2=0.45, eccentric Y2/Y1=1.1584), set the
+        # base torque_limits (=Y1) and dof_vel_limits (=X2):
+        #   hip/thigh : Y1=20.2  X2=30.0   -> Y2=23.4  X1=13.5
+        #   calf      : Y1=38.7  X2=15.65  -> Y2=44.8  X1=7.04   (motor x/ 1.917; matches URDF calf 45.43/15.70)
+        # Changes the physics -> all policies must be retrained.
+        KNEE_REDUCTION = 1.917   # Go2 knee linkage (official unitree_ros URDF: 30.1/15.70 = 45.43/23.7)
+        calf_mask = torch.tensor(['calf' in n for n in self.dof_names], device=self.device)
+        self.torque_limits[:] = 20.2
+        self.dof_vel_limits[:] = 30.0
+        self.torque_limits[calf_mask] = 20.2 * KNEE_REDUCTION    # 38.7 Nm   (Y2 = 44.8 ~ URDF 45.43)
+        self.dof_vel_limits[calf_mask] = 30.0 / KNEE_REDUCTION   # 15.65 rad/s (~ URDF 15.70)
         rigid_body_state_tensor = self.gym.acquire_rigid_body_state_tensor(self.sim)
         self.rigid_body_states = gymtorch.wrap_tensor(rigid_body_state_tensor).view(self.num_envs, -1, 13)
         self.general_scale = 0

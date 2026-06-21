@@ -35,15 +35,8 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
         "takeoff_velocity_match",  # merged launch: takeoff velocity-vector match to (landing point + apex) — jump far+high
         "landing_stability", # ABSORB the landing: reward low base velocity during the landing buffer so the forward
                              # momentum (vx~1.3 at touchdown) is BRAKED, not bounced+coasted (the post-landing slide)
-        "stand_still",       # RE-ACTIVATED (was dropped in 1aec18d -- mistake): the random delay alone did NOT stop
-                             # the pre-jump free-fall. play showed the policy FREE-FALLS to a h0.11 crouch and WAITS
-                             # there the whole cmd4=0 window (the crouch satisfies the squat gate for free = a
-                             # pre-loaded jump, robust to the random flip time). stand_still rewards STANDING at
-                             # base_height_target (feet planted, upright, still) during cmd4<=0.5, making the
-                             # crouch-wait costly -> forces a real stand -> squat reactively only after cmd4=1.
-                             # cmd4-only gate + discovery-safe (general_scale>=stand_still_discovery_scale) inside.
-    }   # clean_landing REMOVED. Post-landing slide handled by landing_stability (brake momentum) +
-        # disable_jump_on_landing (no commanded re-jump); error obs is real-time (no obs-hold).
+    }   # clean_landing REMOVED (detector never armed -> ~0). Post-landing slide handled by landing_stability
+        # (brake momentum) + disable_jump_on_landing (no commanded re-jump); error obs is real-time (no obs-hold).
 
     # Curriculum gate table requires an entry for every active reward. Curriculum
     # is disabled (one-stage), so the stage value only needs to exist; 0 = active
@@ -60,7 +53,6 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
         "dof_pos_limits": 0,
         "takeoff_velocity_match": 0,   # active from step 1 (replaces takeoff_vertical_velocity)
         "landing_stability": 0,   # active from step 1 (override parent's stage 3, which never fires one-stage)
-        "stand_still": 0,         # whitelisted from step 1; the discovery-safe general_scale gate is inside the reward
     }   # clean_landing REMOVED (see whitelist note above)
 
     # ------------------------------------------------------------------ #
@@ -450,9 +442,7 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
         # NOTE: dense -> ~150x the old per-jump magnitude, so its WEIGHT was cut hard in config.
         min_peak = float(getattr(self.cfg.rewards, "landing_real_jump_min_peak", 0.40))
         real_jump = self.peak_base_height >= min_peak
-        # Gate on the squat too (not just peak>=0.40): otherwise a no-squat pop to peak 0.40 farms this
-        # reward without a countermovement -- the same hole that lets successful_jump be earned by popping.
-        active = self.landing.float() * real_jump.float() * self._squat_deep_enough().float()
+        active = self.landing.float() * real_jump.float()
         err = torch.sum(torch.square(self.landing_root_xy - self.landing_target[:, :2]), dim=1)
         return active * self._landing_kernel(err, "sigma_pos_landing", "sigma_pos_landing_norm")
 

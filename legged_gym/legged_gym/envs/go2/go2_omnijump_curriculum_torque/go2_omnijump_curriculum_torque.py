@@ -406,10 +406,6 @@ class GO2OmniJumpCurriculumTorque(GO2OmniJumpTorque):
             jump_command_inactive = self.commands[:, 4] <= float(self.cfg.commands.jump_command_threshold)
         else:
             jump_command_inactive = torch.ones(self.num_envs, dtype=torch.bool, device=self.device)
-        if self.cfg.commands.num_commands > 4:
-            # cmd4 is the SOLE jump/stand switch -- "no command" (stand) == cmd4 <= threshold; the displacement/
-            # height TARGET is irrelevant while standing.
-            return jump_command_inactive
         return (
             (torch.norm(self.commands[:, :3], dim=1) < 0.05)
             & (torch.abs(self.commands[:, 3]) < 0.05)
