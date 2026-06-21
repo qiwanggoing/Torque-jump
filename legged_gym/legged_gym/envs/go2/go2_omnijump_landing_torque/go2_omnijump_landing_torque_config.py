@@ -257,8 +257,6 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
         # "squatted" = whole-body joint pose within squat_pose_threshold (L1 over 12 joints) of the
         # loaded pose q_squat. Standing is ~7.1 rad from q_squat (calf -1.5->-2.66, thigh 0.8/1.0
         # ->1.53, hips unchanged); q_squat itself = 0. Drives stand->squat, then unlocks the jump.
-        default_pos_sigma = 0.5            # exp-kernel width for the default_pos REWARD = exp(-|dof - pd_target|/sigma),
-                                            # sum over 12 joints. Tighter -> standing pose earns high, a deviating jump ~0.
         squat_pose_sigma = 5.0              # exp kernel on |dof - q_squat| for the dip reward. Raised 3->5: the
                                             # pull from standing (7.1 rad away) is (1/sigma)*e^(-7.1/sigma), which
                                             # is ~55% stronger at 5 than 3 (peaks near sigma~7). default_pos no
@@ -464,14 +462,14 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
             joint_angle_prelanding = 0.0
             joint_angle_landing = 0.0
             # ---- post-PD pose-holding (rear legs drifted once PD faded to 0) ----
-            default_pos = 0.5               # CONVERTED penalty -> REWARD (was -1.0). As a penalty it was the DOMINANT
-                                             # term (-0.81/s = 57% of ALL penalties) and TAXED the jump (a jump deviates from
-                                             # the pose target) -> jumping net-negative -> policy collapsed to NOT jumping
-                                             # (Jun21 runs: best ~iter500, collapse iter700-1100). As a REWARD =
-                                             # exp(-|dof - pd_target| / default_pos_sigma): matching the (phase) pose EARNS,
-                                             # deviating (the jump) earns ~0 -> NO tax on jumping. Modest weight so the
-                                             # standing posture-reward stays below the jump rewards (won't make NOT-jumping
-                                             # comfortable). Still zeroed during push-off / squat-down.
+            default_pos = -0.5              # HALVED penalty (was -1.0). At -1.0 it was the DOMINANT term (-0.81/s =
+                                             # 57% of ALL penalties) and TAXED the jump (a jump deviates from the pose
+                                             # target) -> jumping net-negative -> policy collapsed to NOT jumping (Jun21
+                                             # runs: best ~iter500, collapse iter700-1100). Halving cuts the jump tax
+                                             # ~in half (-0.81 -> ~-0.4) so jumping stays net-positive, kept as a PENALTY
+                                             # (simpler than a reward; no standing-pose reward to make not-jumping comfy).
+                                             # Zeroed during push-off / squat-down. NOTE: memory says -0.7 once caused
+                                             # noise runaway -> watch noise_std; raise back if the anchor gets too loose.
             default_hip_pos = 1.0            # 0.3 -> 1.0: the policy slid the front feet INWARD (hip adduction) to shuffle
                                              # forward momentum (the stutter/run-up morphed into a SLIDE once the re-plant
                                              # termination forbade stepping). default_hip_pos keeps the 4 hip-abduction joints

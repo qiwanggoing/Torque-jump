@@ -465,21 +465,18 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
         return floor + (1.0 - floor) * score
 
     def _reward_default_pos(self):
-        # POSE ANCHOR as a REWARD (config weight is now POSITIVE), not a penalty. Diagnosis (Jun21 runs): as a
-        # PENALTY (return l1, weight -1.0) this was the DOMINANT term (-0.81/s = 57% of all penalties) and it
-        # TAXED the jump -- a jump must deviate from the pose target, so jumping went net-negative and the policy
-        # death-spiralled into NOT jumping (best ~iter500, collapse iter700-1100). Reformed as a REWARD: pay
-        # exp(-l1/sigma) for MATCHING the (phase) pose target -> holding posture EARNS, deviating (the jump) just
-        # earns ~0 (NO penalty -> no tax on jumping). Still zeroed during the ground push-off extension (legs must
-        # extend beyond q_ground to launch) and the squat-DOWN (mid-fold), so it only shapes the held phases.
-        # Modest weight (config) keeps the standing posture-reward below the jump rewards -> won't make
-        # not-jumping comfortable. Accuracy/height stay rewarded by projected_landing/landing_position/successful_jump.
+        # PENALTY on L1 pose deviation, but HALVED in config (-1.0 -> -0.5). Diagnosis (Jun21 runs): at -1.0 this
+        # was the DOMINANT term (-0.81/s = 57% of all penalties) and TAXED the jump (a jump must deviate from the
+        # pose target) -> jumping went net-negative -> policy death-spiralled into NOT jumping (best ~iter500,
+        # collapse iter700-1100). Halving the weight cuts the jump tax ~in half (-0.81 -> ~-0.4) so jumping stays
+        # net-positive, while keeping it a PENALTY (simpler than a reward; avoids a standing-pose reward that would
+        # make not-jumping comfortable). Still zeroed during the ground push-off extension (legs must extend beyond
+        # q_ground to launch) and the squat-DOWN (mid-fold). NOTE: memory says -0.7 once caused noise runaway --
+        # watch noise_std; raise back toward -0.7/-1.0 if the pose anchor gets too loose.
         l1 = torch.sum(torch.abs(self.dof_pos - self.default_joint_pd_target), dim=1)
-        sigma = float(getattr(self.cfg.rewards, "default_pos_sigma", 0.5))
-        pose_match = torch.exp(-l1 / max(sigma, 1e-3))
         pushoff = self.jumping_state & (~self.has_taken_off) & (self.root_states[:, 9] > 0.0)
         squat_down = self.jumping_state & (~self.has_taken_off) & (~self._squat_deep_enough())
-        return torch.where(pushoff | squat_down, torch.zeros_like(pose_match), pose_match)
+        return torch.where(pushoff | squat_down, torch.zeros_like(l1), l1)
 
     def _reward_foot_contact_sync(self):
         # Four-foot CONTACT-timing sync: all four feet should LEAVE the ground together at
