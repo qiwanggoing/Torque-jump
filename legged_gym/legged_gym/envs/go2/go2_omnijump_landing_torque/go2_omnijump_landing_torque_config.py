@@ -60,7 +60,12 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
         # config had no squat-qualified gate.) general_scale ramps 0->1 linearly warmup_steps->x0;
         # pd_alpha = 0.5*(1-general_scale). step_count ~= 69/iter.
         warmup_steps = 7000        # full PD only for the first ~iter100, then start fading.
-        x0 = 35000                 # linear-fade end -> pd_alpha=0 by ~iter500. (Proven config Jun09_19-29-38.)
+        x0 = 35000                 # pd_alpha=0 by ~iter500 (standard FAST fade). The PD-slow experiment (x0=70000)
+                                   # was BACKWARDS: it made the policy MORE PD-dependent and it crashed exactly when
+                                   # PD->0. And PD is NOT the cause -- the FAST-fade run was GOOD at iter600 with PD
+                                   # already 0 (pure torque, peak 0.55, hit 0.80), then DEGRADED. Early fade forces
+                                   # pure-torque adaptation (proven Jun09_19-29-38). The real cause = the reward give-up
+                                   # (all jump rewards tied to precise hit) -> addressed by forward_reach.
 
     class commands(GO2OmniJumpCurriculumTorqueCfg.commands):
         # Landing-point task: commands[0:2] repurposed velocity -> landing displacement (m).
@@ -274,6 +279,11 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
         # (0.2s) takeoff window — the dip would eat the budget and trip the timeout. 80 steps
         # = 0.4s. (step = sim dt 0.005s, counted on physics substeps, so freq-independent.)
         takeoff_timeout_steps = 200         # 1.0s: room for dip + push
+        grounded_grace_steps = 80           # MUST-LAUNCH grace (was 12 in base): the squat dip+hold (~50 steps)
+                                            # must finish BEFORE _reward_grounded_jump penalizes "still grounded",
+                                            # else it would punish the normal deep squat -> premature pop. 80 = a
+                                            # full squat-hold-launch fits inside; only DITHERING (no launch) past it
+                                            # is penalized. (timeout is 200, so penalty fires over steps 80-200.)
         # Squat-depth gate (countermovement) — REPLACES the failed time-window. successful_jump and
         # projected_peak are WITHHELD until this jump has dipped to <= squat_gate_height before
         # takeoff. So "don't dip" = no main rewards AT ALL (not just a 0.5s blackout) -> a real
@@ -365,6 +375,14 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
                                              # so the error term = wz^2 = damp spin during flight -> fixes the heading
                                              # drift. Kept WELL below the main jump rewards (peak25/vz15/landing20); it's
                                              # a stabilizer. Stage2: open commands[2] -> same term becomes turn-tracking.
+            forward_reach = 20.0             # NEW: distance-progressive EFFORT reward (see _reward_forward_reach). Rewards
+                                             # the projected FORWARD reach (absolute m, capped at the command) -> jumping
+                                             # FARTHER pays MORE + far command > near command, DECOUPLED from precise landing.
+                                             # Fixes the chronic give-up: once a far command is hard to HIT precisely, all the
+                                             # precision rewards go hit-or-miss and the policy abandons the big jump; this keeps a
+                                             # STABLE positive signal for trying-its-best/reaching-far so it never gives up. Strong
+                                             # (>= projected_peak 20) so DISTANCE outranks HEIGHT. TUNE vs precision rewards if it
+                                             # overshoots near commands or starves precision.
             projected_landing = 15.0         # 10 -> 15: BOOST. USER PRINCIPLE: jump-DISTANCE/accuracy rewards must OUTRANK jump-HEIGHT
                                              # rewards. After projected_peak 25->20, height earned ~0.60 (pp 0.38 + takeoff_vz 0.22) still
                                              # exceeded distance ~0.43 (landing_position + this), so raise the distance side above height.
@@ -396,6 +414,11 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
             # Removing it now makes the whole stack direction-general: switching to Stage2 = just open
             # the command ranges, zero reward surgery. Behaviour stays in-place while commands[0:2]=0.
             takeoff_direction = 0.0
+            # ---- MUST-LAUNCH: penalize "commanded to jump but still grounded after the squat window" ----
+            grounded_jump = 0.0              # DEACTIVATED: made it WORSE. The policy isn't "refusing" to jump --
+                                             # it physically can't push as hard once PD fades (a CAPABILITY problem,
+                                             # not motivation), so forcing a launch only produced worse weak jumps +
+                                             # extra penalty. The real lever is the PD-fade slowdown (growth.x0), below.
             # ---- MERGED takeoff launch: velocity-VECTOR match (height + distance in one), replaces vertical-only ----
             takeoff_vertical_velocity = 0.0  # OFF: superseded by takeoff_velocity_match (which == it at dx=0)
             takeoff_velocity_match = 15.0    # reward takeoff velocity matching the ballistic launch to (landing
@@ -548,7 +571,11 @@ class GO2OmniJumpLandingTorqueCfgPPO(GO2OmniJumpCurriculumTorqueCfgPPO):
     class algorithm(GO2OmniJumpCurriculumTorqueCfgPPO.algorithm):
         sym_coef = 1.0   # was 0.5: match my_go2_jump — tighter LEFT-RIGHT mirror symmetry
                          # (front-rear is handled by the pushoff_leg_sync reward, not sym_loss)
-        entropy_coef = 0.005   # START high for exploration; ANNEALS to entropy_coef_final=0.001 at iter2800.
+        entropy_coef = 0.001   # GLOBAL TIGHT (was 0.005-start + anneal): use the tight value everywhere to keep
+                               # action_std from running away from the start (the noise runaway was a recurring
+                               # collapse driver). init_noise_std=0.5 still gives early exploration to discover.
+                               # WATCH iter50-150: if squatQ/jflight don't rise, 0.001 was too low for discovery
+                               # (memory: constant 0.003 once got stuck) -> raise back toward 0.003. (anneal now moot.)
                                # Constant 0.005 (run Jun06_07-41-08) cracked the squat gate (squatQ->0.95) but then
                                # noise RAN AWAY to 1.33 -> degraded from iter3000, collapsed at 5400. Constant 0.003 was
                                # the opposite (noise 0.32 -> stuck). So: high early (discover/crack gate), low late
@@ -562,10 +589,12 @@ class GO2OmniJumpLandingTorqueCfgPPO(GO2OmniJumpCurriculumTorqueCfgPPO):
         checkpoint = -1
         resume_path = None
         max_iterations = 10000   # distance curriculum needs room: ~in-place discovery + 4 dx stages
-        # entropy_coef ANNEALS 0.005 -> 0.001 at iter2800 (re-enabled; "disable the anneal" was a misdiagnosis).
-        # Data: constant 0.005 (Jun06_07-41-08) cracked the gate then noise RAN AWAY (0.45->1.33) -> degraded@3000,
-        # collapsed@5400 as PD faded. Constant 0.003 -> noise 0.32 -> stuck. Neither constant works. The anneal is the
-        # answer: 0.005 early to discover + crack the squat-HOLD gate, drop to 0.001 at 2800 to LOCK IN the peak
-        # (squatQ 0.95 / peak 0.605 hit ~iter2500-2700) and prevent the late noise runaway / pure-torque collapse.
-        entropy_anneal_iter = 2800
+        # entropy_coef ANNEALS 0.005 -> 0.001 at entropy_anneal_iter (HARD STEP, on_policy_runner.py:129-133).
+        # MOVED 2800 -> 500 for the real-Go2 actuator. The 0.005 START is the ONLY force pushing action_std UP;
+        # with the weak real calf the precise squat-jump can't survive high noise, so noise_std running away
+        # (0.36 -> 0.6-0.87) crashed every run at iter700-1100 (squatQ -> 0, value_loss -> 0). 2800 was tuned for
+        # the OLD strong calf whose peak hit ~iter2500; the NEW calf cracks the squat gate by iter100 (squatQ 0.91)
+        # and noise bottoms at ~iter300, so anneal at 500 LOCKS the early peak (~0.58) and kills the runaway BEFORE
+        # it crosses ~0.55 and collapses the jump. (Raise to 600-800 if a fresh run discovers slower; data = iter100.)
+        entropy_anneal_iter = 500
         entropy_coef_final = 0.001

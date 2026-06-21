@@ -26,6 +26,7 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
     ACTIVE_REWARD_WHITELIST = GO2OmniJumpCurriculumTorque.ACTIVE_REWARD_WHITELIST | {
         "landing_position",
         "projected_landing",
+        "forward_reach",     # distance-progressive EFFORT reward (farther = more), decoupled from precise landing
         "foot_contact_sync",
         "stance_squat",
         "base_ang_vel_xy",   # landing stability: flight+landing roll/pitch ω damping
@@ -35,6 +36,8 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
         "takeoff_velocity_match",  # merged launch: takeoff velocity-vector match to (landing point + apex) — jump far+high
         "landing_stability", # ABSORB the landing: reward low base velocity during the landing buffer so the forward
                              # momentum (vx~1.3 at touchdown) is BRAKED, not bounced+coasted (the post-landing slide)
+        "grounded_jump",     # MUST-LAUNCH penalty (negative weight): close the retreat-to-not-jumping escape ->
+                             # force the policy to TRY ITS BEST to launch. Discovery-gated in _reward_grounded_jump.
     }   # clean_landing REMOVED (detector never armed -> ~0). Post-landing slide handled by landing_stability
         # (brake momentum) + disable_jump_on_landing (no commanded re-jump); error obs is real-time (no obs-hold).
 
@@ -45,6 +48,7 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
         **GO2OmniJumpCurriculumTorque.REWARD_START_STAGES,
         "landing_position": 1,
         "projected_landing": 1,
+        "forward_reach": 1,
         "foot_contact_sync": 0,
         "stance_squat": 0,
         "base_ang_vel_xy": 0,   # active from step 1 (curriculum disabled = one-stage)
@@ -53,6 +57,7 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
         "dof_pos_limits": 0,
         "takeoff_velocity_match": 0,   # active from step 1 (replaces takeoff_vertical_velocity)
         "landing_stability": 0,   # active from step 1 (override parent's stage 3, which never fires one-stage)
+        "grounded_jump": 0,   # stage 0; the real gate is the succ-EMA latch inside _reward_grounded_jump
     }   # clean_landing REMOVED (see whitelist note above)
 
     # ------------------------------------------------------------------ #
@@ -433,6 +438,32 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
         )
         return ascending.float() * match
 
+    def _reward_forward_reach(self):
+        # DISTANCE-PROGRESSIVE EFFORT reward, DECOUPLED from precise landing. Diagnosis: every jump reward
+        # (projected_landing/landing_position/takeoff_velocity_match/successful_jump) is tied to HITTING the exact
+        # point; once a far command is hard to hit precisely, all of them go hit-or-miss -> the policy loses a
+        # stable positive signal and ABANDONS the big jump (squatQ collapses) -> the chronic post-peak degradation.
+        # This rewards the projected FORWARD reach ALONG the commanded direction, by ABSOLUTE metres, capped at the
+        # command (no overshoot bonus): jumping FARTHER pays MORE, and a FAR command pays more than a near one ->
+        # the policy is ALWAYS rewarded for trying its best / reaching farther, even when it can't hit precisely,
+        # so it never gives up. Precise landing stays a separate BONUS. Same in-flight ballistics + height gate as
+        # projected_landing (farm-proof: a legs-tucked sprawl can't clear the height gate).
+        pz = self.root_states[:, 2]
+        min_h = float(getattr(self.cfg.rewards, "projected_landing_min_height", 0.40))
+        active = (self.airborne & (pz > min_h) & self._jump_commanded() & self._squat_deep_enough()).float()
+        g = 9.81
+        vz = self.root_states[:, 9]
+        h_land = self.env_origins[:, 2] + float(self.cfg.rewards.base_height_target)
+        disc = torch.clamp(vz * vz + 2.0 * g * (pz - h_land), min=0.0)
+        t_land = (vz + torch.sqrt(disc)) / g
+        proj_xy = self.root_states[:, :2] + self.root_states[:, 7:9] * t_land.unsqueeze(1)
+        reach_vec = proj_xy - self.takeoff_root_xy                      # projected reach from takeoff
+        cmd_vec = self.landing_target[:, :2] - self.takeoff_root_xy     # commanded displacement
+        cmd_dist = torch.norm(cmd_vec, dim=1)
+        cmd_dir = cmd_vec / cmd_dist.clamp(min=1e-3).unsqueeze(1)
+        reach_along = (reach_vec * cmd_dir).sum(dim=1)                  # signed reach along the command direction
+        return active * torch.minimum(reach_along.clamp(min=0.0), cmd_dist)
+
     def _reward_landing_position(self):
         # DENSE over the landing/settling phase (Atanassov 2025 'base position landing'), using the
         # FIXED touchdown xy (self.landing_root_xy, set at just_landed) so it cannot be farmed by
@@ -477,6 +508,25 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
         pushoff = self.jumping_state & (~self.has_taken_off) & (self.root_states[:, 9] > 0.0)
         squat_down = self.jumping_state & (~self.has_taken_off) & (~self._squat_deep_enough())
         return torch.where(pushoff | squat_down, torch.zeros_like(l1), l1)
+
+    def _reward_grounded_jump(self):
+        # MUST-LAUNCH penalty (landing override) -- CLOSE the "retreat to NOT jumping" escape. Diagnosis (Jun21
+        # runs): when the dx curriculum pushed past the actuator's physical reach, far jumps could not hit ->
+        # the jump went net-negative, so the policy DROPPED below the squat gate (shallow/no jump) where it earned
+        # nothing BUT also dodged the jump-motion penalties (default_pos/aerial_dof_acc/...). That "safe" no-cost
+        # retreat collapsed the whole (shared) policy. Goal of the task is to JUMP, so make NOT launching the worst
+        # option: once a jump is commanded and the squat window (grounded_grace_steps) has passed, penalize STILL
+        # being fully grounded (not taken off). The policy can no longer dither/not-commit -> it must TRY ITS BEST
+        # to launch (and the squat-gated jump rewards still favour a proper squat-jump over a bare pop).
+        # DISCOVERY-SAFE: gated on the succ-EMA latch (_takeoff_omega_on, same gate as clean_landing) so it never
+        # forces premature pops before the policy has learned the squat-jump.
+        if not getattr(self, "_takeoff_omega_on", False):
+            return torch.zeros(self.num_envs, device=self.device)
+        contact = self._get_contact_state()
+        all_feet_contact = torch.all(contact, dim=1)
+        grace_elapsed = self.jump_step_counter > self.cfg.rewards.grounded_grace_steps
+        stuck = self.jumping_state & (~self.has_taken_off) & grace_elapsed & all_feet_contact
+        return stuck.float() * (0.5 + self._get_height_progress())
 
     def _reward_foot_contact_sync(self):
         # Four-foot CONTACT-timing sync: all four feet should LEAVE the ground together at
