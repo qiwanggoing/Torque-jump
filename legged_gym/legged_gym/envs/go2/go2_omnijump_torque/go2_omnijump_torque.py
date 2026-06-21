@@ -854,13 +854,28 @@ class GO2OmniJumpTorque(GO2Torque):
         self.activation_sign = torch.where(
             torch.rand(self.num_envs, device=self.device).unsqueeze(1) > self.cfg.domain_rand.loss_rate,
             activation_sign,
-            self.activation_sign,
-        )
+            self.activation_sign,        )
 
-        if self.cfg.control.hill_model:
+        # hill model (T-N curve)
+        if getattr(self.cfg.control, 'use_tn_curve', False) and self.cfg.control.hill_model:
+            X1 = self.dof_vel_limits * self.cfg.control.tn_knee_speed_ratio
+            X2 = self.dof_vel_limits * self.cfg.control.tn_max_speed_ratio
+            Y1 = torques_limits
+            Y2 = torques_limits * self.cfg.control.tn_peak_eccentric_ratio
+            
+            same_direction = (self.dof_vel * self.activation_sign) > 0
+            max_effort = torch.where(same_direction, Y1, Y2)
+            
+            vel_abs = self.dof_vel.abs()
+            k = -max_effort / (X2 - X1)
+            decay_effort = k * (vel_abs - X1) + max_effort
+            decay_effort = decay_effort.clip(min=0.0)
+            
+            max_effort = torch.where(vel_abs < X1, max_effort, decay_effort)
+            self.torques = self.activation_sign * max_effort
+        elif self.cfg.control.hill_model:
             self.torques = self.activation_sign * torques_limits * (
-                1 - torch.sign(self.activation_sign) * self.dof_vel / self.dof_vel_limits
-            )
+                1 - torch.sign(self.activation_sign) * self.dof_vel / self.dof_vel_limits)
         else:
             self.torques = self.activation_sign * torques_limits
         self.torques = torch.clip(self.torques, -torques_limits, torques_limits)
