@@ -257,6 +257,8 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
         # "squatted" = whole-body joint pose within squat_pose_threshold (L1 over 12 joints) of the
         # loaded pose q_squat. Standing is ~7.1 rad from q_squat (calf -1.5->-2.66, thigh 0.8/1.0
         # ->1.53, hips unchanged); q_squat itself = 0. Drives stand->squat, then unlocks the jump.
+        default_pos_sigma = 0.5            # exp-kernel width for the default_pos REWARD = exp(-|dof - pd_target|/sigma),
+                                            # sum over 12 joints. Tighter -> standing pose earns high, a deviating jump ~0.
         squat_pose_sigma = 5.0              # exp kernel on |dof - q_squat| for the dip reward. Raised 3->5: the
                                             # pull from standing (7.1 rad away) is (1/sigma)*e^(-7.1/sigma), which
                                             # is ~55% stronger at 5 than 3 (peaks near sigma~7). default_pos no
@@ -286,16 +288,10 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
         squat_gate_height = 0.24            # must dip base to <=0.24m (idle ~0.31) to unlock jump rewards
         successful_jump_min_peak_height = 0.40  # was 0.30: a ~0.34 "low pop" no longer counts as success
                                                 # (= command floor 0.40; kills the low-jump shortcut)
-        # DECOUPLED from landing accuracy (False) -> successful_jump = stay-upright(binary) x height_score,
-        # a real FLOOR that pays for any clean jump to the commanded HEIGHT regardless of WHERE it lands.
-        # WHY: with True, successful_jump was multiplied by the landing-accuracy score (0.2+0.8*acc), so ALL
-        # three jump rewards (projected_landing, landing_position, successful_jump) collapsed together on a
-        # landing miss -> jumping went net-negative once the (weak real-Go2 actuator) couldn't hit far targets
-        # -> death-spiral collapse to NOT jumping (Jun21_11-08-21: best iter500, collapse iter1100). Decoupling
-        # gives jumping a floor so it stays worthwhile through accuracy dips. Landing accuracy is STILL rewarded
-        # by projected_landing + landing_position (separate). The old farm (aim in-flight, topple on touchdown)
-        # is still blocked by the upright binary (topple -> 0) + landing_position gated on real_jump.
-        success_use_velocity_score = False
+        # REVERTED to True (the decouple test did NOT fix the collapse -- root was default_pos taxing the jump,
+        # now fixed by converting default_pos to a reward). Back to the baseline: successful_jump =
+        # stay-upright(binary) x height_score x landing-accuracy (couples precision with stability).
+        success_use_velocity_score = True
         success_landing_min_score = 0.2     # floor on the landing-accuracy score: a stable but off-target jump still
                                             # earns 0.2*height (keeps stability rewarded while not yet on target); an
                                             # on-target stable jump earns the full height_score.
@@ -457,12 +453,10 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
             # ---- general joint-accel smoothness: REDUCED (overrides inherited -2.5e-7). It competes with the
             #      explosive pure-torque pushoff; halving frees the jump. aerial_dof_acc kept at -3e-6 (unchanged, per call).
             dof_acc = -1.25e-7
-            # ---- action_rate: TURNED OFF (0.0) to isolate it. At -0.03 the policy degraded HARD over training
-            #      (Jun21_03-02-15: best at iter600 peak0.55/hit0.80/fwd0.77, then collapsed iter2000 and recovered
-            #      only to a WEAKER basin peak0.41 -- the rew_action_rate penalty fell -0.108->-0.017 as the policy
-            #      smoothed away the explosive push-off burst). Single-variable test: off -> does the strong iter600
-            #      jump survive to convergence? If yes (and it fidgets), re-add it PHASE-GATED (off during push-off).
-            action_rate = 0.0
+            # ---- action_rate: RESTORED to -0.03 (the off=0.0 test confirmed action_rate was NOT the collapse cause
+            #      -- it still collapsed at 0). Back to -0.03 for anti-fidget. (Root cause was default_pos taxing the
+            #      jump -> now fixed by converting default_pos to a reward.) Phase-gate later if it damps the burst.
+            action_rate = -0.03
             # ---- pose-shaping joint_angle_* REMOVED (cleanup, audit): each earned ~0 (robot never reached
             #      q_air/q_pre/q_ground) = dead weight. Landing ATTITUDE now held by orientation + foot_contact_sync
             #      (strengthened below); landing-POINT by projected_landing + landing_position (kept / revived).
@@ -470,15 +464,14 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
             joint_angle_prelanding = 0.0
             joint_angle_landing = 0.0
             # ---- post-PD pose-holding (rear legs drifted once PD faded to 0) ----
-            default_pos = -1.0               # back to -1.0 (the -0.7 RELAX destabilized: run Jun09_17-35-42 had noise runaway
-                                             # to 0.66 + succ oscillating 0.46, same loosen-the-anchor failure as e6bd00f's
-                                             # -0.5->-0.25). Anchor must stay tight. Height is pushed via projected_peak ONLY
-                                             # now (isolated), not by loosening the policy. RESTORED from -0.25 originally; the
-                                             # -0.25 (cleanup) removed the dominant pose
-                                             # anchor -> looser, higher-variance policy (noise_std ~0.84 vs ~0.55) and
-                                             # deterministic play idled/landed in a deep crouch (base_z~0.149). That
-                                             # sustained high noise is what tipped the iter~2475 collapse. (zeroed
-                                             # during push-off so it doesn't fight the jump.)
+            default_pos = 0.5               # CONVERTED penalty -> REWARD (was -1.0). As a penalty it was the DOMINANT
+                                             # term (-0.81/s = 57% of ALL penalties) and TAXED the jump (a jump deviates from
+                                             # the pose target) -> jumping net-negative -> policy collapsed to NOT jumping
+                                             # (Jun21 runs: best ~iter500, collapse iter700-1100). As a REWARD =
+                                             # exp(-|dof - pd_target| / default_pos_sigma): matching the (phase) pose EARNS,
+                                             # deviating (the jump) earns ~0 -> NO tax on jumping. Modest weight so the
+                                             # standing posture-reward stays below the jump rewards (won't make NOT-jumping
+                                             # comfortable). Still zeroed during push-off / squat-down.
             default_hip_pos = 1.0            # 0.3 -> 1.0: the policy slid the front feet INWARD (hip adduction) to shuffle
                                              # forward momentum (the stutter/run-up morphed into a SLIDE once the re-plant
                                              # termination forbade stepping). default_hip_pos keeps the 4 hip-abduction joints
