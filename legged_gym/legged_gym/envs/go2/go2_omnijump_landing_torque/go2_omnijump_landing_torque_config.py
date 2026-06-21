@@ -459,11 +459,12 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
             # ---- general joint-accel smoothness: REDUCED (overrides inherited -2.5e-7). It competes with the
             #      explosive pure-torque pushoff; halving frees the jump. aerial_dof_acc kept at -3e-6 (unchanged, per call).
             dof_acc = -1.25e-7
-            # ---- action_rate: RESTORED -0.001 -> -0.03 (the curriculum value, which did NOT fidget). The weak
-            #      -0.001 freed the takeoff burst but let the policy twitch while standing & fidget post-landing.
-            #      -0.03 is the anti-twitch lever; it CAN damp the burst -> watch peak/distance with the new (real
-            #      Go2) actuator, and gate it per-phase (off during push-off) later if it chokes the jump.
-            action_rate = -0.03
+            # ---- action_rate: TURNED OFF (0.0) to isolate it. At -0.03 the policy degraded HARD over training
+            #      (Jun21_03-02-15: best at iter600 peak0.55/hit0.80/fwd0.77, then collapsed iter2000 and recovered
+            #      only to a WEAKER basin peak0.41 -- the rew_action_rate penalty fell -0.108->-0.017 as the policy
+            #      smoothed away the explosive push-off burst). Single-variable test: off -> does the strong iter600
+            #      jump survive to convergence? If yes (and it fidgets), re-add it PHASE-GATED (off during push-off).
+            action_rate = 0.0
             # ---- pose-shaping joint_angle_* REMOVED (cleanup, audit): each earned ~0 (robot never reached
             #      q_air/q_pre/q_ground) = dead weight. Landing ATTITUDE now held by orientation + foot_contact_sync
             #      (strengthened below); landing-POINT by projected_landing + landing_position (kept / revived).
