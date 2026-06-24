@@ -38,6 +38,9 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
                              # momentum (vx~1.3 at touchdown) is BRAKED, not bounced+coasted (the post-landing slide)
         "grounded_jump",     # MUST-LAUNCH penalty (negative weight): close the retreat-to-not-jumping escape ->
                              # force the policy to TRY ITS BEST to launch. Discovery-gated in _reward_grounded_jump.
+        "four_leg_push",     # SYNC FOUR-LEG PUSH: reward EVEN vertical-GRF across the 4 feet during push so the
+                             # idle rear legs (torque_diag: rear thigh ~0.24 throttle vs front ~0.93) pull their
+                             # weight -> more total impulse -> farther. Discovery-gated in _reward_four_leg_push.
     }   # clean_landing REMOVED (detector never armed -> ~0). Post-landing slide handled by landing_stability
         # (brake momentum) + disable_jump_on_landing (no commanded re-jump); error obs is real-time (no obs-hold).
 
@@ -49,6 +52,7 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
         "landing_position": 1,
         "projected_landing": 1,
         "forward_reach": 1,
+        "four_leg_push": 1,
         "foot_contact_sync": 0,
         "stance_squat": 0,
         "base_ang_vel_xy": 0,   # active from step 1 (curriculum disabled = one-stage)
@@ -204,6 +208,9 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
         self.extras["episode"]["landing_farband_n"] = far_n
         self.extras["episode"]["landing_farband_hit"] = far_hit
         self.extras["episode"]["landing_stable_hit_rate"] = far_hit / torch.clamp(far_n, min=1.0)  # per-batch (noisy) — diagnostic only
+        # REAL curriculum state (curriculum_pd_prior is unreliable): general_scale ramps 0->1 (warmup->x0),
+        # pd_alpha = 0.5*(1-general_scale). Watch this to SEE when PD actually fades (target: 1.0 by ~iter1200).
+        self.extras["episode"]["curriculum_general_scale"] = torch.tensor(float(self.general_scale), device=self.device)
 
     def _update_dx_curriculum(self):
         # Advance the forward dx range ONLY once the policy has TRULY mastered the far end of the
@@ -236,7 +243,9 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
         self.extras["episode"]["landing_dx_max"] = torch.tensor(self.landing_dx_max, dtype=torch.float, device=self.device)
         self.extras["episode"]["landing_dx_stable_cum"] = torch.tensor(cum_rate, dtype=torch.float, device=self.device)
         self.extras["episode"]["landing_dx_farsamples"] = torch.tensor(self._far_n_sum, dtype=torch.float, device=self.device)
-        # Advance gate: enough SUSTAINED far-band samples AND cumulative rate cleared.
+        step = float(getattr(self.cfg.commands, "landing_dx_step", 0.10))
+        # Advance gate: enough SUSTAINED far-band samples AND cumulative rate cleared. (Jun23_01-23-30 baseline:
+        # ADVANCE-ONLY -- no revert/back-off; the curriculum self-limits by NOT advancing when the far band isn't hit.)
         if self.landing_dx_max >= dx_final - 1e-6:
             return
         min_samples = float(getattr(self.cfg.commands, "landing_dx_min_far_samples", 150))
@@ -249,7 +258,6 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
             # drag the average below thr and the gate stays stuck at dx_max=0 forever even after the
             # policy masters in-place: observed farsamples~950k, cum 0.26 while per-batch hit 0.93.)
             if cum_rate >= thr:
-                step = float(getattr(self.cfg.commands, "landing_dx_step", 0.10))
                 self.landing_dx_max = min(self.landing_dx_max + step, dx_final)
                 self.command_ranges["lin_vel_x"] = [0.0, self.landing_dx_max]
                 self._dx_last_advance_step = int(self.common_step_counter)  # re-adapt at the new distance
@@ -464,6 +472,32 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
         reach_along = (reach_vec * cmd_dir).sum(dim=1)                  # signed reach along the command direction
         return active * torch.minimum(reach_along.clamp(min=0.0), cmd_dist)
 
+    def _reward_four_leg_push(self):
+        # WAKE THE IDLE LEGS WITHOUT forcing front==rear. torque_diag: the push is FRONT-loaded (front thighs
+        # ~0.7-0.93 throttle) while the REAR thighs idle at ~0.3 -> wasted impulse -> shorter jump. But a forward
+        # jump is biomechanically REAR-DRIVEN and the takeoff is STAGGERED (front lifts first), so we must NOT
+        # force the four legs to push equally/together. Instead: each ON-GROUND leg is rewarded for pushing up to
+        # `target` vertical GRF (saturates at target -> surplus is FREE = no front==rear constraint, rear may
+        # dominate); a leg that has already LIFTED OFF (front-first takeoff) is EXCLUDED from the mean, not
+        # penalized. An idle leg that is STILL on the ground (low GRF) drags the mean down -> the policy must push
+        # it -> extracts the idle rear-thigh capacity (the hip is NOT velocity-limited, unlike the calf). Total
+        # push MAGNITUDE stays driven by projected_peak / takeoff_velocity_match; THIS only stops legs idling.
+        # DISCOVERY-SAFE GATES (push-off has crashed discovery before): succ-latch (_takeoff_omega_on) + push
+        # phase + a real squat + a MEANINGFUL total force (> floor, above body weight = the actual push, not the
+        # static squat-load where legs merely bear weight).
+        if not getattr(self, "_takeoff_omega_on", False):
+            return torch.zeros(self.num_envs, device=self.device)
+        contact = self._get_contact_state()
+        fz = torch.clamp(self.contact_forces[:, self.feet_indices, 2], min=0.0)      # (N,4) vertical GRF per foot
+        total = fz.sum(dim=1)
+        floor = float(getattr(self.cfg.rewards, "four_leg_push_force_floor", 200.0))  # > body weight = a real push
+        active = self.jumping_state & (~self.has_taken_off) & self._squat_deep_enough() & (total > floor)
+        target = float(getattr(self.cfg.rewards, "four_leg_push_force_target", 90.0))  # per-leg "contributing" force
+        per_leg = torch.clamp(fz / target, 0.0, 1.0)                                  # each leg saturates at target
+        in_contact = contact.float()
+        graded = (per_leg * in_contact).sum(dim=1) / in_contact.sum(dim=1).clamp(min=1.0)  # mean over ON-GROUND legs
+        return active.float() * graded
+
     def _reward_landing_position(self):
         # DENSE over the landing/settling phase (Atanassov 2025 'base position landing'), using the
         # FIXED touchdown xy (self.landing_root_xy, set at just_landed) so it cannot be farmed by
@@ -478,21 +512,20 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
         return active * self._landing_kernel(err, "sigma_pos_landing", "sigma_pos_landing_norm")
 
     def _get_successful_jump_velocity_score(self):
-        # LANDING-TASK OVERRIDE of the parent's success grading hook. The parent compares the average
-        # FLIGHT VELOCITY (m/s) to commands[0:2] -- but here commands[0:2] are landing DISPLACEMENT (m),
-        # so that score is unit-wrong (the bug that forced success_use_velocity_score=False). Instead
-        # return a LANDING-ACCURACY score on the recorded touchdown xy, reusing the SAME distance-
-        # normalized kernel as landing_position. The base then forms
-        #     successful_jump = stay-upright(binary) x height_score x THIS
-        # so the big completion bonus is paid ONLY for a jump that lands ON the commanded point AND
-        # stays standing -- COUPLING precision with stability. A precise-but-topple jump scores 0 (the
-        # binary), a stable-but-off-target jump scores low (this term, down to the floor). Kills the
-        # farm where the policy banked the dense in-flight projected_landing for good AIM, then toppled
-        # on touchdown (observed: hit 0.84 but succ 0.59). landing_root_xy is set at just_landed, one
-        # line before the base reads this score, so it is the fresh touchdown position.
+        # DECOUPLED from the landing point (user, WITH clean_takeoff_terminate ON): successful_jump =
+        # upright(binary) x height_score x THIS, and THIS returns ~1.0 for ANY clean stable jump regardless of
+        # WHERE it lands. WHY: clean_takeoff_terminate forbids the re-plant, so if the bonus is COUPLED (paid only
+        # when you land ON the far target), the ONLY way to earn it at an OVER-REACH command is a momentum-building
+        # STUTTER-STEP -- which clean_takeoff then TERMINATES -> the expected ~1000 collapses to 0 -> the TD-error
+        # blew the critic (value_loss 1.96 @iter716, Jun23_01-23-30) and destroyed the policy. Decoupled, a CLEAN
+        # jump that falls SHORT still earns the bonus -> the policy is content to land short CLEANLY instead of
+        # stutter-stepping -> graceful PLATEAU at the clean-jump reach, no crash. Accuracy stays driven by
+        # landing_position/projected_landing. success_landing_min_score=1.0 fully decouples; lower (<1) to re-fold.
+        floor = float(getattr(self.cfg.rewards, "success_landing_min_score", 1.0))
+        if floor >= 1.0:
+            return torch.ones(self.num_envs, device=self.device)
         err = torch.sum(torch.square(self.landing_root_xy - self.landing_target[:, :2]), dim=1)
         score = self._landing_kernel(err, "sigma_pos_landing", "sigma_pos_landing_norm")
-        floor = float(getattr(self.cfg.rewards, "success_landing_min_score", 0.2))
         return floor + (1.0 - floor) * score
 
     def _reward_default_pos(self):
@@ -529,23 +562,19 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
         return stuck.float() * (0.5 + self._get_height_progress())
 
     def _reward_foot_contact_sync(self):
-        # Four-foot CONTACT-timing sync: all four feet should LEAVE the ground together at
-        # takeoff and TOUCH DOWN together at landing. Staggered contact (1-3 feet on the
-        # ground = "mixed") at those transitions tilts the body (pitch/roll).
-        #
-        # Implemented as a PENALTY on the mixed state (returns 1 when 1-3 feet touch, 0 when
-        # all-same = all-off or all-on); used with a NEGATIVE weight. A penalty shapes cleanly
-        # (0 when synced) whereas a positive "all-together" reward is saturated at 1 most of
-        # the time and barely shapes. Active in the ground-transition windows only:
-        #   - pre-takeoff push (jumping & not yet taken off) -> catches staggered LIFT-OFF;
-        #   - landing buffer (self.landing) -> catches staggered TOUCH-DOWN.
-        # Direction-agnostic (no straight gate): a forward Stage-2 jump also wants a clean
-        # simultaneous takeoff/landing.
+        # LEFT-RIGHT contact-timing sync ONLY (was four-foot sync). The takeoff/landing should be
+        # left-right symmetric, but FRONT-REAR may STAGGER: the front feet may LIFT FIRST and the rear
+        # feet push off LAST (the natural animal long-jump "rolling" takeoff). The old four-foot version
+        # penalized ANY 1-3-feet-on state, which forbade that stagger (front-pair-off / rear-pair-on
+        # looks "mixed") and forced a flat simultaneous takeoff. Now penalize only a LEFT vs RIGHT
+        # mismatch WITHIN the front pair (FL!=FR) and WITHIN the rear pair (RL!=RR) -- a front-off /
+        # rear-on state is left-right clean -> NOT penalized. Feet order [FL,FR,RL,RR] (idx 0,1 front
+        # pair; 2,3 rear pair), per _reward_left_right_contact_sync. Penalty form (negative weight) ->
+        # 0 when both pairs are L-R synced. Active in the push + landing-buffer transition windows.
         contact = self._get_contact_state()
-        num = contact.sum(dim=1)
-        mixed = ((num > 0) & (num < 4)).float()
+        lr_stagger = (contact[:, 0] != contact[:, 1]).float() + (contact[:, 2] != contact[:, 3]).float()
         active = (self.jumping_state & (~self.has_taken_off)) | self.landing
-        return active.float() * mixed
+        return active.float() * 0.5 * lr_stagger        # [0,1]: 0 = both pairs L-R synced, 1 = both staggered
 
     def _reward_stance_squat(self):
         # Pose-guided countermovement (GUIDE to the target, don't block cheats). The earlier
@@ -580,7 +609,13 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
         # sitting at ~0). It penalizes rotation RATE, not airborne time, so a CLEAN high jump (w~=0)
         # pays nothing -> it does not bias toward shorter/lower jumps. yaw (w_z) is excluded because it
         # may be commanded in Stage 2.
-        ang_vel_sq = torch.sum(torch.square(self.base_ang_vel[:, :2]), dim=1)
+        # ONE-SIDED pitch rate (user): roll stays symmetric (any roll is bad), but the PITCH rate is penalized
+        # only in the NOSE-DOWN direction (base_ang_vel[:,1] < 0 = nose-down spin). The nose-UP launch rotation
+        # (rear-hip-driven) is FREE -> unlocks the pitch-gated rear-hip potential without imparting a forward
+        # face-plant spin. (nose-down: projected_gravity[0]>0 AND base_ang_vel[1]<0, confirmed in torque_diag.)
+        roll_sq = torch.square(self.base_ang_vel[:, 0])
+        nose_down_rate = torch.square(torch.clamp(-self.base_ang_vel[:, 1], min=0.0))
+        ang_vel_sq = roll_sq + nose_down_rate
         if getattr(self, "_takeoff_omega_on", False):
             # POST-DISCOVERY (succ_rate gate latched): ALSO penalize ω during the PUSH/extension (where the
             # nose-down spin is IMPARTED -- it can't be undone in flight) and apply a STRONGER weight, so the
@@ -612,26 +647,21 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
         # asymmetric front/rear push is what pitches the body, this also pressures a symmetric push.
         # Local to the landing task -> leaves the shared _reward_orientation untouched; stacks on top
         # of it so pitch ends up weighted more than roll. yaw/roll unaffected.
-        active = self.jumping_state.float()
-        pitch_tilt = torch.square(self.projected_gravity[:, 0])
-        # LANDING-FOCUSED leveling: the whole-cycle term above is diluted by the long level cruise, and a
-        # nose-down touchdown (front-feet-first -> tumble) ends the episode fast -> that brief-but-FATAL
-        # moment barely registers in the time-average, so there's almost no pressure exactly where it matters.
-        # Pile an EXTRA pitch penalty on prelanding+landing so the body arrives & lands PARALLEL to the ground
-        # (all four feet together). prelanding (the descent) accrues steps BEFORE a tumble can end the episode,
-        # so this pressure actually lands. Symmetric (pushes toward LEVEL), not directional.
+        # ONE-SIDED pitch (user): the launch may rotate NOSE-UP (抬头, the rear-hip-driven launch arc / long-jump
+        # back-tilt) FREELY, but NOSE-DOWN (低头/前栽, the face-plant) is penalized. torque_diag showed the rear
+        # HIP sits at ~27% utilization (73% headroom) while the body is already at tilt 0.30 (75% of the 0.40
+        # fallover) -> the rear-hip potential is PITCH-gated. A symmetric square(pitch) forbade the nose-UP rotation
+        # that a rear-driven launch needs, capping reach. So: penalize only nose-down; allow nose-up.
+        pg = self.projected_gravity[:, 0]                       # >0 = nose-DOWN (前栽), <0 = nose-UP (抬头)
+        nose_down = torch.square(torch.clamp(pg, min=0.0))      # one-sided: nose-up -> 0 (free)
+        level = torch.square(pg)                                # symmetric (for a flat/level touchdown)
+        # (1) whole jump cycle: forbid nose-DOWN, ALLOW nose-up.
+        r = self.jumping_state.float() * nose_down
+        # (2) LANDING: want LEVEL for a flat 4-foot touchdown -> SYMMETRIC (nose-up also bad at touchdown).
         land = (self.prelanding | self.landing).float()
-        extra = float(getattr(self.cfg.rewards, "landing_pitch_extra", 5.0))
-        r = active * pitch_tilt + extra * land * pitch_tilt
-        # AIR+LANDING leveling (was ALL-PHASE): keep the body level THROUGH THE AIR and at touchdown, but FREE
-        # the load/push. A torque_diag of the stuck dx=1.0 policy showed the calves + FRONT thighs flooring it
-        # (throttle 1.0, joint-vel at the Hill limit) while the REAR thighs sat at ~35% -- the rear-HIP push (the
-        # main forward propulsion, which necessarily PITCHES the body) was being suppressed by penalizing pitch
-        # during the push. So the all-phase term capped reach by forbidding the very push that reaches far.
-        # Restrict the strong term to airborne|prelanding|landing -> the push may pitch (rear hips engage ->
-        # reach), and the body must still be level once airborne and at touchdown (where it matters; the mild
-        # ×1 whole-cycle term above + takeoff_omega still gently shape the push). Gated on the succ-latch.
+        r = r + float(getattr(self.cfg.rewards, "landing_pitch_extra", 5.0)) * land * level
+        # (3) post-discovery strong AIR leveling: AIRBORNE flight only -> one-sided (allow the nose-up launch arc;
+        # the symmetric landing term (2) handles the flat touchdown). Gated on the succ-latch.
         if getattr(self, "_takeoff_omega_on", False):
-            air = (self.airborne | self.prelanding | self.landing).float()
-            r = r + float(getattr(self.cfg.rewards, "jump_pitch_extra", 12.0)) * air * pitch_tilt
+            r = r + float(getattr(self.cfg.rewards, "jump_pitch_extra", 12.0)) * self.airborne.float() * nose_down
         return r

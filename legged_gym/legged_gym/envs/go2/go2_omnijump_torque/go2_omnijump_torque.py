@@ -663,6 +663,15 @@ class GO2OmniJumpTorque(GO2Torque):
             success_at_impact = self.just_landed & real_jump & jump_height_commanded
             if getattr(self.cfg.rewards, "success_requires_squat_qualified", True):
                 success_at_impact = success_at_impact & self._squat_deep_enough()
+            # CLEAN-TAKEOFF confiscation, now targeted at ONLY this sparse completion bonus (Option A): a jump
+            # that stutter-stepped / re-planted a foot during the load (jump_replant is latched at line ~532
+            # and persists through takeoff+flight to landing) FORFEITS the successful_jump bonus. The DENSE
+            # in-flight shaping rewards (projected_peak/projected_landing/forward_reach/takeoff_velocity_match/
+            # all_feet_airborne) are NO LONGER withheld on replant (see _squat_deep_enough) -> the policy keeps
+            # its stable learning signal -> no death spiral. Active only after clean_takeoff_min_step.
+            if getattr(self.cfg.rewards, "clean_takeoff_terminate", False) and \
+               self.common_step_counter >= int(getattr(self.cfg.rewards, "clean_takeoff_min_step", 60000)):
+                success_at_impact = success_at_impact & (~self.jump_replant)
             self.pending_success |= success_at_impact
 
             # cmd-aware Gaussian height score: penalize both overshoot and undershoot
@@ -928,8 +937,7 @@ class GO2OmniJumpTorque(GO2Torque):
         # fire only AFTER discovery (clean_takeoff_min_step): early failed pushes also re-plant, and the
         # stutter only emerges much later, so the gate never blocks discovery. Off by default (other tasks).
         if getattr(self.cfg.rewards, "clean_takeoff_terminate", False):
-            if self.common_step_counter >= int(getattr(self.cfg.rewards, "clean_takeoff_min_step", 60000)):
-                self.reset_buf |= self.jump_replant
+            pass # Replaced by reward gate in _squat_deep_enough to prevent value function explosion
         # PITCH/TILT TERMINATION (hard, user request): the soft pitch penalties got traded off and the body
         # still descends/lands NOSE-DOWN (front-feet-first, topple risk). End the episode if the base pitches
         # nose-down beyond a hard limit during the descent/landing -> "stay level into touchdown" becomes
@@ -1029,8 +1037,16 @@ class GO2OmniJumpTorque(GO2Torque):
         # threshold<=0 -> always True (gate off; default, other tasks unaffected).
         thr = float(getattr(self.cfg.rewards, "squat_pose_threshold", 0.0))
         if thr <= 0.0:
-            return torch.ones_like(self.jumping_state)
-        return self.rsi_episode_mask | self.squat_qualified
+            gate = torch.ones_like(self.jumping_state)
+        else:
+            gate = self.rsi_episode_mask | self.squat_qualified
+        # Clean-takeoff (jump_replant) is NO LONGER withheld here. Gating the DENSE shaping rewards
+        # (projected_peak/projected_landing/forward_reach/takeoff_velocity_match/all_feet_airborne) on
+        # jump_replant zeroed the entire in-flight learning signal the instant clean_takeoff activated
+        # (common_step_counter >= clean_takeoff_min_step ~= step 60000) -> death spiral (forward_reach, the
+        # anti-give-up signal, went to 0 -> the previous-problem spiral returned). The stutter-step
+        # confiscation now hits ONLY the sparse successful_jump bonus (see _update_jump_state, Option A).
+        return gate
 
     def _reward_takeoff_vertical_velocity(self):
         base_height = self.root_states[:, 2]
@@ -1272,6 +1288,18 @@ class GO2OmniJumpTorque(GO2Torque):
         # mygo2jump-style L1 penalty toward q_squat (we want robot to bias toward squat posture).
         # Active throughout episode — small weight because push/flight legitimately deviates.
         joint_diff = torch.sum(torch.abs(self.dof_pos - self.q_squat_target.unsqueeze(0)), dim=1)
+        # PRE-JUMP STANCE ANCHOR (phase-scaled): the GLOBAL weight must stay small -- a jump legitimately
+        # deviates from q_squat, so a big global weight taxes the jump (-1.0 was 57% of all penalties ->
+        # jump net-negative -> collapse, see config). But the PRE-JUMP / post-finish STAND (~jumping_state)
+        # SPRAWLS once PD has faded (feet drift fore/aft, nothing holds a collected stance) -> the policy
+        # then has to STEP to re-collect under its body before launching, which trips jump_replant. So scale
+        # the penalty UP ONLY while NOT in an active jump cycle: a strong COLLECTED ready-stance anchor in
+        # the stand, with ZERO extra tax on the jump itself. Discovery-safe: gated on the succ-rate latch
+        # (_takeoff_omega_on, succ_ema>=0.80) so a strong "stand and don't jump" optimum can't block the
+        # from-scratch discovery of jumping (succ~0 -> gate off -> base weight everywhere).
+        scale = float(getattr(self.cfg.rewards, "default_pos_prejump_scale", 1.0))
+        if scale != 1.0 and getattr(self, "_takeoff_omega_on", False):
+            joint_diff = torch.where(~self.jumping_state, joint_diff * scale, joint_diff)
         return joint_diff
 
     def _reward_default_hip_pos(self):

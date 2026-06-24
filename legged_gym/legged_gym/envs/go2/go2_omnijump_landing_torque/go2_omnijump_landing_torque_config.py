@@ -59,13 +59,25 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
         # converges to a great policy. ("PD-longer = smoother" held for Jun03 only because that older
         # config had no squat-qualified gate.) general_scale ramps 0->1 linearly warmup_steps->x0;
         # pd_alpha = 0.5*(1-general_scale). step_count ~= 69/iter.
-        warmup_steps = 7000        # full PD only for the first ~iter100, then start fading.
-        x0 = 35000                 # pd_alpha=0 by ~iter500 (standard FAST fade). The PD-slow experiment (x0=70000)
-                                   # was BACKWARDS: it made the policy MORE PD-dependent and it crashed exactly when
-                                   # PD->0. And PD is NOT the cause -- the FAST-fade run was GOOD at iter600 with PD
-                                   # already 0 (pure torque, peak 0.55, hit 0.80), then DEGRADED. Early fade forces
-                                   # pure-torque adaptation (proven Jun09_19-29-38). The real cause = the reward give-up
-                                   # (all jump rewards tied to precise hit) -> addressed by forward_reach.
+        # SLOW GRADUAL FADE (user: "课程进化减慢从200到1200"): full PD only until ~iter200, then a long gradual
+        # ramp to pure torque by ~iter1200, so the policy ADAPTS to pure torque smoothly instead of a sharp
+        # transition (the iter~1100 dip was the PD/freq/torque transition). step rate ~96-97/iter (measured) ->
+        # warmup 19200 ~= iter200, x0 115200 ~= iter1200 (verify the REAL general_scale trajectory from the run;
+        # rate accelerates as freq ramps so it may complete a bit before 1200).
+        # ⚠️ HISTORY: a MUCH slower PD-slow (warmup 100000 / x0 240000 = full PD until ~iter1450) FAILED HARD --
+        # squatQ=0, NO jump for 1087 iters, because prolonged FULL PD gives a shallow squat that never qualifies
+        # -> jump chain locked. THIS setting keeps the FULL-PD window SHORT (~iter200) to dodge that trap, then
+        # fades slowly. WATCH the first ~iter300: if squatQ stays ~0 / no flight -> the short full-PD window is
+        # still too long; shorten warmup. If it jumps fine and the iter~1100 dip is gentler -> the slow fade worked.
+        # REVERTED to the ORIGINAL fast fade (user): PD should fade EARLY so the PURE-TORQUE policy is
+        # established first, THEN the dx_max curriculum evolves ON pure torque (with the safety-revert in
+        # _update_dx_curriculum so it plateaus instead of crashing, and re-advances as the pure-torque policy
+        # gets stronger). The slow fade (warmup 19200/x0 115200) made dx_max hit the ceiling while PD was still
+        # on (general_scale 0.45) -> the reach it found was PD-assisted, not the real pure-torque reach.
+        # REVERTED to the Jun23_01-23-30 baseline (user): SLOW gradual fade -- full PD until ~iter200, then a
+        # long ramp to pure torque by ~iter1200 (step ~96/iter -> warmup 19200 ~iter200, x0 115200 ~iter1200).
+        warmup_steps = 19200       # ~iter200 of full PD (short), then start the slow fade.
+        x0 = 115200                # ~iter1200: pure torque (general_scale=1). 1000-iter gradual ramp.
 
     class commands(GO2OmniJumpCurriculumTorqueCfg.commands):
         # Landing-point task: commands[0:2] repurposed velocity -> landing displacement (m).
@@ -115,7 +127,12 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
         # top fraction [dx_max*(1-far_frac), dx_max] of the open range -> the gate requires the
         # NEWEST/farthest distances to be stably hit, not the easy near commands carrying a uniform
         # average. (uniform averaging let dx_max reach 1.2 while really mastering ~0.9.)
-        landing_dx_far_frac = 0.40
+        landing_dx_far_frac = 0.30             # 0.20 -> 0.30: WIDEN the far band back a notch. 0.20 was TOO narrow:
+                                               # ~1 far-band sample per log window (fb_n~1) -> the advance metric got
+                                               # NOISY -> a lucky streak over-advanced dx_max from 0.9 to 1.0, past the
+                                               # reliable reach (fb_hit cliff 0.79@0.9 -> 0.15@1.0 -> late decline).
+                                               # 0.30 keeps "hit near the edge" but with enough samples for a STABLE
+                                               # gate, so dx_max settles at the reliable reach instead of overshooting.
         landing_dx_succ_threshold = 0.80       # [unused — superseded by landing_dx_stable_hit_threshold]
         landing_dx_hit_threshold = 0.55        # [unused — superseded by landing_dx_stable_hit_threshold]
         landing_dx_hit_tol = 0.10              # a jump "hits" if |landing_xy - target| <= this (m).
@@ -176,6 +193,17 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
         sigma_landing_proj_norm = 0.025     # kernel width on RELATIVE squared err (proj). ~5% miss->0.90, 15%->0.41
         sigma_pos_landing_norm = 0.04       # kernel width on RELATIVE squared err (terminal landing_position)
         landing_norm_dist_floor = 0.30      # min distance used in the normalizer (in-place/near cmds judged vs 0.30m)
+        # landing_stability BRAKE kernel widths (read by _reward_landing_stability). MOVED here from class scales
+        # where they were dead (cfg.rewards.<name> missing -> default 0.25 -> brake reward ~0 at landing speeds).
+        # Loosened so the brake has gradient: |v|~2.5 -> exp(-2.5^2/2.0)~0.04 rising to 1.0 as it stops on the spot.
+        landing_stability_lin_sigma = 2.0   # was effectively 0.25 (floored to ~0 for real landing |v|, no gradient)
+        landing_stability_ang_sigma = 1.0   # was effectively 0.5
+        four_leg_push_force_floor = 200.0   # N: total vertical GRF below which four_leg_push is NOT graded -> only the
+                                            # REAL push (> body weight ~147N), not the static squat-load where legs
+                                            # merely bear weight (which would be farmable by lingering in the squat).
+        four_leg_push_force_target = 90.0   # N: per-leg vertical GRF for FULL credit (saturates -> surplus free, no
+                                            # front==rear constraint). ~2.4x the static per-leg share; a leg below this
+                                            # while still on the ground = "idling" -> graded down -> the policy wakes it.
         # NON-VANISHING far PULL on projected_landing (see _reward_projected_landing): the exp kernel ->0 for
         # a big undershoot at a far target -> no gradient -> curriculum plateaus (~1.3). A linear term gives
         # partial credit + a constant slope toward the target at any distance, so the policy keeps learning to
@@ -300,13 +328,22 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
         # now fixed by converting default_pos to a reward). Back to the baseline: successful_jump =
         # stay-upright(binary) x height_score x landing-accuracy (couples precision with stability).
         success_use_velocity_score = True
-        success_landing_min_score = 0.2     # floor on the landing-accuracy score: a stable but off-target jump still
-                                            # earns 0.2*height (keeps stability rewarded while not yet on target); an
-                                            # on-target stable jump earns the full height_score.
+        success_landing_min_score = 0.2     # 0.2 -> 1.0 (user): DECOUPLE successful_jump from the landing point so a
+                                            # CLEAN jump that falls SHORT of an over-reach command STILL earns the bonus
+                                            # -> the policy lands short CLEANLY instead of stutter-stepping to hit it
+                                            # (which clean_takeoff_terminate kills -> critic blowup @iter716). Graceful
+                                            # plateau at the clean reach. Lower (<1) to re-fold landing accuracy in.
         # DECOUPLE success from the squat_qualified HOLD gate (which flickers under pure-torque noise ->
         # made succ oscillate 0.01-0.89 while flight/peak were stable). peak>=0.40 already guarantees a
         # real countermovement, so the gate is redundant FOR SUCCESS. It still gates the jump-REWARD chain.
         success_requires_squat_qualified = False
+        # PRE-JUMP STANCE ANCHOR: scale the default_pos penalty (toward q_squat) UP only during the
+        # ~jumping_state STAND (pre-jump + post-finish), so the policy holds a COLLECTED ready stance (feet
+        # under body) instead of sprawling pre-jump and then needing a recovery STEP (which trips jump_replant).
+        # The jump itself keeps the base default_pos weight (no extra tax). 1.0 = off. Read in _reward_default_pos,
+        # gated post-discovery on _takeoff_omega_on (succ_ema>=0.80). WATCH noise_std (default_pos -0.7 ran away
+        # once); if the stand still sprawls, raise; if discovery/jumping suffers, lower toward 1.0.
+        default_pos_prejump_scale = 3.0
         # RSI static deep-squat air-drop (the EXPLORATION piece): half the RSI envs start AT REST in the
         # deep squat + jumping, so value learns "deep-squat-at-rest = high return" (they're gate-exempt
         # and earn jump rewards from the dip). This plants V(dip) that the squat-depth gate then makes the
@@ -375,7 +412,10 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
                                              # so the error term = wz^2 = damp spin during flight -> fixes the heading
                                              # drift. Kept WELL below the main jump rewards (peak25/vz15/landing20); it's
                                              # a stabilizer. Stage2: open commands[2] -> same term becomes turn-tracking.
-            forward_reach = 20.0             # NEW: distance-progressive EFFORT reward (see _reward_forward_reach). Rewards
+            forward_reach = 30.0             # 20 -> 30: STRENGTHEN "farther = better" (user). Make distance-reach the
+                                             # DOMINANT driver so the policy pushes HARD to reach far. WATCH: if it trades
+                                             # away HEIGHT (peak drops) or PRECISION, ease back to 25; if unstable, 20.
+                                             # distance-progressive EFFORT reward (see _reward_forward_reach). Rewards
                                              # the projected FORWARD reach (absolute m, capped at the command) -> jumping
                                              # FARTHER pays MORE + far command > near command, DECOUPLED from precise landing.
                                              # Fixes the chronic give-up: once a far command is hard to HIT precisely, all the
@@ -383,6 +423,11 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
                                              # STABLE positive signal for trying-its-best/reaching-far so it never gives up. Strong
                                              # (>= projected_peak 20) so DISTANCE outranks HEIGHT. TUNE vs precision rewards if it
                                              # overshoots near commands or starves precision.
+            four_leg_push = 0.0             # DISABLED (user): it blew the critic (value_loss 0.18->4.0 @iter1031) and
+                                             # never worked (rew flat ~0.017). _reward_four_leg_push still exists (push-up-to-
+                                             # target per ON-GROUND leg, rear may dominate, front-first allowed) -> re-enable by
+                                             # setting weight only AFTER re-verifying the "rear idle" premise with the FIXED
+                                             # torque_diag (the old "rear thigh ~0.3" finding used the broken pd0/general_scale=1 eval).
             projected_landing = 15.0         # 10 -> 15: BOOST. USER PRINCIPLE: jump-DISTANCE/accuracy rewards must OUTRANK jump-HEIGHT
                                              # rewards. After projected_peak 25->20, height earned ~0.60 (pp 0.38 + takeoff_vz 0.22) still
                                              # exceeded distance ~0.43 (landing_position + this), so raise the distance side above height.
@@ -396,11 +441,9 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
                                              # base_ang_vel_xy -0.4 (the real flight-penalty killer), now reverted to -0.15 -> a mild 20 should keep
                                              # discovery. If 20 is too mild (still farms height / 1.1 plateau holds) go lower or add a non-vanishing
                                              # far-accuracy pull. WATCH iter~500 flight recovers; if flight 0, 20 is still too low -> revert to 25.
-            successful_jump = 1000.0          # 400 -> 700: raise the completion reward to ~rank3 (just below
-                                             # landing/peak). It's sparse so weight is big but earned modest
-                                             # (~0.25; it's also ALREADY graded by height_score≈0.45 since peak
-                                             # 0.5 < cmd 0.7). Paired with success_use_velocity_score=True so it's
-                                             # graded by landing-drift too (less binary -> less oscillation amplify).
+            successful_jump = 1000.0          # Jun23_01-23-30 baseline (reverted). Sparse so weight is big but earned
+                                             # modest (~0.25; also graded by height_score). Coupled to landing accuracy
+                                             # via _get_successful_jump_velocity_score (success_landing_min_score floor).
             landing_position = 8.0           # 5 -> 8: BOOST (with projected_landing 15) so jump-DISTANCE/accuracy OUTRANKS height
                                              # (user principle). DENSE over the landing buffer (~150 steps, fixed touchdown xy). Target:
                                              # distance earned (landing_position + projected_landing ~0.67) > height (~0.60). Discovery-safe
@@ -453,8 +496,9 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
                                              # robot lands at vx~1.3 m/s, bounces (all feet off, +0.06m) and coasts
                                              # ~0.30m forward to a stop (the "post-landing slide"). This rewards LOW
                                              # base velocity during the landing buffer -> absorb/stop on the spot.
-            landing_stability_lin_sigma = 2.0  # loosen from default 0.25 (which floors at ~0 for vx~1.3 -> no gradient)
-            landing_stability_ang_sigma = 1.0  # loosen from default 0.5
+            # NOTE: landing_stability_lin_sigma / _ang_sigma live in `class rewards` (NOT here in scales) — the
+            # reward fn reads cfg.rewards.<name>. They were MISPLACED here, so cfg.rewards.<name> fell back to the
+            # default 0.25 -> exp(-2.5^2/0.25)~0 -> the brake had ZERO gradient (verified: stab~0.000, slide 0.7m).
             # clean_landing REMOVED (ineffective: detector never armed -> reward ~0). Post-landing slide handled by
             # landing_stability (brake momentum) + disable_jump_on_landing (no commanded re-jump); error obs real-time.
             # ---- four-foot contact-timing sync (penalty on staggered takeoff/landing) ----
@@ -520,11 +564,11 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
                                              # Fix for the over-deep squat (base ~0.13) jamming the knees to the
                                              # "wall" + stalling, which also dropped peak. Stops the dip ~10% short
                                              # of the hard limit -> smoother push, should recover height. Tunable.
-            landing_impact = -2.0            # (2) Olsen Ground-force/Soft-impact: penalize the vertical foot-force
-                                             # SPIKE at touchdown (bounded, soft floor at ~standing weight) -> cushion,
-                                             # don't slam. KEEP MODEST: too negative incentivizes jumping LOWER
-                                             # (smaller fall = softer impact) and suppresses height. #1 (ω damping)
-                                             # is the primary lever; this is secondary. peak drops -> back off toward 0.
+            landing_impact = 0.0             # DISABLED (user: "没什么用"). Was -2.0 (Olsen soft-impact). Landing
+                                             # cushion now handled by landing_stability (brake, sigma fix) + the
+                                             # touchdown dynamics; this term wasn't earning its keep. (Aside: it also
+                                             # risks suppressing height -- softer impact = jump lower -- which fights
+                                             # our distance goal.) Re-enable only if touchdowns start slamming.
             pitch_level = -6.0               # -4.5 -> -6.0: further STRENGTHEN (preemptive vs nose-dive when we push
                                              # height higher; back off if the jump gets stiff/peak drops). Nose-dive is the high-jump
                                              # failure mode -- Jun05_23-55-11 crashed at pitch 0.68). PITCH-specific
@@ -571,11 +615,12 @@ class GO2OmniJumpLandingTorqueCfgPPO(GO2OmniJumpCurriculumTorqueCfgPPO):
     class algorithm(GO2OmniJumpCurriculumTorqueCfgPPO.algorithm):
         sym_coef = 1.0   # was 0.5: match my_go2_jump — tighter LEFT-RIGHT mirror symmetry
                          # (front-rear is handled by the pushoff_leg_sync reward, not sym_loss)
-        entropy_coef = 0.001   # GLOBAL TIGHT (was 0.005-start + anneal): use the tight value everywhere to keep
-                               # action_std from running away from the start (the noise runaway was a recurring
-                               # collapse driver). init_noise_std=0.5 still gives early exploration to discover.
-                               # WATCH iter50-150: if squatQ/jflight don't rise, 0.001 was too low for discovery
-                               # (memory: constant 0.003 once got stuck) -> raise back toward 0.003. (anneal now moot.)
+        entropy_coef = 0.003   # 0.001 -> 0.003: MORE exploration. At 0.001 noise_std collapsed to ~0.04 -> the
+                               # policy got too CONSERVATIVE (peak ~0.50, undershoots far) and plateaued; the old
+                               # high+far run had noise ~0.39. 0.003 settles noise ~0.32 (memory) = that exploration
+                               # level but STABLE (the runaway was 0.005 -> 0.86), and forward_reach now holds the
+                               # floor so the bigger jumps don't degrade. WATCH noise_std: ~0.2-0.35 good; toward 0.5+
+                               # = runaway -> drop to 0.002.
                                # Constant 0.005 (run Jun06_07-41-08) cracked the squat gate (squatQ->0.95) but then
                                # noise RAN AWAY to 1.33 -> degraded from iter3000, collapsed at 5400. Constant 0.003 was
                                # the opposite (noise 0.32 -> stuck). So: high early (discover/crack gate), low late
@@ -588,7 +633,8 @@ class GO2OmniJumpLandingTorqueCfgPPO(GO2OmniJumpCurriculumTorqueCfgPPO):
         load_run = -1
         checkpoint = -1
         resume_path = None
-        max_iterations = 10000   # distance curriculum needs room: ~in-place discovery + 4 dx stages
+        max_iterations = 3000    # 10000 -> 3000 (user): PD fades early (~iter800), then plenty of room for the
+                                 # pure-torque policy to consolidate + dx_max to evolve (with the safety-revert).
         # entropy_coef ANNEALS 0.005 -> 0.001 at entropy_anneal_iter (HARD STEP, on_policy_runner.py:129-133).
         # MOVED 2800 -> 500 for the real-Go2 actuator. The 0.005 START is the ONLY force pushing action_std UP;
         # with the weak real calf the precise squat-jump can't survive high noise, so noise_std running away
