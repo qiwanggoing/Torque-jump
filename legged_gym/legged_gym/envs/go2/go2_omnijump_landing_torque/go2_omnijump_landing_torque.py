@@ -41,6 +41,10 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
         "four_leg_push",     # SYNC FOUR-LEG PUSH: reward EVEN vertical-GRF across the 4 feet during push so the
                              # idle rear legs (torque_diag: rear thigh ~0.24 throttle vs front ~0.93) pull their
                              # weight -> more total impulse -> farther. Discovery-gated in _reward_four_leg_push.
+        "clean_takeoff_bonus",  # SOFT clean-takeoff: extra reward for a no-re-plant takeoff (clean pays MORE,
+                                # messy still allowed) -- replaces the hard clean_takeoff_terminate that killed discovery.
+        "stand_no_takeoff",     # HARD penalty: cmd4=0 (STAND) but all feet leave the ground (a hop) -> punish ->
+                                # cmd4 becomes the real stand/jump switch. Gated post-discovery + grace (skips spawn drop).
     }   # clean_landing REMOVED (detector never armed -> ~0). Post-landing slide handled by landing_stability
         # (brake momentum) + disable_jump_on_landing (no commanded re-jump); error obs is real-time (no obs-hold).
 
@@ -53,6 +57,8 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
         "projected_landing": 1,
         "forward_reach": 1,
         "four_leg_push": 1,
+        "clean_takeoff_bonus": 0,   # active from step 1 (soft positive bonus = discovery-safe)
+        "stand_no_takeoff": 0,      # stage 0; real gate is _takeoff_omega_on inside the reward (post-discovery)
         "foot_contact_sync": 0,
         "stance_squat": 0,
         "base_ang_vel_xy": 0,   # active from step 1 (curriculum disabled = one-stage)

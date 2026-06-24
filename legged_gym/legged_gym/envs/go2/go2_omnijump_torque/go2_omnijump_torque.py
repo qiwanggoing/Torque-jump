@@ -662,16 +662,10 @@ class GO2OmniJumpTorque(GO2Torque):
             # The gate still gates the jump-REWARD chain (keeps forcing a real squat during learning).
             success_at_impact = self.just_landed & real_jump & jump_height_commanded
             if getattr(self.cfg.rewards, "success_requires_squat_qualified", True):
+                # successful_jump now flows through _squat_deep_enough(), which (with clean_takeoff active)
+                # ANDs ~jump_replant -> a stutter-stepped jump forfeits the bonus via the squat gate. No
+                # separate confiscation line needed (re-coupled experiment, user).
                 success_at_impact = success_at_impact & self._squat_deep_enough()
-            # CLEAN-TAKEOFF confiscation, now targeted at ONLY this sparse completion bonus (Option A): a jump
-            # that stutter-stepped / re-planted a foot during the load (jump_replant is latched at line ~532
-            # and persists through takeoff+flight to landing) FORFEITS the successful_jump bonus. The DENSE
-            # in-flight shaping rewards (projected_peak/projected_landing/forward_reach/takeoff_velocity_match/
-            # all_feet_airborne) are NO LONGER withheld on replant (see _squat_deep_enough) -> the policy keeps
-            # its stable learning signal -> no death spiral. Active only after clean_takeoff_min_step.
-            if getattr(self.cfg.rewards, "clean_takeoff_terminate", False) and \
-               self.common_step_counter >= int(getattr(self.cfg.rewards, "clean_takeoff_min_step", 60000)):
-                success_at_impact = success_at_impact & (~self.jump_replant)
             self.pending_success |= success_at_impact
 
             # cmd-aware Gaussian height score: penalize both overshoot and undershoot
@@ -1040,12 +1034,18 @@ class GO2OmniJumpTorque(GO2Torque):
             gate = torch.ones_like(self.jumping_state)
         else:
             gate = self.rsi_episode_mask | self.squat_qualified
-        # Clean-takeoff (jump_replant) is NO LONGER withheld here. Gating the DENSE shaping rewards
-        # (projected_peak/projected_landing/forward_reach/takeoff_velocity_match/all_feet_airborne) on
-        # jump_replant zeroed the entire in-flight learning signal the instant clean_takeoff activated
-        # (common_step_counter >= clean_takeoff_min_step ~= step 60000) -> death spiral (forward_reach, the
-        # anti-give-up signal, went to 0 -> the previous-problem spiral returned). The stutter-step
-        # confiscation now hits ONLY the sparse successful_jump bonus (see _update_jump_state, Option A).
+        # EXPERIMENT (user): RE-COUPLE all squat-gated jump rewards (projected_peak/projected_landing/
+        # forward_reach/takeoff_velocity_match/all_feet_airborne, plus successful_jump via the squat gate) to
+        # the clean-takeoff rule -- a stutter-step / re-plant (jump_replant) withholds the WHOLE jump-reward
+        # chain. Paired with an EARLY clean_takeoff_min_step (~step 12000) so it bites almost from the start:
+        # the bet is that forcing clean takeoffs BEFORE the policy entrenches a replant habit avoids the
+        # mid-training death-spiral cliff seen when this activated at step 60000 after the habit had formed.
+        # ⚠️ DISCOVERY RISK (code's own note: early failed pushes ALSO re-plant): if the early window before
+        # min_step is too short, every flailing jump re-plants -> jump rewards ~0 -> the robot may never learn
+        # to jump. WATCH squatQ/jump_flight in the first ~iter150; if ~0, raise clean_takeoff_min_step.
+        if getattr(self.cfg.rewards, "clean_takeoff_terminate", False):
+            if self.common_step_counter >= int(getattr(self.cfg.rewards, "clean_takeoff_min_step", 60000)):
+                gate = gate & (~self.jump_replant)
         return gate
 
     def _reward_takeoff_vertical_velocity(self):
@@ -1101,6 +1101,33 @@ class GO2OmniJumpTorque(GO2Torque):
         height_progress = self._get_height_progress()
         active = self.airborne & self._squat_deep_enough()   # squat-depth gate: no dip -> no flight reward
         return active.float() * (0.25 + 0.75 * height_progress)
+
+    def _reward_clean_takeoff_bonus(self):
+        # SOFT clean-takeoff incentive (REPLACES the HARD clean_takeoff_terminate gate, which zeroed the whole
+        # jump-reward chain on a re-plant and KILLED from-scratch discovery when applied early/always). A jump
+        # is ALLOWED to stutter-step -- it still earns every other jump reward, so discovery is never blocked --
+        # but a CLEAN single-push takeoff (no load-phase re-plant: jump_replant False) earns this EXTRA flight
+        # reward, so CLEAN PAYS MORE and the policy converges to clean WITHOUT being forbidden from messy.
+        # Always positive, never penalizes -> discovery-safe from step 0. Farm-proof gate = airborne + squat
+        # (same as all_feet_airborne); ~jump_replant is the clean condition.
+        active = self.airborne & self._squat_deep_enough() & (~self.jump_replant)
+        return active.float()
+
+    def _reward_stand_no_takeoff(self):
+        # HARD penalty: when COMMANDED TO STAND (cmd4 <= jump_command_threshold AND not in a jump cycle), the
+        # robot must NOT leave the ground. STAND_ONLY play proved the policy still HOPS ~0.5s after reset even
+        # at cmd4=0 (a time-based jump reflex baked in by always-jumping training) -> cmd4 was not a real
+        # switch. Penalizing all-feet-airborne while standing makes cmd4=0 mean "stay grounded in the resting
+        # squat" (which IS the desired stand) and cmd4=1 mean jump. GRACE skips the spawn drop (spawn 0.42 ->
+        # natural rest ~0.30 free-fall = a spawn-height artifact, not a hop). Gated post-discovery
+        # (_takeoff_omega_on) so it NEVER interferes with the from-scratch jump discovery at cmd4=1; and it
+        # only fires at cmd4<=0.5 so a real commanded jump (cmd4=1) is never penalized.
+        if not getattr(self, "_takeoff_omega_on", False):
+            return torch.zeros(self.num_envs, device=self.device)
+        standing = (self.commands[:, 4] <= float(self.cfg.commands.jump_command_threshold)) & (~self.jumping_state)
+        grace = self.episode_length_buf > int(getattr(self.cfg.rewards, "stand_no_takeoff_grace", 50))
+        airborne = self._get_contact_state().sum(dim=1) == 0   # all four feet off the ground = a hop
+        return (standing & grace & airborne).float()
 
     def _get_successful_jump_velocity_score(self):
         min_time = max(float(getattr(self.cfg.rewards, "success_velocity_min_airborne_time", 0.08)), 1e-3)
