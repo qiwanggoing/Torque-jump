@@ -81,8 +81,19 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
         # still assisted (model_1200 general_scale=0.73 hit cmd0.9 @0.87) but pure torque (model_3000
         # general_scale=1.0) undershoots (~0.77, hit 0.09). FAST fade makes the dx curriculum advance ON pure
         # torque -> dx_max settles at the HONEST reach (~0.8) so the commanded distances are actually hittable.
-        warmup_steps = 7000
-        x0 = 35000
+        # PIECEWISE fade (user, 2026-06-25): ramp 0->0.8 (full PD until warmup ~iter75, then ramp to 0.8 by
+        # ~iter200), HOLD 0.8 (~10% PD) to ~iter500, then ramp 0.8->1.0 (pure torque) by ~iter1000. The plateau
+        # lets the policy stabilise the ACTIVE squat under LIGHT PD before the final fade, so general_scale->1 is
+        # a gentle ramp not the abrupt cliff where the PD-pre-loaded squat collapsed. NOTE: holding at 0.8 keeps
+        # ~10% PD during part of the dx-curriculum advance, so dx may inflate SLIGHTLY (far less than the 27-33%
+        # PD that inflated it to 1.1; the curriculum safety-revert pulls it back at pure torque). Iter targets are
+        # APPROXIMATE -- step_count/iter varies ~48-95 with general_scale, so verify the real general_scale
+        # trajectory in tensorboard (Episode/curriculum_general_scale) and nudge the step breakpoints if needed.
+        warmup_steps = 7000            # full PD until ~iter75 (squat discovery via Option A pre-load)
+        fade_hold_scale = 0.8          # plateau level (pd_alpha = 0.5*(1-0.8) = 0.1 = 10% PD assist)
+        fade_ramp1_end = 15000         # reach 0.8 (~iter 200)
+        fade_ramp2_start = 30000       # hold 0.8 until here (~iter 500), then ramp to 1.0
+        x0 = 56000                     # reach 1.0 = pure torque (~iter 1000)
 
     class commands(GO2OmniJumpCurriculumTorqueCfg.commands):
         # Landing-point task: commands[0:2] repurposed velocity -> landing displacement (m).
@@ -340,6 +351,15 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
                                             # 0.9 -> dof_pos_limits starts penalizing in the last 10% before the
                                             # hard URDF limit, so the over-deep squat stops before jamming the "wall".
         squat_gate_height = 0.24            # must dip base to <=0.24m (idle ~0.31) to unlock jump rewards
+        squat_foot_height = 0.23            # 0.10 -> 0.23 (user). MEASURED: q_squat base == foot_height - 0.01, so
+                                            # foot_height 0.23 -> base 0.219m (NOT the parent comment's bogus "base
+                                            # ~0.20"; the OLD 0.10 was base ~0.09 = BELLY ON THE GROUND). At 0.10 the
+                                            # legs fold to the EXTREME for Go2's long legs -> q_squat itself rests on
+                                            # the ground, so the policy "dead-fish" splatted to BOTH farm the (now
+                                            # always-on) stance_squat pose reward AND offload its weight onto the
+                                            # ground (zeroing torques/dof_acc). At base ~0.22 the BELLY IS OFF THE
+                                            # GROUND -> the squat must be ACTIVELY held against gravity (no free ride)
+                                            # = a clean "combat crouch". Stays < squat_gate_height (0.24) -> qualifies.
         successful_jump_min_peak_height = 0.35  # was 0.40: lowered because dead-stop static jump is weaker initially
                                                 # (= command floor 0.40; kills the low-jump shortcut)
         # REVERTED to True (the decouple test did NOT fix the collapse -- root was default_pos taxing the jump,

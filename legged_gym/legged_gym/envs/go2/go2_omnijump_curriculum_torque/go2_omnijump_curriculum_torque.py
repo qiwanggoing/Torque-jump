@@ -29,7 +29,25 @@ class GO2OmniJumpCurriculumTorque(GO2OmniJumpTorque):
 
         warmup_steps = max(0.0, float(getattr(self.cfg.growth, "warmup_steps", 0)))
         fade_end_steps = max(float(self.cfg.growth.x0), warmup_steps + 1.0)
-        if self.step_count < warmup_steps:
+        hold = float(getattr(self.cfg.growth, "fade_hold_scale", 0.0))
+        if hold > 0.0:
+            # PIECEWISE fade (user): ramp 0->hold over [warmup, ramp1_end], HOLD at `hold` over
+            # [ramp1_end, ramp2_start], then ramp hold->1 over [ramp2_start, x0]. The plateau at `hold`
+            # (light PD ~10% at hold=0.8) lets the policy stabilise the ACTIVE squat before the final fade
+            # to pure torque, so general_scale->1 is a gentle ramp, not the abrupt cliff that collapsed the
+            # PD-pre-loaded squat. Falls back to the plain linear ramp below when fade_hold_scale<=0.
+            r1 = max(float(getattr(self.cfg.growth, "fade_ramp1_end", warmup_steps + 1.0)), warmup_steps + 1.0)
+            r2 = max(float(getattr(self.cfg.growth, "fade_ramp2_start", r1)), r1)
+            if self.step_count < warmup_steps:
+                gs = 0.0
+            elif self.step_count < r1:
+                gs = hold * (self.step_count - warmup_steps) / (r1 - warmup_steps)
+            elif self.step_count < r2:
+                gs = hold
+            else:
+                gs = hold + (1.0 - hold) * (self.step_count - r2) / max(fade_end_steps - r2, 1.0)
+            self.general_scale = min(1.0, max(0.0, gs))
+        elif self.step_count < warmup_steps:
             self.general_scale = 0.0
         else:
             ramp_progress = (self.step_count - warmup_steps) / (fade_end_steps - warmup_steps)
