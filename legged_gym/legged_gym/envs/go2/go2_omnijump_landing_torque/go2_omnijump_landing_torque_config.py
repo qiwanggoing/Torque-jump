@@ -76,8 +76,13 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
         # on (general_scale 0.45) -> the reach it found was PD-assisted, not the real pure-torque reach.
         # REVERTED to the Jun23_01-23-30 baseline (user): SLOW gradual fade -- full PD until ~iter200, then a
         # long ramp to pure torque by ~iter1200 (step ~96/iter -> warmup 19200 ~iter200, x0 115200 ~iter1200).
-        warmup_steps = 19200       # ~iter200 of full PD (short), then start the slow fade.
-        x0 = 115200                # ~iter1200: pure torque (general_scale=1). 1000-iter gradual ramp.
+        # FAST FADE (user, 2026-06-24): full PD ~iter100, pure torque (general_scale=1) by ~iter500. The SLOW
+        # fade was PROVEN to inflate dx: 3-checkpoint play (Jun24_15-00-38) showed dx advanced to 1.1 while PD
+        # still assisted (model_1200 general_scale=0.73 hit cmd0.9 @0.87) but pure torque (model_3000
+        # general_scale=1.0) undershoots (~0.77, hit 0.09). FAST fade makes the dx curriculum advance ON pure
+        # torque -> dx_max settles at the HONEST reach (~0.8) so the commanded distances are actually hittable.
+        warmup_steps = 7000
+        x0 = 35000
 
     class commands(GO2OmniJumpCurriculumTorqueCfg.commands):
         # Landing-point task: commands[0:2] repurposed velocity -> landing displacement (m).
@@ -158,6 +163,13 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
         # (the current model never saw a clean 0/1 -> OOD in play).
         stand_command_value = 0.0
         jump_command_value = 1.0
+        # STAND-THEN-JUMP (user, 2026-06-24): a sampled JUMP first STANDS (cmd4=0) for a RANDOM delay, THEN
+        # cmd4 flips to 1 and the jump fires -- so every jump starts from a real cmd4=0 STAND (now that the
+        # stand is trained: stand_no_takeoff + 20% stand episodes), instead of jumping straight out of the
+        # spawn free-fall. The random delay (vs a fixed one) stops the policy from timing a pre-squat.
+        stand_before_jump = True
+        jump_arm_delay_min = 55             # >= first_jump_delay_steps so first_jump_ready is met when cmd4 flips
+        jump_arm_delay_max = 220            # up to ~1.1s pre-jump stand; random in [min,max] per episode
         # The moment the robot touches down, flip the jump command to STAND for the whole 0.75s landing
         # buffer (instead of holding cmd4=1 until the jump "finishes"). Without this the policy sees cmd4=1 +
         # the residual landing error during the buffer and HOPS to chase the undershot target. Verified in
@@ -237,7 +249,7 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
         # iter500): 1s of standing rewards makes "don't jump" too comfortable -> the policy never
         # risks the squat-then-push (same failure mode as Jun09_11-29-05 strong default_pos/yaw).
         # The 1s settled-stance is a PLAY/visual nicety only -> set it in play_landing, not training.
-        landing_real_jump_min_peak = 0.40   # peak gate for the landing_position reward
+        landing_real_jump_min_peak = 0.35   # was 0.40. lowered to 0.35 because stand_before_jump eliminates free-fall momentum.
                                             # (omnijump squat settles ~0.31, real jump peaks ~0.56)
         landing_buffer_steps = 150          # was 25 (=0.125s, inherited). A jump only "finishes" (success
                                             # credited + next jump re-enabled) after the robot stays stable
@@ -325,7 +337,7 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
                                             # 0.9 -> dof_pos_limits starts penalizing in the last 10% before the
                                             # hard URDF limit, so the over-deep squat stops before jamming the "wall".
         squat_gate_height = 0.24            # must dip base to <=0.24m (idle ~0.31) to unlock jump rewards
-        successful_jump_min_peak_height = 0.40  # was 0.30: a ~0.34 "low pop" no longer counts as success
+        successful_jump_min_peak_height = 0.35  # was 0.40: lowered because dead-stop static jump is weaker initially
                                                 # (= command floor 0.40; kills the low-jump shortcut)
         # REVERTED to True (the decouple test did NOT fix the collapse -- root was default_pos taxing the jump,
         # now fixed by converting default_pos to a reward). Back to the baseline: successful_jump =

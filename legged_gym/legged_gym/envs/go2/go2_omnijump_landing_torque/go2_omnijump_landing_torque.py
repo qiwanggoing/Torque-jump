@@ -165,8 +165,8 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
     # ------------------------------------------------------------------ #
     # Distance curriculum: jump-stat plumbing + advance logic.
     # ------------------------------------------------------------------ #
-    def _reset_jump_buffers(self, env_ids):
-        super()._reset_jump_buffers(env_ids)
+    def _reset_jump_buffers(self, env_ids, **kwargs):
+        super()._reset_jump_buffers(env_ids, **kwargs)
         if hasattr(self, "jump_target_hits"):
             self.jump_target_hits[env_ids] = 0.0
 
@@ -546,7 +546,13 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
         l1 = torch.sum(torch.abs(self.dof_pos - self.default_joint_pd_target), dim=1)
         pushoff = self.jumping_state & (~self.has_taken_off) & (self.root_states[:, 9] > 0.0)
         squat_down = self.jumping_state & (~self.has_taken_off) & (~self._squat_deep_enough())
-        return torch.where(pushoff | squat_down, torch.zeros_like(l1), l1)
+        # ALSO zero during FLIGHT + LANDING (has_taken_off): the robot legitimately extends/reaches there
+        # (deviating from the q_air/q_ground PD target), so penalising it was the residual JUMP TAX -- default_pos
+        # was the dominant penalty (~-1.2, scaling with PEAK HEIGHT) that pushed the policy to jump LESS -> the
+        # post-peak decline. Now default_pos ONLY anchors the STAND; the whole jump (squat-down/push/flight/land)
+        # is untaxed.
+        zero = pushoff | squat_down | self.has_taken_off
+        return torch.where(zero, torch.zeros_like(l1), l1)
 
     def _reward_grounded_jump(self):
         # MUST-LAUNCH penalty (landing override) -- CLOSE the "retreat to NOT jumping" escape. Diagnosis (Jun21
@@ -599,11 +605,11 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
         sigma = max(float(getattr(self.cfg.rewards, "squat_pose_sigma", 3.0)), 1e-4)
         reward = torch.exp(-self._squat_pose_err() / sigma)
         thr = float(getattr(self.cfg.rewards, "squat_pose_threshold", 0.0))
-        # Keep paying the dip-shaping reward until the squat is QUALIFIED (held >= squat_hold_steps),
-        # not merely touched: this is what gives the policy a reason to STAY folded through the hold
-        # window instead of popping straight back up the instant pose_err first dips under thr.
-        not_in_pose_yet = (~self.squat_qualified) if thr > 0.0 else torch.ones_like(self.jumping_state)
-        active = self.jumping_state & (~self.has_taken_off) & not_in_pose_yet
+        # Keep paying the dip-shaping reward throughout the ENTIRE load phase and jump_armed phase.
+        # Removing the premature ~squat_qualified cutoff (which killed the reward instantly under Option A).
+        # Also activating it during jump_armed so the policy learns to actively hold the squat BEFORE the jump fires!
+        is_armed = getattr(self, "jump_armed", torch.zeros_like(self.jumping_state))
+        active = (self.jumping_state | is_armed) & (~self.has_taken_off)
         return active.float() * reward
 
     def _reward_base_ang_vel_xy(self):

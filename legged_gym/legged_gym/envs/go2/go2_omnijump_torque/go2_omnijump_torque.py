@@ -94,6 +94,13 @@ class GO2OmniJumpTorque(GO2Torque):
         self.jump_min_pose_err = torch.full((self.num_envs,), 1e3, device=self.device)  # min |dof-q_squat| before takeoff (squat-POSE gate); 1e3 = not-yet-reached
         self.jump_min_contact = torch.full((self.num_envs,), 4, dtype=torch.long, device=self.device)  # min #feet in contact during the load (4 = no foot lifted yet); clean-takeoff re-plant detector
         self.jump_replant = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)           # a foot RE-CONTACTED during the load after lifting (stutter-step / run-up) -> clean-takeoff violation
+        # STAND-THEN-JUMP: a sampled jump first STANDS (cmd4=0) for a (random) delay, then cmd4 flips to
+        # jump_value and the jump fires. jump_armed marks the envs in that pre-jump stand that still owe a
+        # jump; jump_fire_at is the episode_length at which to flip (random per episode -> the policy can't
+        # time a pre-squat). Real cmd4=0 stand (anchored by the stand rewards) instead of the old cmd4=1 limbo
+        # where the policy free-fell as a wind-up.
+        self.jump_armed = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        self.jump_fire_at = torch.full((self.num_envs,), 1 << 30, dtype=torch.long, device=self.device)
         self.landing_plant_hold = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)     # consecutive all-4-feet-contact steps in the landing buffer (clean-landing settle detector)
         self.landing_planted = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)        # latched once the feet HELD (clean_landing_plant_hold steps) -> "settled, now watch for re-lift"
         self.landing_relift = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)         # a foot LIFTED after the clean plant (hop / shuffle-step) -> clean-landing violation
@@ -157,7 +164,7 @@ class GO2OmniJumpTorque(GO2Torque):
             return
         super().reset_idx(env_ids)
         self._log_jump_episode_stats(env_ids)
-        self._reset_jump_buffers(env_ids)
+        self._reset_jump_buffers(env_ids, is_episode_reset=True)
         if self.cfg.commands.num_commands > 4:
             self._resample_commands(env_ids)
         # Activate jumping state for RSI envs so flight rewards fire from step 0
@@ -165,8 +172,10 @@ class GO2OmniJumpTorque(GO2Torque):
         if len(rsi_envs) > 0:
             self.jumping_state[rsi_envs] = True
 
-    def _reset_jump_buffers(self, env_ids):
+    def _reset_jump_buffers(self, env_ids, is_episode_reset=False):
         self.jumping_state[env_ids] = False
+        self.jump_armed[env_ids] = False                 # cleared here; _resample_commands re-arms if a jump is sampled
+        self.jump_fire_at[env_ids] = 1 << 30             # sentinel until armed
         self.has_taken_off[env_ids] = False
         self.has_landed[env_ids] = False
         self.airborne[env_ids] = False
@@ -197,8 +206,13 @@ class GO2OmniJumpTorque(GO2Torque):
         self.landing_plant_hold[env_ids] = 0     # clean-landing detector: reset
         self.landing_planted[env_ids] = False
         self.landing_relift[env_ids] = False
-        self.squat_hold_counter[env_ids] = 0
-        self.squat_qualified[env_ids] = False
+        
+        # If stand_before_jump is active, the squat is pre-loaded during the armed stand phase.
+        # Wiping it here when the jump fires would destroy the hard-earned qualification!
+        if is_episode_reset or not getattr(self.cfg.commands, "stand_before_jump", False):
+            self.squat_hold_counter[env_ids] = 0
+            self.squat_qualified[env_ids] = False
+            
         self.landing_min_height[env_ids] = self.root_states[env_ids, 2]
         self.takeoff_root_xy[env_ids] = self.root_states[env_ids, :2]
         self.landing_root_xy[env_ids] = self.root_states[env_ids, :2]
@@ -383,7 +397,23 @@ class GO2OmniJumpTorque(GO2Torque):
             # (0.5,1.0] jitter (cmd4's magnitude is never used as a force/effort scale -- only `cmd4 >
             # threshold` and the raw obs). jump_command_range now only sets the stand/jump SPLIT probability.
             jump_val = float(getattr(self.cfg.commands, "jump_command_value", -1.0))
-            if jump_val >= 0.0:
+            if getattr(self.cfg.commands, "stand_before_jump", False):
+                # STAND-THEN-JUMP: the jump envs first STAND (cmd4 = stand value) and get ARMED; cmd4 flips to
+                # jump_value after a RANDOM per-episode delay (see _update_jump_state firing block). The
+                # displacement/height TARGET stays set (visible) so the policy can AIM during the stand. This
+                # makes the pre-jump a real cmd4=0 stand (anchored by the stand rewards / stand_no_takeoff)
+                # instead of the old cmd4=1 limbo where the policy free-fell as a wind-up.
+                _stand_v = float(getattr(self.cfg.commands, "stand_command_value", 0.0))
+                _jids = env_ids[~stand_mask]
+                self.commands[_jids, 4] = _stand_v if _stand_v >= 0.0 else 0.0
+                self.jump_armed[_jids] = True
+                self.jump_armed[env_ids[stand_mask]] = False
+                _dmin = int(getattr(self.cfg.commands, "jump_arm_delay_min", self.cfg.rewards.first_jump_delay_steps))
+                _dmax = int(getattr(self.cfg.commands, "jump_arm_delay_max", _dmin))
+                if len(_jids) > 0:
+                    _delay = torch.randint(_dmin, max(_dmax, _dmin) + 1, (len(_jids),), device=self.device)
+                    self.jump_fire_at[_jids] = self.episode_length_buf[_jids] + _delay
+            elif jump_val >= 0.0:
                 self.commands[env_ids[~stand_mask], 4] = jump_val
 
     def _disable_jump_command(self, env_ids):
@@ -398,6 +428,7 @@ class GO2OmniJumpTorque(GO2Torque):
         if len(env_ids) == 0:
             return
         self.jumping_state[env_ids] = True
+        self.jump_armed[env_ids] = False                 # jump is firing now -> no longer "armed and waiting"
         self.has_taken_off[env_ids] = False
         self.has_landed[env_ids] = False
         self.airborne[env_ids] = False
@@ -422,8 +453,13 @@ class GO2OmniJumpTorque(GO2Torque):
         self.landing_plant_hold[env_ids] = 0     # clean-landing detector: reset
         self.landing_planted[env_ids] = False
         self.landing_relift[env_ids] = False
-        self.squat_hold_counter[env_ids] = 0
-        self.squat_qualified[env_ids] = False
+        
+        # STAND-THEN-JUMP (user, 2026-06-24): If this is active, the armed stand pre-loaded the squat.
+        # Wiping the qualification here (at jump_start) destroys it and gates all jump rewards to 0!
+        if not getattr(self.cfg.commands, "stand_before_jump", False):
+            self.squat_hold_counter[env_ids] = 0
+            self.squat_qualified[env_ids] = False
+            
         self.landing_min_height[env_ids] = self.root_states[env_ids, 2]
         self.takeoff_root_xy[env_ids] = self.root_states[env_ids, :2]
         self.landing_root_xy[env_ids] = self.root_states[env_ids, :2]
@@ -484,6 +520,16 @@ class GO2OmniJumpTorque(GO2Torque):
             self.stand_step_counter + 1,
             torch.zeros_like(self.stand_step_counter),
         )
+
+        # STAND-THEN-JUMP: an ARMED env that has STOOD past its (random) fire time flips cmd4 -> jump_value,
+        # making jump_command_active True below -> the jump fires this step. Before this it sits at cmd4=stand
+        # (a real stand anchored by the stand rewards / stand_no_takeoff), so it can't free-fall as a wind-up.
+        if getattr(self.cfg.commands, "stand_before_jump", False) and self.cfg.commands.num_commands > 4:
+            _jv = float(getattr(self.cfg.commands, "jump_command_value", 1.0))
+            fire = self.jump_armed & (~self.jumping_state) & (self.episode_length_buf >= self.jump_fire_at)
+            if torch.any(fire):
+                self.commands[fire, 4] = _jv
+                self.jump_armed[fire] = False
 
         if self.cfg.commands.num_commands > 4:
             jump_command_active = self.commands[:, 4] > float(self.cfg.commands.jump_command_threshold)
@@ -550,11 +596,12 @@ class GO2OmniJumpTorque(GO2Torque):
         # earned, the subsequent leg-extension that raises pose_err does NOT re-lock the gate).
         _hold_thr = float(getattr(self.cfg.rewards, "squat_pose_threshold", 0.0))
         if _hold_thr > 0.0:
-            in_pose = loading & (self._squat_pose_err() <= _hold_thr)
+            squat_active = loading | self.jump_armed
+            in_pose = squat_active & (self._squat_pose_err() <= _hold_thr)
             self.squat_hold_counter = torch.where(
                 in_pose,
                 self.squat_hold_counter + 1,
-                torch.where(loading, torch.zeros_like(self.squat_hold_counter), self.squat_hold_counter),
+                torch.where(squat_active, torch.zeros_like(self.squat_hold_counter), self.squat_hold_counter),
             )
             _hold_steps = int(getattr(self.cfg.rewards, "squat_hold_steps", 40))
             self.squat_qualified = self.squat_qualified | (self.squat_hold_counter >= _hold_steps)
@@ -912,6 +959,16 @@ class GO2OmniJumpTorque(GO2Torque):
             jump_command_active = self.commands[:, 4] > float(self.cfg.commands.jump_command_threshold)
             use_default_pose |= (~self.jumping_state) & (~jump_command_active)
         self.default_joint_pd_target[use_default_pose] = self.default_dof_pos.expand(self.num_envs, -1)[use_default_pose]
+
+        # STAND-THEN-JUMP (Option A): an ARMED env waiting to jump holds the LOADED SQUAT (q_squat) during the
+        # pre-jump stand, NOT the tall default pose -> it is PRE-LOADED, so when cmd4 flips to jump it pushes
+        # FROM the squat (squat gate satisfied) instead of POPPING from a tall stand (which never folds ->
+        # squat_qualified stuck at 0). The spawn free-fall used to bootstrap this fold; STAND-THEN-JUMP removed
+        # it, so the armed stand provides the loaded-squat fold instead. (Overrides the use_default_pose set above.)
+        if getattr(self.cfg.commands, "stand_before_jump", False):
+            armed_stand = self.jump_armed & (~self.jumping_state)
+            if torch.any(armed_stand):
+                self.default_joint_pd_target[armed_stand] = self.q_squat_target.unsqueeze(0)
 
     def check_termination(self):
         self.reset_buf = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
@@ -1312,18 +1369,10 @@ class GO2OmniJumpTorque(GO2Torque):
         return active.float() * horizontal_vel_sq
 
     def _reward_default_pos(self):
-        # mygo2jump-style L1 penalty toward q_squat (we want robot to bias toward squat posture).
-        # Active throughout episode — small weight because push/flight legitimately deviates.
+        # mygo2jump-style L1 penalty toward q_squat (bias toward squat posture). NOTE: the LANDING task OVERRIDES
+        # this (go2_omnijump_landing_torque._reward_default_pos, phase-target + pushoff/squat-down zeroing), so
+        # edits HERE do NOT affect the landing run -- fix default_pos there.
         joint_diff = torch.sum(torch.abs(self.dof_pos - self.q_squat_target.unsqueeze(0)), dim=1)
-        # PRE-JUMP STANCE ANCHOR (phase-scaled): the GLOBAL weight must stay small -- a jump legitimately
-        # deviates from q_squat, so a big global weight taxes the jump (-1.0 was 57% of all penalties ->
-        # jump net-negative -> collapse, see config). But the PRE-JUMP / post-finish STAND (~jumping_state)
-        # SPRAWLS once PD has faded (feet drift fore/aft, nothing holds a collected stance) -> the policy
-        # then has to STEP to re-collect under its body before launching, which trips jump_replant. So scale
-        # the penalty UP ONLY while NOT in an active jump cycle: a strong COLLECTED ready-stance anchor in
-        # the stand, with ZERO extra tax on the jump itself. Discovery-safe: gated on the succ-rate latch
-        # (_takeoff_omega_on, succ_ema>=0.80) so a strong "stand and don't jump" optimum can't block the
-        # from-scratch discovery of jumping (succ~0 -> gate off -> base weight everywhere).
         scale = float(getattr(self.cfg.rewards, "default_pos_prejump_scale", 1.0))
         if scale != 1.0 and getattr(self, "_takeoff_omega_on", False):
             joint_diff = torch.where(~self.jumping_state, joint_diff * scale, joint_diff)
