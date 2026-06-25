@@ -305,10 +305,13 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
         # "squatted" = whole-body joint pose within squat_pose_threshold (L1 over 12 joints) of the
         # loaded pose q_squat. Standing is ~7.1 rad from q_squat (calf -1.5->-2.66, thigh 0.8/1.0
         # ->1.53, hips unchanged); q_squat itself = 0. Drives stand->squat, then unlocks the jump.
-        squat_pose_sigma = 5.0              # exp kernel on |dof - q_squat| for the dip reward. Raised 3->5: the
-                                            # pull from standing (7.1 rad away) is (1/sigma)*e^(-7.1/sigma), which
-                                            # is ~55% stronger at 5 than 3 (peaks near sigma~7). default_pos no
-                                            # longer competes during the dip, so this positive pull now drives it.
+        squat_pose_sigma = 2.0              # TIGHTENED 5->2 (user): at 5 the kernel was so broad a SPLAT (body on the
+                                            # ground, legs splayed/extended ~3-5 rad off q_squat) still scored ~0.45
+                                            # -> the policy farmed stance_squat by collapsing FLAT ("dead fish") instead
+                                            # of a clean controlled squat. At 2 a splat scores ~0.1 while a CLEAN q_squat
+                                            # scores 1.0 -> only the clean squat pays. The old "strong pull from standing"
+                                            # reason is moot: Option A pre-loads q_squat + stance_squat pays through the
+                                            # armed stand, so no long-range approach pull is needed.
         squat_pose_threshold = 3.2          # was 2.8: EASED (stuck @ squatQ~0.48). "in the squat" = pose_err<=3.2, shallower from
                                             # standing (7.1). THE depth knob: stuck-not-jumping (can't fold
                                             # enough) -> RAISE; jumps too shallow / want a deeper load -> LOWER.
