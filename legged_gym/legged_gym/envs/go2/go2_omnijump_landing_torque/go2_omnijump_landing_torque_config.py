@@ -76,24 +76,13 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
         # on (general_scale 0.45) -> the reach it found was PD-assisted, not the real pure-torque reach.
         # REVERTED to the Jun23_01-23-30 baseline (user): SLOW gradual fade -- full PD until ~iter200, then a
         # long ramp to pure torque by ~iter1200 (step ~96/iter -> warmup 19200 ~iter200, x0 115200 ~iter1200).
-        # FAST FADE (user, 2026-06-24): full PD ~iter100, pure torque (general_scale=1) by ~iter500. The SLOW
-        # fade was PROVEN to inflate dx: 3-checkpoint play (Jun24_15-00-38) showed dx advanced to 1.1 while PD
-        # still assisted (model_1200 general_scale=0.73 hit cmd0.9 @0.87) but pure torque (model_3000
-        # general_scale=1.0) undershoots (~0.77, hit 0.09). FAST fade makes the dx curriculum advance ON pure
-        # torque -> dx_max settles at the HONEST reach (~0.8) so the commanded distances are actually hittable.
-        # PIECEWISE fade (user, 2026-06-25): ramp 0->0.8 (full PD until warmup ~iter75, then ramp to 0.8 by
-        # ~iter200), HOLD 0.8 (~10% PD) to ~iter500, then ramp 0.8->1.0 (pure torque) by ~iter1000. The plateau
-        # lets the policy stabilise the ACTIVE squat under LIGHT PD before the final fade, so general_scale->1 is
-        # a gentle ramp not the abrupt cliff where the PD-pre-loaded squat collapsed. NOTE: holding at 0.8 keeps
-        # ~10% PD during part of the dx-curriculum advance, so dx may inflate SLIGHTLY (far less than the 27-33%
-        # PD that inflated it to 1.1; the curriculum safety-revert pulls it back at pure torque). Iter targets are
-        # APPROXIMATE -- step_count/iter varies ~48-95 with general_scale, so verify the real general_scale
-        # trajectory in tensorboard (Episode/curriculum_general_scale) and nudge the step breakpoints if needed.
-        warmup_steps = 7000            # full PD until ~iter75 (squat discovery via Option A pre-load)
-        fade_hold_scale = 0.8          # plateau level (pd_alpha = 0.5*(1-0.8) = 0.1 = 10% PD assist)
-        fade_ramp1_end = 15000         # reach 0.8 (~iter 200)
-        fade_ramp2_start = 30000       # hold 0.8 until here (~iter 500), then ramp to 1.0
-        x0 = 56000                     # reach 1.0 = pure torque (~iter 1000)
+        warmup_steps = 7000        # STEP 0 (fast fade, see PD_FADE_TRANSFER_PLAN.md): ~iter100 of full PD, then
+                                   # fast fade. Was 19200 (~iter200). PD must EXIT before the policy converges into
+                                   # a PD-shaped basin; fast fade also gives an HONEST pure-torque dx (slow fade let
+                                   # dx inflate to 1.0 while gscale~0.45=PD-assisted). Single-variable vs the
+                                   # decoupled slow-fade baseline run Jun26_01-38-47.
+        x0 = 35000                 # STEP 0: general_scale=1 (pure torque) by ~iter507 (<iter800, transition done
+                                   # early). Was 115200 (~iter1200). = the healthy fast-fade run Jun21_23-19-40 values.
 
     class commands(GO2OmniJumpCurriculumTorqueCfg.commands):
         # Landing-point task: commands[0:2] repurposed velocity -> landing displacement (m).
@@ -161,10 +150,7 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
         # [0.45,1.0] -> ~9% stand, so the robot idles far less and jumps almost every resample. (The
         # IMPORTANT standing — recovering to a stable stand after landing — is still trained in every
         # jump episode's post-landing buffer.)
-        jump_command_range = [0.375, 1.0]  # SPLIT prob: P(draw<=0.5)=(0.5-lo)/(1-lo). lo=0.375 -> 20% STAND
-                                            # (user: was 0.45 -> ~9%). More dedicated stand episodes so the policy
-                                            # actually learns to STAND at cmd4=0 (+ stand_no_takeoff penalty bites
-                                            # on them). cmd4 stays BINARY 0/1 via stand/jump_command_value.
+        jump_command_range = [0.45, 1.0]   # now ONLY sets the stand/jump SPLIT prob (~9% draws <=0.5 -> stand)
         # BINARY jump command: 1.0 = jump, 0.0 = stand. The old scheme put STAND at the sampled [0.45,0.5]
         # band -- right under the 0.5 threshold -- and at a near-threshold stand command (e.g. 0.49) the
         # policy HESITATES and twitches a foot off (the stand-episode in-place hop). Pinning stand->0 and
@@ -174,13 +160,6 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
         # (the current model never saw a clean 0/1 -> OOD in play).
         stand_command_value = 0.0
         jump_command_value = 1.0
-        # STAND-THEN-JUMP (user, 2026-06-24): a sampled JUMP first STANDS (cmd4=0) for a RANDOM delay, THEN
-        # cmd4 flips to 1 and the jump fires -- so every jump starts from a real cmd4=0 STAND (now that the
-        # stand is trained: stand_no_takeoff + 20% stand episodes), instead of jumping straight out of the
-        # spawn free-fall. The random delay (vs a fixed one) stops the policy from timing a pre-squat.
-        stand_before_jump = True
-        jump_arm_delay_min = 55             # >= first_jump_delay_steps so first_jump_ready is met when cmd4 flips
-        jump_arm_delay_max = 220            # up to ~1.1s pre-jump stand; random in [min,max] per episode
         # The moment the robot touches down, flip the jump command to STAND for the whole 0.75s landing
         # buffer (instead of holding cmd4=1 until the jump "finishes"). Without this the policy sees cmd4=1 +
         # the residual landing error during the buffer and HOPS to chase the undershot target. Verified in
@@ -248,6 +227,10 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
         # blocks the messy from-scratch pushes (an ungated strong ω penalty broke discovery, iter526 flight0).
         takeoff_omega_succ_gate = 0.80     # latch the stronger ω penalty once succ_rate EMA clears this
         takeoff_omega_gain = 4.0           # post-gate multiplier on base_ang_vel_xy (-0.15 -> ~-0.6 effective)
+        # stand_no_takeoff penalty: ignore the first N env-steps of each episode so the SPAWN drop (init base
+        # 0.42 -> natural rest ~0.30 free-fall = a spawn-height artifact) is not punished. The real reflex hop
+        # (a commanded-stand hop, not the spawn settle) fires later (~ep90+), so 50 cleanly separates them.
+        stand_no_takeoff_grace = 50
         # HARD pitch termination (see check_termination): end the episode if the base pitches NOSE-DOWN beyond
         # this (projected_gravity[:,0], ~sin(tilt)) AT TOUCHDOWN (the landing phase). Forces a level touchdown
         # (no front-feet-first), since soft penalties got traded off. Same succ-rate gate as takeoff_omega
@@ -260,7 +243,7 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
         # iter500): 1s of standing rewards makes "don't jump" too comfortable -> the policy never
         # risks the squat-then-push (same failure mode as Jun09_11-29-05 strong default_pos/yaw).
         # The 1s settled-stance is a PLAY/visual nicety only -> set it in play_landing, not training.
-        landing_real_jump_min_peak = 0.35   # was 0.40. lowered to 0.35 because stand_before_jump eliminates free-fall momentum.
+        landing_real_jump_min_peak = 0.40   # peak gate for the landing_position reward
                                             # (omnijump squat settles ~0.31, real jump peaks ~0.56)
         landing_buffer_steps = 150          # was 25 (=0.125s, inherited). A jump only "finishes" (success
                                             # credited + next jump re-enabled) after the robot stays stable
@@ -316,13 +299,10 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
         # "squatted" = whole-body joint pose within squat_pose_threshold (L1 over 12 joints) of the
         # loaded pose q_squat. Standing is ~7.1 rad from q_squat (calf -1.5->-2.66, thigh 0.8/1.0
         # ->1.53, hips unchanged); q_squat itself = 0. Drives stand->squat, then unlocks the jump.
-        squat_pose_sigma = 2.0              # TIGHTENED 5->2 (user): at 5 the kernel was so broad a SPLAT (body on the
-                                            # ground, legs splayed/extended ~3-5 rad off q_squat) still scored ~0.45
-                                            # -> the policy farmed stance_squat by collapsing FLAT ("dead fish") instead
-                                            # of a clean controlled squat. At 2 a splat scores ~0.1 while a CLEAN q_squat
-                                            # scores 1.0 -> only the clean squat pays. The old "strong pull from standing"
-                                            # reason is moot: Option A pre-loads q_squat + stance_squat pays through the
-                                            # armed stand, so no long-range approach pull is needed.
+        squat_pose_sigma = 5.0              # exp kernel on |dof - q_squat| for the dip reward. Raised 3->5: the
+                                            # pull from standing (7.1 rad away) is (1/sigma)*e^(-7.1/sigma), which
+                                            # is ~55% stronger at 5 than 3 (peaks near sigma~7). default_pos no
+                                            # longer competes during the dip, so this positive pull now drives it.
         squat_pose_threshold = 3.2          # was 2.8: EASED (stuck @ squatQ~0.48). "in the squat" = pose_err<=3.2, shallower from
                                             # standing (7.1). THE depth knob: stuck-not-jumping (can't fold
                                             # enough) -> RAISE; jumps too shallow / want a deeper load -> LOWER.
@@ -351,29 +331,21 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
                                             # 0.9 -> dof_pos_limits starts penalizing in the last 10% before the
                                             # hard URDF limit, so the over-deep squat stops before jamming the "wall".
         squat_gate_height = 0.24            # must dip base to <=0.24m (idle ~0.31) to unlock jump rewards
-        squat_foot_height = 0.23            # 0.10 -> 0.23 (user). MEASURED: q_squat base == foot_height - 0.01, so
-                                            # foot_height 0.23 -> base 0.219m (NOT the parent comment's bogus "base
-                                            # ~0.20"; the OLD 0.10 was base ~0.09 = BELLY ON THE GROUND). At 0.10 the
-                                            # legs fold to the EXTREME for Go2's long legs -> q_squat itself rests on
-                                            # the ground, so the policy "dead-fish" splatted to BOTH farm the (now
-                                            # always-on) stance_squat pose reward AND offload its weight onto the
-                                            # ground (zeroing torques/dof_acc). At base ~0.22 the BELLY IS OFF THE
-                                            # GROUND -> the squat must be ACTIVELY held against gravity (no free ride)
-                                            # = a clean "combat crouch". Stays < squat_gate_height (0.24) -> qualifies.
-        successful_jump_min_peak_height = 0.35  # was 0.40: lowered because dead-stop static jump is weaker initially
+        successful_jump_min_peak_height = 0.40  # was 0.30: a ~0.34 "low pop" no longer counts as success
                                                 # (= command floor 0.40; kills the low-jump shortcut)
         # REVERTED to True (the decouple test did NOT fix the collapse -- root was default_pos taxing the jump,
         # now fixed by converting default_pos to a reward). Back to the baseline: successful_jump =
         # stay-upright(binary) x height_score x landing-accuracy (couples precision with stability).
         success_use_velocity_score = True
-        success_landing_min_score = 0.2     # REVERTED to safe (was 0.0 for the failed always-on test): the 0.2
-                                            # floor keeps a stable-but-short jump earning the bonus (no give-up
-                                            # death spiral). Isolate the soft clean_takeoff_bonus as the only change.
+        success_landing_min_score = 0.2     # 0.2 -> 1.0 (user): DECOUPLE successful_jump from the landing point so a
+                                            # CLEAN jump that falls SHORT of an over-reach command STILL earns the bonus
+                                            # -> the policy lands short CLEANLY instead of stutter-stepping to hit it
+                                            # (which clean_takeoff_terminate kills -> critic blowup @iter716). Graceful
+                                            # plateau at the clean reach. Lower (<1) to re-fold landing accuracy in.
         # DECOUPLE success from the squat_qualified HOLD gate (which flickers under pure-torque noise ->
         # made succ oscillate 0.01-0.89 while flight/peak were stable). peak>=0.40 already guarantees a
         # real countermovement, so the gate is redundant FOR SUCCESS. It still gates the jump-REWARD chain.
-        success_requires_squat_qualified = False  # REVERTED to safe (was True for the failed always-on test):
-                                                  # isolate the soft clean_takeoff_bonus as the single new variable.
+        success_requires_squat_qualified = False
         # PRE-JUMP STANCE ANCHOR: scale the default_pos penalty (toward q_squat) UP only during the
         # ~jumping_state STAND (pre-jump + post-finish), so the policy holds a COLLECTED ready stance (feet
         # under body) instead of sprawling pre-jump and then needing a recovery STEP (which trips jump_replant).
@@ -381,10 +353,6 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
         # gated post-discovery on _takeoff_omega_on (succ_ema>=0.80). WATCH noise_std (default_pos -0.7 ran away
         # once); if the stand still sprawls, raise; if discovery/jumping suffers, lower toward 1.0.
         default_pos_prejump_scale = 3.0
-        # stand_no_takeoff penalty: ignore the first N env-steps of each episode so the SPAWN drop (init base
-        # 0.42 -> natural rest ~0.30 free-fall, not a hop) is not penalized; the time-based jump reflex (the
-        # real target) fires later (~ep90+), so 50 cleanly separates them. Read in _reward_stand_no_takeoff.
-        stand_no_takeoff_grace = 50
         # RSI static deep-squat air-drop (the EXPLORATION piece): half the RSI envs start AT REST in the
         # deep squat + jumping, so value learns "deep-squat-at-rest = high return" (they're gate-exempt
         # and earn jump rewards from the dip). This plants V(dip) that the squat-depth gate then makes the
@@ -417,19 +385,27 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
         # makes the only way to reach far a clean push -> the dx curriculum SELF-LIMITS at the clean-jump
         # range (no artificial dx_final cap). Pure termination: a stutter loses the whole jump reward, and a
         # clean-but-short jump still earns more, so terminating is never an escape hatch.
-        clean_takeoff_terminate = False     # HARD gate OFF (user): zeroing the jump-reward chain on a re-plant
-                                            # killed discovery (robot couldn't learn to jump). Replaced by the
-                                            # SOFT clean_takeoff_bonus reward (clean pays more, messy allowed).
-                                            # =False also makes the _squat_deep_enough ~jump_replant gate inert.
-        clean_takeoff_min_step = 0          # EXPERIMENT (user): 60000 -> 0 = LITERAL always-on, the gate bites
-                                            # from step 0. Every re-planting jump forfeits the WHOLE jump-reward
-                                            # chain from the very first iter -> the policy must find a CLEAN
-                                            # single-push jump from scratch, never building a replant habit.
-                                            # ⚠️ HIGH discovery risk (code's note: early failed pushes also
-                                            # re-plant): with no early grace window, messy from-scratch attempts
-                                            # all re-plant -> jump rewards ~0 -> the robot may sit in the squat
-                                            # and never jump. WATCH squatQ/jump_flight in the first ~iter150; if
-                                            # flight stays ~0 (no jumping), discovery died -> raise min_step.
+        clean_takeoff_terminate = False     # DISABLED (user): clean-takeoff fully decoupled from successful_jump.
+                                            # Detector + confiscation are commented out in go2_omnijump_torque.py;
+                                            # this flag=False is the belt-and-suspenders so no path confiscates.
+                                            # We don't care about takeoff cleanliness, only jump height/distance/accuracy.
+        clean_takeoff_min_step = 0          # INERT now (confiscation disabled). Was: ALWAYS-ON gate step.
+                                            # the OLD always-on died (flight~0) ONLY because the broken detector
+                                            # flagged ~100% of jumps -> NO jump ever earned successful_jump -> the
+                                            # policy gave up and squatted. With the fixed detector a CLEAN jump
+                                            # escapes confiscation and earns the full bonus, so the policy has a
+                                            # reason to jump (cleanly). Early discovery is unaffected: success needs
+                                            # peak>=0.30 (real_jump), so there is nothing to confiscate until the
+                                            # policy can already jump. Benefit: the policy learns clean takeoff from
+                                            # the start (never builds the stutter habit) + no abrupt step60000 cliff,
+                                            # and the dx curriculum (stable_hit) only advances on CLEAN successful jumps.
+        # jump_replant (stutter-step) detector tuning (see _update_jump_state). The OLD detector fired on ANY
+        # contact-count rise above the load minimum (a 4->3->4 micro-wiggle) -> flagged ~100% of clean jumps ->
+        # the step60000 confiscation above nuked ~every successful_jump (curriculum froze @iter714). Now a
+        # re-plant must (a) RISE >= replant_rise_count feet above the load minimum AND (b) HOLD >= replant_min_steps
+        # consecutive steps. rise>=2 catches the real 4->2->4 stutter, ignores the 4->3->4 micro-wiggle.
+        replant_rise_count = 2              # min contact-count rise above the load minimum to count as a re-plant
+        replant_min_steps = 3              # consecutive steps the re-plant must hold (filters 1-step sensor flicker)
         # CLEAN-LANDING (user request): no small hop / shuffle-step after touchdown -> ONE clean settle. Once
         # all 4 feet HOLD contact for clean_landing_plant_hold steps (skips the impact chatter), any foot
         # lifting is penalized per-step by _reward_clean_landing (weight `clean_landing` in scales). PENALTY,
@@ -511,6 +487,11 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
                                              # it physically can't push as hard once PD fades (a CAPABILITY problem,
                                              # not motivation), so forcing a launch only produced worse weak jumps +
                                              # extra penalty. The real lever is the PD-fade slowdown (growth.x0), below.
+            # ---- STAND means STAND: penalize leaving the ground when commanded to stand (cmd4<=0.5) ----
+            stand_no_takeoff = -5.0          # HARD penalty (verified working, ckpt model_3000 stood): cmd4=0 (STAND)
+                                             # but all feet leave the ground (a reflex hop) -> punish -> cmd4 becomes a
+                                             # real stand/jump switch. Gated post-discovery (_takeoff_omega_on) + only
+                                             # at cmd4<=0.5, so it NEVER touches the cmd4=1 jump or its discovery.
             # ---- MERGED takeoff launch: velocity-VECTOR match (height + distance in one), replaces vertical-only ----
             takeoff_vertical_velocity = 0.0  # OFF: superseded by takeoff_velocity_match (which == it at dx=0)
             takeoff_velocity_match = 15.0    # reward takeoff velocity matching the ballistic launch to (landing
@@ -531,17 +512,6 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
                                              # Farm-safe: stops at the gate, and squatting-without-jumping earns no
                                              # successful_jump anyway. (history: 0.5/2.0 weight-only + time-window all failed.)
             # ---- air-time + stay-planted boosts (user) ----
-            clean_takeoff_bonus = 3.0        # SOFT clean-takeoff: extra flight reward for a no-re-plant (clean
-                                             # single-push) takeoff. Clean jump earns all_feet_airborne + this;
-                                             # a stutter-stepped jump earns all_feet_airborne only -> clean pays
-                                             # MORE but messy is NOT forbidden (discovery-safe, replaces the hard
-                                             # clean_takeoff_terminate gate). Tune: higher = stronger pull to clean.
-            stand_no_takeoff = -5.0          # HARD penalty (user): cmd4=0 (STAND) but all feet leave the ground
-                                             # (a hop) -> punish, so cmd4 is the real switch (cmd4=0 => stay grounded
-                                             # in the resting squat, cmd4=1 => jump). Only fires at cmd4<=0.5 +
-                                             # post-discovery + after grace -> never touches a commanded jump or
-                                             # discovery. Tune harder (-8/-10) if the hop survives; the resting
-                                             # squat (the desired stand) is unaffected (only LEAVING the ground costs).
             all_feet_airborne = 3.0          # 2.0 -> 3.0: more air-time pressure. Gated (squat_deep + height_progress)
                                              # so it can't be farmed by a tucked sprawl. The policy currently UNDERSHOOTS
                                              # the commanded apex (peak ~0.50 vs cmd ~0.55) -> this pushes it to the FULL

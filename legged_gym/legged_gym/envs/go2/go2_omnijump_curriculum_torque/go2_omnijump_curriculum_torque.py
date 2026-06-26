@@ -53,6 +53,14 @@ class GO2OmniJumpCurriculumTorque(GO2OmniJumpTorque):
             ramp_progress = (self.step_count - warmup_steps) / (fade_end_steps - warmup_steps)
             self.general_scale = min(1.0, max(0.0, ramp_progress))
 
+        # EVAL/PLAY config-INDEPENDENT override: if a saved general_scale was frozen (play sets env._gs_frozen from
+        # the checkpoint's loaded_general_scale), use it EXACTLY instead of the step_count+config re-derivation
+        # above. So play reproduces the TRAINED PD/freq/torque condition no matter what fade schedule the CURRENT
+        # config has -- step_count pinning ALONE re-derives general_scale from the current warmup/x0/fade, which is
+        # WRONG if the fade was changed since this checkpoint was trained.
+        _frozen = getattr(self, "_gs_frozen", None)
+        if _frozen is not None:
+            self.general_scale = max(0.0, min(1.0, float(_frozen)))
         self.current_freq = self.general_scale * (self.max_freq - self.start_freq) + self.start_freq
         self.current_torque_limit_scale = (
             self.general_scale * (self.max_torque_scale - self.start_torque_scale) + self.start_torque_scale

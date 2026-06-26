@@ -38,13 +38,11 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
                              # momentum (vx~1.3 at touchdown) is BRAKED, not bounced+coasted (the post-landing slide)
         "grounded_jump",     # MUST-LAUNCH penalty (negative weight): close the retreat-to-not-jumping escape ->
                              # force the policy to TRY ITS BEST to launch. Discovery-gated in _reward_grounded_jump.
+        "stand_no_takeoff",  # STAND means STAND: cmd4=0 but all feet leave the ground (a reflex hop) -> punish ->
+                             # cmd4 becomes a real stand/jump switch. Post-discovery gated in _reward_stand_no_takeoff.
         "four_leg_push",     # SYNC FOUR-LEG PUSH: reward EVEN vertical-GRF across the 4 feet during push so the
                              # idle rear legs (torque_diag: rear thigh ~0.24 throttle vs front ~0.93) pull their
                              # weight -> more total impulse -> farther. Discovery-gated in _reward_four_leg_push.
-        "clean_takeoff_bonus",  # SOFT clean-takeoff: extra reward for a no-re-plant takeoff (clean pays MORE,
-                                # messy still allowed) -- replaces the hard clean_takeoff_terminate that killed discovery.
-        "stand_no_takeoff",     # HARD penalty: cmd4=0 (STAND) but all feet leave the ground (a hop) -> punish ->
-                                # cmd4 becomes the real stand/jump switch. Gated post-discovery + grace (skips spawn drop).
     }   # clean_landing REMOVED (detector never armed -> ~0). Post-landing slide handled by landing_stability
         # (brake momentum) + disable_jump_on_landing (no commanded re-jump); error obs is real-time (no obs-hold).
 
@@ -57,8 +55,6 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
         "projected_landing": 1,
         "forward_reach": 1,
         "four_leg_push": 1,
-        "clean_takeoff_bonus": 0,   # active from step 1 (soft positive bonus = discovery-safe)
-        "stand_no_takeoff": 0,      # stage 0; real gate is _takeoff_omega_on inside the reward (post-discovery)
         "foot_contact_sync": 0,
         "stance_squat": 0,
         "base_ang_vel_xy": 0,   # active from step 1 (curriculum disabled = one-stage)
@@ -68,6 +64,7 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
         "takeoff_velocity_match": 0,   # active from step 1 (replaces takeoff_vertical_velocity)
         "landing_stability": 0,   # active from step 1 (override parent's stage 3, which never fires one-stage)
         "grounded_jump": 0,   # stage 0; the real gate is the succ-EMA latch inside _reward_grounded_jump
+        "stand_no_takeoff": 0,   # stage 0; the real gate is the succ-EMA latch (_takeoff_omega_on) inside the reward
     }   # clean_landing REMOVED (see whitelist note above)
 
     # ------------------------------------------------------------------ #
@@ -165,8 +162,8 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
     # ------------------------------------------------------------------ #
     # Distance curriculum: jump-stat plumbing + advance logic.
     # ------------------------------------------------------------------ #
-    def _reset_jump_buffers(self, env_ids, **kwargs):
-        super()._reset_jump_buffers(env_ids, **kwargs)
+    def _reset_jump_buffers(self, env_ids):
+        super()._reset_jump_buffers(env_ids)
         if hasattr(self, "jump_target_hits"):
             self.jump_target_hits[env_ids] = 0.0
 
@@ -546,13 +543,7 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
         l1 = torch.sum(torch.abs(self.dof_pos - self.default_joint_pd_target), dim=1)
         pushoff = self.jumping_state & (~self.has_taken_off) & (self.root_states[:, 9] > 0.0)
         squat_down = self.jumping_state & (~self.has_taken_off) & (~self._squat_deep_enough())
-        # ALSO zero during FLIGHT + LANDING (has_taken_off): the robot legitimately extends/reaches there
-        # (deviating from the q_air/q_ground PD target), so penalising it was the residual JUMP TAX -- default_pos
-        # was the dominant penalty (~-1.2, scaling with PEAK HEIGHT) that pushed the policy to jump LESS -> the
-        # post-peak decline. Now default_pos ONLY anchors the STAND; the whole jump (squat-down/push/flight/land)
-        # is untaxed.
-        zero = pushoff | squat_down | self.has_taken_off
-        return torch.where(zero, torch.zeros_like(l1), l1)
+        return torch.where(pushoff | squat_down, torch.zeros_like(l1), l1)
 
     def _reward_grounded_jump(self):
         # MUST-LAUNCH penalty (landing override) -- CLOSE the "retreat to NOT jumping" escape. Diagnosis (Jun21
@@ -605,11 +596,11 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
         sigma = max(float(getattr(self.cfg.rewards, "squat_pose_sigma", 3.0)), 1e-4)
         reward = torch.exp(-self._squat_pose_err() / sigma)
         thr = float(getattr(self.cfg.rewards, "squat_pose_threshold", 0.0))
-        # Keep paying the dip-shaping reward throughout the ENTIRE load phase and jump_armed phase.
-        # Removing the premature ~squat_qualified cutoff (which killed the reward instantly under Option A).
-        # Also activating it during jump_armed so the policy learns to actively hold the squat BEFORE the jump fires!
-        is_armed = getattr(self, "jump_armed", torch.zeros_like(self.jumping_state))
-        active = (self.jumping_state | is_armed) & (~self.has_taken_off)
+        # Keep paying the dip-shaping reward until the squat is QUALIFIED (held >= squat_hold_steps),
+        # not merely touched: this is what gives the policy a reason to STAY folded through the hold
+        # window instead of popping straight back up the instant pose_err first dips under thr.
+        not_in_pose_yet = (~self.squat_qualified) if thr > 0.0 else torch.ones_like(self.jumping_state)
+        active = self.jumping_state & (~self.has_taken_off) & not_in_pose_yet
         return active.float() * reward
 
     def _reward_base_ang_vel_xy(self):

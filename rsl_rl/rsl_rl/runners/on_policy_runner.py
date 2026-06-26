@@ -202,7 +202,11 @@ class OnPolicyRunner:
                 value = torch.mean(infotensor)
                 self.writer.add_scalar('Episode/' + key, value, locs['it'])
                 self.wbd_writer.log({'Episode/' + key: value}, step=locs['it'])
-                if episode_print_keys is None or key in episode_print_keys:
+                # CONSOLE print: by default show ONLY the reward terms (rew_*) -- the curriculum_*/landing_*
+                # diagnostics still go to tensorboard above, just not the console. An explicit
+                # cfg.logging.print_episode_keys override still selects exactly those keys.
+                show_key = key.startswith('rew_') if episode_print_keys is None else (key in episode_print_keys)
+                if show_key:
                     ep_string += f"""{f'Mean episode {key}:':>{pad}} {value:.4f}\n"""
         mean_std = self.alg.actor_critic.std.mean()
         fps = int(self.num_steps_per_env * self.env.num_envs / (locs['collection_time'] + locs['learn_time']))
@@ -287,6 +291,12 @@ class OnPolicyRunner:
             'optimizer_state_dict': self.alg.optimizer.state_dict(),
             'iter': self.current_learning_iteration,
             'infos': infos,
+            # CURRICULUM STATE: the SATA growth ramp (general_scale -> pd_alpha, control-freq, torque-scale)
+            # is driven by env.step_count. Save it so eval/play can reproduce the EXACT PD/freq/torque
+            # condition this checkpoint was TRAINED at -- evaluating at the wrong general_scale (e.g. forcing
+            # pure torque on a still-PD-assisted policy) makes a good policy FALSELY "unable to jump".
+            'step_count': int(getattr(self.env, 'step_count', 0)),
+            'general_scale': float(getattr(self.env, 'general_scale', 0.0)),
         }, path)
 
     def load(self, path, load_optimizer=True):
@@ -295,6 +305,10 @@ class OnPolicyRunner:
         if load_optimizer:
             self.alg.optimizer.load_state_dict(loaded_dict['optimizer_state_dict'])
         self.current_learning_iteration = loaded_dict['iter']
+        # Expose the saved curriculum state so eval/play can auto-match the checkpoint's training condition.
+        self.loaded_step_count = loaded_dict.get('step_count', None)
+        self.loaded_general_scale = loaded_dict.get('general_scale', None)
+        self.loaded_path = path   # so eval/play can parse the iter from model_XXXX.pt when 'iter' is 0/missing
         return loaded_dict['infos']
 
     def get_inference_policy(self, device=None):
