@@ -160,6 +160,16 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
         # (the current model never saw a clean 0/1 -> OOD in play).
         stand_command_value = 0.0
         jump_command_value = 1.0
+        # ---- 3-way episode allocation (overrides the jump_command_range split; see env._apply_episode_modes) ----
+        # 70% jump / 10% pure stand / 20% landing-RSI. The landing-RSI episodes DROP the robot in the AIR with a
+        # forward (command-direction) velocity in a landing-ready pose + "about to land" state -> it touches down
+        # WITH momentum and must RECOVER to the stand. Densely trains the fast-directional-landing -> topple case.
+        # RSI envs are EXCLUDED from the success metrics. Both 0 -> no-op (falls back to jump_command_range).
+        stand_episode_prob = 0.10
+        rsi_landing_prob = 0.20
+        rsi_landing_height = 0.55          # drop height (m above ground) -> enough fall to land with the fwd velocity
+        rsi_landing_speed_min = 1.0        # forward landing speed range (m/s), ~matches a real jump's touchdown vx
+        rsi_landing_speed_max = 1.4
         # The moment the robot touches down, flip the jump command to STAND for the whole 0.75s landing
         # buffer (instead of holding cmd4=1 until the jump "finishes"). Without this the policy sees cmd4=1 +
         # the residual landing error during the buffer and HOPS to chase the undershot target. Verified in
@@ -231,6 +241,13 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
         # 0.42 -> natural rest ~0.30 free-fall = a spawn-height artifact) is not punished. The real reflex hop
         # (a commanded-stand hop, not the spawn settle) fires later (~ep90+), so 50 cleanly separates them.
         stand_no_takeoff_grace = 50
+        # stand_height (OmniNet base_height_stance) target + kernel width. 0.30 = Go2's natural standing height,
+        # MATCHED to default_dof_pos (~0.30) and q_ground (ground_foot_height 0.30) so stand_height and
+        # _reward_default_pos AGREE on the SAME stand (no tug-of-war: default_pos shapes the joint pose, stand_height
+        # directly lifts the base + requires all 4 feet). Lower CG is also harder to topple on a fast landing.
+        # (NOT 0.38 = aliengo's stand from OmniNet; Go2 is smaller.) Read in _reward_stand_height.
+        stand_height_target = 0.30
+        stand_height_sigma = 0.01
         # HARD pitch termination (see check_termination): end the episode if the base pitches NOSE-DOWN beyond
         # this (projected_gravity[:,0], ~sin(tilt)) AT TOUCHDOWN (the landing phase). Forces a level touchdown
         # (no front-feet-first), since soft penalties got traded off. Same succ-rate gate as takeoff_omega
@@ -245,12 +262,20 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
         # The 1s settled-stance is a PLAY/visual nicety only -> set it in play_landing, not training.
         landing_real_jump_min_peak = 0.40   # peak gate for the landing_position reward
                                             # (omnijump squat settles ~0.31, real jump peaks ~0.56)
-        landing_buffer_steps = 150          # was 25 (=0.125s, inherited). A jump only "finishes" (success
-                                            # credited + next jump re-enabled) after the robot stays stable
-                                            # 150 steps (~0.75s) post-touchdown without exceeding fallover tilt.
-                                            # = the "stand stable" requirement. The 25-step buffer let the policy
-                                            # get credit after 0.125s then topple ~0.75s later (play roll_cutoff).
-                                            # Toppling within these 150 steps -> roll_cutoff termination = penalty.
+        landing_buffer_steps = 150          # was 25 (=0.125s, inherited). FALLBACK timeout now (see
+                                            # landing_finish_on_plant): a jump that never settles still finishes
+                                            # after 150 steps (~0.75s). Toppling within it -> roll_cutoff = penalty.
+        # OMNI-JUMP-STYLE landing handoff: finish the jump as soon as the robot SETTLES on all 4 feet
+        # (landing_planted), not after the full buffer. Then jumping_state=False -> cmd4=0 stand mode ->
+        # stand_no_takeoff + posture rewards penalize any post-landing BOUNCE/re-lift (which cannot be punished
+        # inside jumping_state because flight is also airborne). See _update_jump_state ready_to_finish.
+        landing_finish_on_plant = True
+        post_jump_stand_steps = 30          # JUMP episodes: short post-touchdown tail -> reset fast after landing AT
+                                            # the position. (Was 150 -> that long standing tail let the standing
+                                            # reward dominate the return and weakened the jump; jump episodes now
+                                            # care ONLY about jump distance + landing position.)
+        recovery_stand_steps = 120          # RECOVERY episodes (stand/RSI): LONG window so the policy has time to
+                                            # actually recover to the stand (this is where landing-stability is trained).
         # CONTINUOUS-jump NEXT-JUMP pose gate (DECOUPLED from success): success/finish is granted on
         # the time buffer alone (dense discovery signal preserved); this gate only delays the NEXT
         # jump until the robot has RETURNED to the default standing pose. Forces every jump in a
@@ -299,10 +324,16 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
         # "squatted" = whole-body joint pose within squat_pose_threshold (L1 over 12 joints) of the
         # loaded pose q_squat. Standing is ~7.1 rad from q_squat (calf -1.5->-2.66, thigh 0.8/1.0
         # ->1.53, hips unchanged); q_squat itself = 0. Drives stand->squat, then unlocks the jump.
-        squat_pose_sigma = 5.0              # exp kernel on |dof - q_squat| for the dip reward. Raised 3->5: the
-                                            # pull from standing (7.1 rad away) is (1/sigma)*e^(-7.1/sigma), which
-                                            # is ~55% stronger at 5 than 3 (peaks near sigma~7). default_pos no
-                                            # longer competes during the dip, so this positive pull now drives it.
+        squat_pose_sigma = 2.0              # COMBAT-SQUAT (restore ccc8ccf): TIGHTENED 5->2. At 5 the kernel was so
+                                            # broad a BELLY SPLAT (legs over-folded, body on the ground) scored ~the
+                                            # same as a clean held squat -> nothing stopped the policy splatting ->
+                                            # over-deep squat with NO push range -> weak jump. At 2 only a clean
+                                            # q_squat pose scores (a splat ~0.1) -> forces an ACTIVE combat crouch.
+        # COMBAT-SQUAT depth (restore ccc8ccf): q_squat target = foot_height 0.23 -> base ~0.22 (belly OFF the
+        # ground, must be held actively against gravity), NOT the parent's 0.10 (base ~0.09 = belly ON ground =
+        # over-folded legs, no push range -> the weak jump). base ~= foot_height - 0.01 (MEASURED). Overrides
+        # the base config's 0.10 for the landing task only. Still <= squat_gate_height 0.24, so it still qualifies.
+        squat_foot_height = 0.23
         squat_pose_threshold = 3.2          # was 2.8: EASED (stuck @ squatQ~0.48). "in the squat" = pose_err<=3.2, shallower from
                                             # standing (7.1). THE depth knob: stuck-not-jumping (can't fold
                                             # enough) -> RAISE; jumps too shallow / want a deeper load -> LOWER.
@@ -410,7 +441,10 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
         # all 4 feet HOLD contact for clean_landing_plant_hold steps (skips the impact chatter), any foot
         # lifting is penalized per-step by _reward_clean_landing (weight `clean_landing` in scales). PENALTY,
         # not termination (keeps the successful_jump bonus). Gated post-discovery (succ-latch _takeoff_omega_on).
-        clean_landing_plant_hold = 15       # consecutive all-4-contact steps (~0.075s) to latch "settled" before watching for re-lift
+        clean_landing_plant_hold = 8        # 15->8: consecutive all-4-contact steps to latch "settled" (landing_planted).
+                                            # Shorter = the OMNI-JUMP handoff (landing_finish_on_plant) triggers SOONER
+                                            # & more reliably (high-velocity landings rarely hold 15 clean steps before
+                                            # bouncing; 8~0.04s still skips the touchdown impact chatter).
         landing_pitch_extra = 5.0           # EXTRA pitch-leveling multiplier on prelanding+landing (see _reward_pitch_level):
                                             # the whole-cycle pitch term is diluted by the long level cruise + the fast post-tumble
                                             # termination, so it barely presses the touchdown. At 5.0 the descent/touchdown pitch is
@@ -422,6 +456,15 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
                                             # HARD ((1+12)x EVERY jump step, +landing_pitch_extra on top at landing) -> the body
                                             # must be LEVEL the whole jump -> forces a level push/launch. Tune: still tilted ->
                                             # raise (15/20); if level flight shortens the jump (dx drops) the lean bought reach -> ease.
+        # PHASE-SPLIT orientation (see _reward_orientation override): during the JUMP, the shared orientation term
+        # penalizes ROLL ONLY (not pitch) -> FREE the nose-up launch arc a forward jump wants (pitch is owned by
+        # pitch_level: one-sided, allows nose-up). The base symmetric pitch^2+roll^2 was re-penalising the nose-up
+        # and capping reach. STANDING keeps full pitch+roll. False -> base behavior (symmetric, all phases).
+        orientation_jump_roll_only = False  # REVERTED: orientation is SYMMETRIC -- it was also penalizing NOSE-DOWN
+                                            # (helping keep level). Removing it in-jump dropped the nose-down penalty
+                                            # -> a weak forward-diving jump face-PLANTED (more nose-down, not the
+                                            # hoped-for nose-up, which needs a STRONG rear-driven push, not less
+                                            # penalty). The nose-up lever is push POWER, not the orientation term.
 
         class scales(GO2OmniJumpCurriculumTorqueCfg.rewards.scales):
             # ---- proven jump-driving stack inherited UNCHANGED ----
@@ -492,6 +535,10 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
                                              # but all feet leave the ground (a reflex hop) -> punish -> cmd4 becomes a
                                              # real stand/jump switch. Gated post-discovery (_takeoff_omega_on) + only
                                              # at cmd4<=0.5, so it NEVER touches the cmd4=1 jump or its discovery.
+            stand_height = 3.0               # RETURN-TO-STANDING (OmniNet base_height_stance): + reward standing TALL
+                                             # at stand_height_target on all 4 feet in stand mode (cmd4<=0.5 & ~jumping).
+                                             # Gives the post-landing recovery a height goal (the missing terminal state).
+                                             # MODERATE (stand-reward history: too big -> not-jumping comfy; watch flight).
             # ---- MERGED takeoff launch: velocity-VECTOR match (height + distance in one), replaces vertical-only ----
             takeoff_vertical_velocity = 0.0  # OFF: superseded by takeoff_velocity_match (which == it at dx=0)
             takeoff_velocity_match = 15.0    # reward takeoff velocity matching the ballistic launch to (landing

@@ -745,10 +745,19 @@ class GO2OmniJumpTorque(GO2Torque):
         # successful_jump carrot and the policy never learns to jump. The "return to default pose
         # before the NEXT jump" rule is decoupled below: it delays the next jump WITHOUT withholding
         # success for this one.
+        # OMNI-JUMP-STYLE landing handoff (landing_finish_on_plant): finish the jump the moment the robot has
+        # SETTLED on all four feet (landing_planted), instead of waiting the full landing buffer. Once finished,
+        # jumping_state=False -> cmd4=0 stand mode -> stand_no_takeoff + posture rewards take over and penalize
+        # any post-landing BOUNCE / re-lift. (That bounce CANNOT be penalized while jumping_state is True, because
+        # the legitimate FLIGHT phase is also all-feet-airborne -- so we must hand off to stand mode first.) The
+        # full landing-buffer timeout stays as the fallback for landings that never settle (keep bouncing).
+        buffer_done = self.landing_step_counter >= max(int(self.cfg.rewards.landing_buffer_steps), 1)
+        if getattr(self.cfg.rewards, "landing_finish_on_plant", False):
+            buffer_done = buffer_done | self.landing_planted
         ready_to_finish = (
             self.jumping_state
             & self.has_landed
-            & (self.landing_step_counter >= max(int(self.cfg.rewards.landing_buffer_steps), 1))
+            & buffer_done
         )
         pose_gate = getattr(self.cfg.rewards, "next_jump_requires_default_pose", False)
         if torch.any(ready_to_finish):
@@ -970,7 +979,17 @@ class GO2OmniJumpTorque(GO2Torque):
             self.reset_buf |= self.last_jump_success | self.jump_episode_failed
         elif getattr(self.cfg.rewards, "one_jump_reward_per_episode", False) and self.cfg.commands.num_commands > 4:
             post_jump_stand_steps = int(getattr(self.cfg.rewards, "post_jump_stand_steps", 80))
-            self.reset_buf |= self.single_jump_command_done & (self.post_jump_step_counter >= post_jump_stand_steps)
+            # JUMP episodes reset FAST after touchdown (they only care about landing AT the position -> no long
+            # standing tail to dominate the return and weaken the jump). RECOVERY episodes (stand/RSI) keep a LONG
+            # window so the policy has time to actually recover to the stand.
+            rec = getattr(self, "_recovery_episode", None)
+            if rec is not None:
+                recovery_steps = int(getattr(self.cfg.rewards, "recovery_stand_steps", post_jump_stand_steps))
+                thresh = torch.where(rec, torch.full_like(self.post_jump_step_counter, recovery_steps),
+                                     torch.full_like(self.post_jump_step_counter, post_jump_stand_steps))
+                self.reset_buf |= self.single_jump_command_done & (self.post_jump_step_counter >= thresh)
+            else:
+                self.reset_buf |= self.single_jump_command_done & (self.post_jump_step_counter >= post_jump_stand_steps)
 
     def _solve_pose_from_foot_height(self, foot_height):
         l1 = self.cfg.rewards.ik_thigh_length
@@ -1133,6 +1152,10 @@ class GO2OmniJumpTorque(GO2Torque):
         if not getattr(self, "_takeoff_omega_on", False):
             return torch.zeros(self.num_envs, device=self.device)
         standing = (self.commands[:, 4] <= float(self.cfg.commands.jump_command_threshold)) & (~self.jumping_state)
+        rec = getattr(self, "_recovery_episode", None)
+        if rec is not None:
+            standing = standing & rec   # landing task: ONLY recovery (stand/RSI) episodes train standing; JUMP
+            #                             episodes care only about jump distance + landing position (no stand reward).
         grace = self.episode_length_buf > int(getattr(self.cfg.rewards, "stand_no_takeoff_grace", 50))
         airborne = self._get_contact_state().sum(dim=1) == 0   # all four feet off the ground = a hop
         return (standing & grace & airborne).float()

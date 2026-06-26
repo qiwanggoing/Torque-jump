@@ -9,7 +9,8 @@ observation, dense projected-landing + sparse landing-position rewards).
 import math
 
 import torch
-from isaacgym.torch_utils import get_euler_xyz
+from isaacgym import gymtorch
+from isaacgym.torch_utils import get_euler_xyz, torch_rand_float
 
 from legged_gym.envs.go2.go2_omnijump_curriculum_torque.go2_omnijump_curriculum_torque import (
     GO2OmniJumpCurriculumTorque,
@@ -40,6 +41,9 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
                              # force the policy to TRY ITS BEST to launch. Discovery-gated in _reward_grounded_jump.
         "stand_no_takeoff",  # STAND means STAND: cmd4=0 but all feet leave the ground (a reflex hop) -> punish ->
                              # cmd4 becomes a real stand/jump switch. Post-discovery gated in _reward_stand_no_takeoff.
+        "stand_height",      # RETURN-TO-STANDING (OmniNet base_height_stance): in stand mode (cmd4<=0.5 & ~jumping)
+                             # reward standing TALL at stand_height_target on all 4 feet -> the post-landing recovery
+                             # finally has a height goal (height_tracking is cmd4=1-only). Post-discovery gated.
         "four_leg_push",     # SYNC FOUR-LEG PUSH: reward EVEN vertical-GRF across the 4 feet during push so the
                              # idle rear legs (torque_diag: rear thigh ~0.24 throttle vs front ~0.93) pull their
                              # weight -> more total impulse -> farther. Discovery-gated in _reward_four_leg_push.
@@ -65,6 +69,7 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
         "landing_stability": 0,   # active from step 1 (override parent's stage 3, which never fires one-stage)
         "grounded_jump": 0,   # stage 0; the real gate is the succ-EMA latch inside _reward_grounded_jump
         "stand_no_takeoff": 0,   # stage 0; the real gate is the succ-EMA latch (_takeoff_omega_on) inside the reward
+        "stand_height": 0,       # stage 0; the real gate is the succ-EMA latch (_takeoff_omega_on) inside the reward
     }   # clean_landing REMOVED (see whitelist note above)
 
     # ------------------------------------------------------------------ #
@@ -75,6 +80,15 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
         # World-frame desired landing xy, set each reset from spawn + commanded
         # displacement. Initialised to spawn so step-0 obs is well-defined.
         self.landing_target = self.root_states[:, :2].clone()
+        # LANDING-RSI: envs initialised in the AIR with directional velocity (a "land-and-recover" drill).
+        # Marked True for the whole episode; EXCLUDED from the jump success metrics (they are not real jumps).
+        self.landing_rsi_mask = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        # RECOVERY episode (= stand OR landing-RSI): the ONLY episodes that train landing-stability / standing
+        # (stand_height, stand_no_takeoff) + get a long post-touchdown window. JUMP episodes (~recovery) focus ONLY
+        # on jump distance + landing AT the target position, then reset fast -> no standing reward competes with /
+        # weakens the jump. The recovery SKILL transfers to real jump landings via the shared policy (an RSI drop
+        # and a jump touchdown are the same state: airborne-with-forward-velocity -> land).
+        self._recovery_episode = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
 
         # Stage 2: widen the displacement ranges that the parent's
         # _resample_commands draws commands[0:2] from. Stage 1 leaves them [0,0]
@@ -136,6 +150,80 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
         self.landing_target[env_ids, 0] = self.env_origins[env_ids, 0] + init_x + self.commands[env_ids, 0]
         self.landing_target[env_ids, 1] = self.env_origins[env_ids, 1] + init_y + self.commands[env_ids, 1]
         self._update_dx_curriculum()
+        self._apply_episode_modes(env_ids)
+
+    def _apply_episode_modes(self, env_ids):
+        # 3-way episode allocation (on top of the parent's command resample):
+        #   jump (default)         -- a normal commanded jump.
+        #   stand (stand_episode_prob)        -- cmd4=0 whole episode: train a stable stand.
+        #   landing-RSI (rsi_landing_prob)    -- DROPPED in the air with a forward (command-direction) velocity in a
+        #       landing-ready pose + the "in flight, about to land" state machine, so it touches down WITH momentum
+        #       and must RECOVER to the stand. This densely trains the exact failure case (fast directional landing
+        #       -> topple) without doing the full jump first. RSI envs are EXCLUDED from the jump success metrics
+        #       (see _log_jump_episode_stats) -- they are not real jumps and would otherwise depress succ_rate /
+        #       break the _takeoff_omega_on gate. Both fractions default 0 -> this whole method is a safe no-op.
+        self.landing_rsi_mask[env_ids] = False
+        self._recovery_episode[env_ids] = False   # default = JUMP episode (focus on jump + landing position only)
+        # GATE post-discovery (_takeoff_omega_on, the succ_ema>=0.80 latch -- same gate as stand_height): do NOT
+        # introduce stand / landing-RSI episodes until the policy can ALREADY jump. From step 1 they form an easy
+        # "don't jump, just stand" attractor that captures the policy before it discovers the HARD squat-jump ->
+        # discovery dies (squatQ stays ~0, flight collapses as PD fades). Before discovery: 100% normal jump.
+        if not getattr(self, "_takeoff_omega_on", False):
+            return
+        rsi_p = float(getattr(self.cfg.commands, "rsi_landing_prob", 0.0))
+        stand_p = float(getattr(self.cfg.commands, "stand_episode_prob", 0.0))
+        if (rsi_p <= 0.0 and stand_p <= 0.0) or len(env_ids) == 0:
+            return
+        r = torch.rand(len(env_ids), device=self.device)
+        # --- pure STAND episodes: cmd4=0, zero velocity command ---
+        stand_ids = env_ids[(r >= rsi_p) & (r < rsi_p + stand_p)]
+        if len(stand_ids) > 0:
+            self._disable_jump_command(stand_ids)
+            self.commands[stand_ids, 0:2] = 0.0
+            self._recovery_episode[stand_ids] = True
+        # --- JUMP episodes: force cmd4=jump so the remaining fraction are real jumps (override the parent's
+        #     jump_command_range ~9% stand split, so the allocation is a clean jump / stand / RSI partition) ---
+        jump_ids = env_ids[r >= rsi_p + stand_p]
+        if len(jump_ids) > 0:
+            self.commands[jump_ids, 4] = float(getattr(self.cfg.commands, "jump_command_value", 1.0))
+        # --- landing-RSI: air-drop with forward velocity ---
+        rsi_ids = env_ids[r < rsi_p]
+        if len(rsi_ids) == 0:
+            return
+        self.landing_rsi_mask[rsi_ids] = True
+        self._recovery_episode[rsi_ids] = True
+        drop_h = float(getattr(self.cfg.commands, "rsi_landing_height", 0.55))
+        smin = float(getattr(self.cfg.commands, "rsi_landing_speed_min", 1.0))
+        smax = float(getattr(self.cfg.commands, "rsi_landing_speed_max", 1.4))
+        speed = torch_rand_float(smin, smax, (len(rsi_ids), 1), device=self.device).squeeze(1)
+        # Position: spawn xy (already set by parent), z = drop height above ground.
+        self.root_states[rsi_ids, 2] = self.env_origins[rsi_ids, 2] + drop_h
+        # Velocity: forward = +x in the world (the robot spawns facing +x), i.e. the command direction for the
+        # forward landing task. vz=0 (just falls). dy=0 (forward-only task).
+        self.root_states[rsi_ids, 7] = speed
+        self.root_states[rsi_ids, 8] = 0.0
+        self.root_states[rsi_ids, 9] = 0.0
+        # Landing-ready pose (legs under body, ready to absorb), still joints.
+        self.dof_pos[rsi_ids] = self.q_ground_target.unsqueeze(0)
+        self.dof_vel[rsi_ids] = 0.0
+        # State machine: treat as IN FLIGHT, about to land (so the landing/recovery flow fires on touchdown,
+        # and stand_no_takeoff -- which excludes jumping_state -- does NOT punish the unavoidable fall).
+        self.jumping_state[rsi_ids] = True
+        self.has_taken_off[rsi_ids] = True
+        self.has_landed[rsi_ids] = False
+        self.peak_base_height[rsi_ids] = self.root_states[rsi_ids, 2]
+        self.takeoff_root_xy[rsi_ids] = self.root_states[rsi_ids, :2]
+        # Command: STAND, no jump-height (cmd[3]=0 -> success_at_impact False -> registers no fake success).
+        self._disable_jump_command(rsi_ids)
+        self.commands[rsi_ids, 3] = 0.0
+        # Push the modified root + dof state to the sim.
+        ids32 = rsi_ids.to(dtype=torch.int32)
+        self.gym.set_actor_root_state_tensor_indexed(
+            self.sim, gymtorch.unwrap_tensor(self.root_states), gymtorch.unwrap_tensor(ids32), len(ids32)
+        )
+        self.gym.set_dof_state_tensor_indexed(
+            self.sim, gymtorch.unwrap_tensor(self.dof_state), gymtorch.unwrap_tensor(ids32), len(ids32)
+        )
 
     def _resample_commands(self, env_ids):
         # BIASED command sampling (Atanassov local-difficulty): after the parent draws dx uniformly from
@@ -182,6 +270,18 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
             self._last_jump_cmd_dx[self.just_landed] = torch.norm(self.commands[self.just_landed, 0:2], dim=1)
 
     def _log_jump_episode_stats(self, env_ids):
+        # EXCLUDE landing-RSI envs from ALL jump metrics: they are air-drop "land-and-recover" drills, not real
+        # jumps. Counting them (0 success / 0 hit) would depress succ_rate and could starve the _takeoff_omega_on
+        # gate (needs succ_ema >= 0.80) -> the whole stand-reward set would never activate. The mask still holds
+        # the JUST-COMPLETED episode's value here (it is reassigned later in reset_idx -> _apply_episode_modes).
+        # NOTE: do NOT early-return on an all-RSI batch -- super() MUST run to populate the episode keys
+        # (jump_flight_rate etc.); a missing key makes the runner's ep_info logging KeyError. So if filtering
+        # would empty env_ids (rare all-RSI batch), fall through with the ORIGINAL env_ids (one batch of mild
+        # RSI pollution >> a crash).
+        if hasattr(self, "landing_rsi_mask") and len(env_ids) > 0:
+            keep = ~self.landing_rsi_mask[env_ids]
+            if torch.any(keep):
+                env_ids = env_ids[keep]
         super()._log_jump_episode_stats(env_ids)
         # Smooth the successful-jump rate and LATCH the takeoff-omega gate once it clears the threshold
         # (one-way: stays on, never flickers off on a noisy dip). Discovery-safe: succ ~0 until the robot
@@ -668,3 +768,40 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
         if getattr(self, "_takeoff_omega_on", False):
             r = r + float(getattr(self.cfg.rewards, "jump_pitch_extra", 12.0)) * self.airborne.float() * nose_down
         return r
+
+    def _reward_stand_height(self):
+        # OMNI-JUMP-style "return to standing posture" (their base_height_stance). When the robot is in STAND
+        # mode -- cmd4<=0.5 AND not in a jump cycle (~jumping_state) -- i.e. a stand episode OR the post-landing
+        # recovery after the option-1 handoff, reward standing TALL at stand_height_target on all four feet.
+        # WHY: height_tracking is cmd4>0.5-only, so stand mode had NO height target before -> after landing the
+        # robot just sat / toppled forward with nothing pulling it back up to a clean stand. This gives the
+        # recovery an explicit "stand back up to this height, on all fours" goal. Gated post-discovery
+        # (_takeoff_omega_on) so it never makes not-jumping comfortable during the from-scratch jump discovery.
+        if not getattr(self, "_takeoff_omega_on", False):
+            return torch.zeros(self.num_envs, device=self.device)
+        # ONLY in RECOVERY episodes (stand / RSI). In JUMP episodes the standing reward would dominate the long
+        # post-landing tail and pull the jump WEAKER (a weak jump lands clean+still = easy standing reward), so
+        # it is OFF there -- jump episodes care only about jump distance + landing position.
+        standing = (
+            (self.commands[:, 4] <= float(self.cfg.commands.jump_command_threshold))
+            & (~self.jumping_state)
+            & self._recovery_episode
+        )
+        all_feet = torch.all(self._get_contact_state(), dim=1)
+        target = float(getattr(self.cfg.rewards, "stand_height_target", 0.38))
+        sigma = max(float(getattr(self.cfg.rewards, "stand_height_sigma", 0.01)), 1e-4)
+        rew = torch.exp(-torch.square(self.root_states[:, 2] - target) / sigma)
+        return (standing & all_feet).float() * rew
+
+    def _reward_orientation(self):
+        # PHASE-SPLIT orientation (user): during the JUMP (jumping_state) penalize ROLL ONLY -> FREE the nose-up
+        # launch arc that a forward, rear-hip-driven jump WANTS. pitch is already shaped by pitch_level ONE-SIDED
+        # (allow nose-up, forbid nose-down) + a SYMMETRIC level term at touchdown -- but the base symmetric
+        # pitch^2+roll^2 here was RE-penalising the nose-up arc, capping forward reach and making the launch feel
+        # "not forward". ROLL is kept throughout to control side-to-side tip/splay. STANDING (~jumping_state):
+        # full pitch^2+roll^2 for a flat stand. (Overrides the base symmetric term; weight unchanged.)
+        roll_sq = torch.square(self.projected_gravity[:, 1])
+        full = torch.square(self.projected_gravity[:, 0]) + roll_sq
+        if not getattr(self.cfg.rewards, "orientation_jump_roll_only", False):
+            return full
+        return torch.where(self.jumping_state, roll_sq, full)
