@@ -44,6 +44,7 @@ class ActorCritic(nn.Module):
                         critic_hidden_dims=[256, 256, 256],
                         activation='elu',
                         init_noise_std=1.0,
+                        aux_head_dim=0,
                         **kwargs):
         if kwargs:
             print("ActorCritic.__init__ got unexpected arguments, which will be ignored: " + str([key for key in kwargs.keys()]))
@@ -58,6 +59,10 @@ class ActorCritic(nn.Module):
         actor_layers = []
         actor_layers.append(nn.Linear(mlp_input_dim_a, actor_hidden_dims[0]))
         actor_layers.append(activation)
+        # Step H (final): τ_jump trunk outputs the FULL PPO action dim (num_actions). comp_head is a
+        # SEPARATE branch, NOT part of the PPO action distribution — it's a deterministic PD-mimic
+        # (see comp_forward), so PPO over τ_jump stays byte-identical to the original single-head.
+        self.aux_head_dim = aux_head_dim
         for l in range(len(actor_hidden_dims)):
             if l == len(actor_hidden_dims) - 1:
                 actor_layers.append(nn.Linear(actor_hidden_dims[l], num_actions))
@@ -66,6 +71,18 @@ class ActorCritic(nn.Module):
                 actor_layers.append(nn.Linear(actor_hidden_dims[l], actor_hidden_dims[l + 1]))
                 actor_layers.append(activation)
         self.actor = nn.Sequential(*actor_layers)
+
+        self.comp_head = None
+        if aux_head_dim > 0:
+            comp_layers = [nn.Linear(mlp_input_dim_a, actor_hidden_dims[0]), activation]
+            for l in range(len(actor_hidden_dims)):
+                if l == len(actor_hidden_dims) - 1:
+                    comp_layers.append(nn.Linear(actor_hidden_dims[l], aux_head_dim))
+                else:
+                    comp_layers.append(nn.Linear(actor_hidden_dims[l], actor_hidden_dims[l + 1]))
+                    comp_layers.append(activation)
+            self.comp_head = nn.Sequential(*comp_layers)
+            print(f"Comp head (Step H, independent τ_comp): {self.comp_head}")
 
         # Value function
         critic_layers = []
@@ -117,6 +134,18 @@ class ActorCritic(nn.Module):
     def entropy(self):
         return self.distribution.entropy().sum(dim=-1)
 
+    def actor_forward(self, observations):
+        # τ_jump only (the PPO action). Used by sym_loss so it stays num_actions-dim = single-head.
+        return self.actor(observations)
+
+    def comp_forward(self, observations):
+        # Step H (final): τ_comp = DETERMINISTIC PD-mimic from the independent comp_head. NOT sampled,
+        # NOT in the PPO action distribution (no log_prob/entropy/KL). Runner feeds it to the env each
+        # step; PPO update re-computes it for the BC loss. Returns None for tasks w/o the aux head.
+        if self.comp_head is None:
+            return None
+        return self.comp_head(observations)
+
     def update_distribution(self, observations):
         mean = self.actor(observations)
         self.distribution = Normal(mean, mean*0. + self.std)
@@ -124,13 +153,12 @@ class ActorCritic(nn.Module):
     def act(self, observations, **kwargs):
         self.update_distribution(observations)
         return self.distribution.sample()
-    
+
     def get_actions_log_prob(self, actions):
         return self.distribution.log_prob(actions).sum(dim=-1)
 
     def act_inference(self, observations):
-        actions_mean = self.actor(observations)
-        return actions_mean
+        return self.actor(observations)
 
     def evaluate(self, critic_observations, **kwargs):
         value = self.critic(critic_observations)

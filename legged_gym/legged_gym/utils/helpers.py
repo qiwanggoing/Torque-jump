@@ -103,8 +103,8 @@ def parse_sim_params(args, cfg):
 def get_load_path(root, load_run=-1, checkpoint=-1):
     try:
         runs = os.listdir(root)
-        #TODO sort by date to handle change of month
-        runs.sort()
+        # sort by mtime, NOT alphabetically: "Jul02" < "Jun24" would wrongly pick Jun as the latest run
+        runs.sort(key=lambda r: os.path.getmtime(os.path.join(root, r)))
         if 'exported' in runs: runs.remove('exported')
         last_run = os.path.join(root, runs[-1])
     except:

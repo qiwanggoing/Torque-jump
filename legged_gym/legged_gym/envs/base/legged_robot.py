@@ -539,8 +539,11 @@ class LeggedRobot(BaseTask):
         self.forward_vec = to_torch([1., 0., 0.], device=self.device).repeat((self.num_envs, 1))
         self.torques = torch.zeros(self.num_envs, self.num_actions, dtype=torch.float, device=self.device,
                                    requires_grad=False)
-        self.p_gains = torch.zeros(self.num_actions, dtype=torch.float, device=self.device, requires_grad=False)
-        self.d_gains = torch.zeros(self.num_actions, dtype=torch.float, device=self.device, requires_grad=False)
+        # Step H: p_gains/d_gains are PER-JOINT (num_dof), not per-action. With the dual-head actor
+        # num_actions can exceed num_dof (24 actions = τ_jump[12]+τ_comp[12] for 12 joints), so size
+        # these by num_dof to keep PD 12-dim (the fill loop below already iterates num_dofs).
+        self.p_gains = torch.zeros(self.num_dof, dtype=torch.float, device=self.device, requires_grad=False)
+        self.d_gains = torch.zeros(self.num_dof, dtype=torch.float, device=self.device, requires_grad=False)
         self.actions = torch.zeros(self.num_envs, self.num_actions, dtype=torch.float, device=self.device,
                                    requires_grad=False)
         self.last_actions = torch.zeros(self.num_envs, self.num_actions, dtype=torch.float, device=self.device,

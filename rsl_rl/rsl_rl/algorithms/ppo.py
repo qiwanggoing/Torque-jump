@@ -58,6 +58,7 @@ class PPO:
                  act_permutation=None,
                  frame_stack=1,
                  sym_coef=1.0,
+                 bc_coef=0.0,
                  ):
 
         self.device = device
@@ -85,6 +86,7 @@ class PPO:
         self.use_clipped_value_loss = use_clipped_value_loss
         self.sym_loss = sym_loss
         self.sym_coef = sym_coef
+        self.bc_coef = bc_coef   # Step H: stabiliser-head behaviour-cloning weight (0.0 = feature off)
         if self.sym_loss:
             self.act_perm_mat = torch.zeros((len(act_permutation), len(act_permutation)), device=self.device)
             for i, perm in enumerate(act_permutation):
@@ -150,7 +152,7 @@ class PPO:
         else:
             generator = self.storage.mini_batch_generator(self.num_mini_batches, self.num_learning_epochs)
         for obs_batch, critic_obs_batch, actions_batch, target_values_batch, advantages_batch, returns_batch, old_actions_log_prob_batch, \
-            old_mu_batch, old_sigma_batch, hid_states_batch, masks_batch in generator:
+            old_mu_batch, old_sigma_batch, hid_states_batch, masks_batch, pd_target_batch in generator:
 
 
                 self.actor_critic.act(obs_batch, masks=masks_batch, hidden_states=hid_states_batch[0])
@@ -163,7 +165,7 @@ class PPO:
                 sym_loss = 0
                 if self.sym_loss:
                     mirror_obs = torch.matmul(obs_batch, self.obs_perm_mat)
-                    mirror_act = self.actor_critic.actor(mirror_obs)
+                    mirror_act = self.actor_critic.actor_forward(mirror_obs)  # Step H: full mean incl comp_head
                     mapped_mirror_act = torch.matmul(mirror_act, self.act_perm_mat)
                     sym_loss = (mu_batch - mapped_mirror_act).pow(2).mean()
 
@@ -200,11 +202,21 @@ class PPO:
                 else:
                     value_loss = (returns_batch - value_batch).pow(2).mean()
 
+                # Step H (final): BC of the DETERMINISTIC comp_head (τ_comp) toward the PD_full raw-action
+                # target. Re-computed here (τ_comp is NOT in the PPO action) so grads hit ONLY comp_head.
+                bc_loss = 0
+                if self.bc_coef > 0.0 and pd_target_batch is not None:
+                    comp_pred = self.actor_critic.comp_forward(obs_batch)
+                    if comp_pred is not None:
+                        bc_loss = (comp_pred - pd_target_batch).pow(2).mean()
+                        extra_loss_sums["bc_loss"] = extra_loss_sums.get("bc_loss", 0.0) + float(bc_loss.item())
+
                 loss = (
                     surrogate_loss
                     + self.value_loss_coef * value_loss
                     - self.entropy_coef * entropy_batch.mean()
                     + self.sym_coef * sym_loss
+                    + self.bc_coef * bc_loss
                 )
 
                 if hasattr(self.actor_critic, "compute_auxiliary_loss"):

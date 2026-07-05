@@ -48,6 +48,12 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
     # splayed the hips to balance, default_hip_pos collapsed, and the jump fell apart. Back to the
     # proven ~0.30 default stance (inherited). Revisit launch depth later via a milder crouch +
     # stronger default_hip_pos if pursuing more height.
+
+    class control(GO2OmniJumpCurriculumTorqueCfg.control):
+        # Step H: turn ON the dual-head aux-stabiliser torque path in _compute_torques.
+        # (Default False in the parent -> all other tasks with num_actions=12 are untouched.)
+        aux_stabilizer_head = True
+
     class growth(GO2OmniJumpCurriculumTorqueCfg.growth):
         # PD fade EARLY (pure torque by ~iter500). The MIDDLE-window experiment (warmup 100000/x0 240000,
         # full PD until iter1450) FAILED: run Jun10_00-50-26 stayed squatQ=0 / peak 0.15 / NO jump for
@@ -76,8 +82,11 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
         # on (general_scale 0.45) -> the reach it found was PD-assisted, not the real pure-torque reach.
         # REVERTED to the Jun23_01-23-30 baseline (user): SLOW gradual fade -- full PD until ~iter200, then a
         # long ramp to pure torque by ~iter1200 (step ~96/iter -> warmup 19200 ~iter200, x0 115200 ~iter1200).
-        warmup_steps = 19200       # ~iter200 of full PD (short), then start the slow fade.
-        x0 = 115200                # ~iter1200: pure torque (general_scale=1). 1000-iter gradual ramp.
+        warmup_steps = 19200       # full PD 到 iter200. ⚠️step/iter 非线性! step()内 `while current_dt·freq<1` 每env.step跑
+                                   # 200/freq个substep(每个substep step_count+=1): warmup期 general_scale=0/freq=100 -> 2/env.step
+                                   # = 96/iter -> warmup19200=iter200. fade末 freq=200 -> 1/env.step=48/iter. (旧注释"96/iter"只对warmup期.)
+        x0 = 70400                 # 纯力矩 iter1000 (user). fade期 freq100->200 => step/iter 96->48,积分得【fade完成iter = 200 +
+                                   # (x0-19200)/64】. 实测x0=48000->iter650✓,要iter1000 -> x0=70400. fade跨度iter200->1000(800iter).
 
     class commands(GO2OmniJumpCurriculumTorqueCfg.commands):
         # Landing-point task: commands[0:2] repurposed velocity -> landing displacement (m).
@@ -113,13 +122,31 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
         landing_dx_frontier_lo = 0.8           # (inert while landing_dx_biased=False)
         landing_dx_start = 0.0                 # initial dx upper bound (0 = in-place)
         landing_dx_final = 2.0                # final dx upper bound (the Stage-2 target)
-        landing_dx_step = 0.10                 # increment per advance: 0 -> 0.1 -> 0.2 -> 0.3 -> 0.4
+        landing_dx_step = 0.10                 # [global advance-only — 被 per-env 双向课程取代, 见下]
+        # ── PER-ENV 双向课程 (2026-07-04, user, Atanassov/terrain-curriculum 风格) ──
+        # 根治 dx 虚高: 不再全局单值+只升(会被PD辅助期+noise冲高、advance-only不退). 改成每个 env 一个自己的
+        # 上界 landing_dx_env, 命令从 [0, 自己上界] 抽; 落地后只看"挑战命令"(dx>=per_env_far_frac×自己上界):
+        # 命中→上界+step_up, 脱靶→−step_down. 升慢降快 → 数学上收敛到"挑战命中率≈step_down/(step_up+step_down)"
+        # 的距离 = 该 env 真能稳命中的上界. PD辅助/noise冲上去的, 纯力矩后跳不到→自动降级收敛回真实~0.6, 无需门/gate.
+        landing_dx_percurr = True              # 开 per-env 双向课程(取代 global advance-only)
+        landing_dx_step_up = 0.02              # 命中挑战命令 → 自己上界 +这么多
+        landing_dx_step_down = 0.14            # 0.10→0.14 (2026-07-04, 升档贴近确定性能力): 升:降=1:7 → 收敛到挑战命中≈88%
+                                               # (要更可靠才升, 单次走运的噪声命中推不动). 配合 hit_tol 收紧(下面) → dx_env 贴"精准落上".
+        landing_dx_per_env_far_frac = 0.6      # 只 dx>=0.6×自己上界的"挑战命令"结果决定升降(近端命令不影响,防虚升)
+        landing_dx_floor = 0.0                 # 上界下限(不降到负)
+        # ── FRONTIER PROBE (2026-07-04, option-1, 配 forward_reach 2×): 一小撮 env 命令探到自己上界之外
+        # [dx_env, dx_env×probe_hi], 让 forward_reach(往命令方向够更远)+takeoff_velocity_match(往命令v_req更狠launch)
+        # 的"跳更远"梯度在前沿变活(命令不超上界时这俩休眠). 探测命令 EXPECTED 够不到, 排除出课程升降(不污染诚实 dx_env).
+        landing_dx_probe_frac = 0.0            # 撤回 option-1: 0.25→0 (probe 关). 保留参数, 以后 RSI 阶段可能再用.
+        landing_dx_probe_hi = 1.4              # 探到 dx_env×1.4 (probe_frac=0 时 inert)
         # COMBINED advance gate: advance only when the SAME jump both lands on target AND lands
         # stably (landing_stable_hit_rate). Replaces the old two separate thresholds (succ + hit),
         # which let "hit-then-topple + short-but-stable" pass without any jump being both -> the
         # curriculum blew through to the cap. (succ/hit thresholds below are now unused.)
-        landing_dx_stable_hit_threshold = 0.70 # advance needs CUMULATIVE far-band stable-hit rate >= this
-        landing_dx_min_far_samples = 150       # ...over >= this many far-band jumps (post-adaptation), so the
+        landing_dx_stable_hit_threshold = 0.80 # advance needs CUMULATIVE far-band stable-hit rate >= this. 0.70→0.80
+                                               # (user, treat dx虚高): 0.70太松→far-band命中被noise偶冲过就升→advance-only堆到1.2虚高
+                                               # (真实力矩只squat→land~0.76). 0.80=要far-band真稳定命中才升→dx_max自停在~0.85-0.9够得到处.
+        landing_dx_min_far_samples = 400       # 150→400 (user): 样本太少(150)→cum_rate被小样本noise冲过门. 400=大窗口压noise. so the
                                                # gate reflects SUSTAINED mastery, not a noisy few-sample spike
                                                # (the old per-batch EMA spiked to thr on 1-2 jumps -> over-advanced
                                                # dx_max to 1.6 with only ~0.5 real far-band rate -> late collapse).
@@ -135,9 +162,12 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
                                                # gate, so dx_max settles at the reliable reach instead of overshooting.
         landing_dx_succ_threshold = 0.80       # [unused — superseded by landing_dx_stable_hit_threshold]
         landing_dx_hit_threshold = 0.55        # [unused — superseded by landing_dx_stable_hit_threshold]
-        landing_dx_hit_tol = 0.10              # a jump "hits" if |landing_xy - target| <= this (m).
-                                               # KEEP < landing_dx_step (else in-place stays within tol of
-                                               # the newly-opened distance and passes without forward motion).
+        landing_dx_hit_tol = 0.10              # 0.07→0.10 (2026-07-05, HONEST 校准): 与确定性 eval 的命中定义(err<=0.10)对齐.
+                                               # 铁证(eval_reach_ceiling, model_3000): tol=0.10 下 cmd0.6 确定性命中 0.88 → 真实能力=0.6.
+                                               # 而 0.07 过紧, 把 dx_env 压到真实能力(0.6)以下(实测 dx_mean 收敛 0.48 而非 line130 设计意图的 ~0.6).
+                                               # 0.07 的初衷"防松松够到虚高"是对的, 但确定性 eval 证明 10cm 才是真实操作容差, 非虚高. 只动这一个,
+                                               # step_down 留 0.14 (若 retrain 后 dx_mean 仍 <0.55 再松 step_down). per-env 下 step_up=0.02, 原
+                                               # "tol<step" 不变式(为 global step=0.10 写)不再约束: in-place 落点(~0.15)距任何远命令 err>>tol, 不会假命中.
         landing_dx_ema_alpha = 0.02            # EMA smoothing on the per-reset-batch stable-hit rate
         landing_dx_min_hold_steps = 1500       # min policy-steps held at a stage before it may advance (~30 iters)
         # Per-resample STAND probability: each resample (every resampling_time=1.8s) the robot STANDS
@@ -145,10 +175,7 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
         # [0.45,1.0] -> ~9% stand, so the robot idles far less and jumps almost every resample. (The
         # IMPORTANT standing — recovering to a stable stand after landing — is still trained in every
         # jump episode's post-landing buffer.)
-        jump_command_range = [0.375, 1.0]  # SPLIT prob: P(draw<=0.5)=(0.5-lo)/(1-lo). lo=0.375 -> 20% STAND
-                                            # (user: was 0.45 -> ~9%). More dedicated stand episodes so the policy
-                                            # actually learns to STAND at cmd4=0 (+ stand_no_takeoff penalty bites
-                                            # on them). cmd4 stays BINARY 0/1 via stand/jump_command_value.
+        jump_command_range = [1.0, 1.0]    # 单跳只练跳(user): cmd4恒1、无站立episode (去掉cmd=0训练). cmd4 二值 via stand/jump_command_value.
         # BINARY jump command: 1.0 = jump, 0.0 = stand. The old scheme put STAND at the sampled [0.45,0.5]
         # band -- right under the 0.5 threshold -- and at a near-threshold stand command (e.g. 0.49) the
         # policy HESITATES and twitches a foot off (the stand-episode in-place hop). Pinning stand->0 and
@@ -163,16 +190,10 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
         # the residual landing error during the buffer and HOPS to chase the undershot target. Verified in
         # play (force cmd4=0 at touchdown) that this kills the post-landing chase-hop. Landing-accuracy
         # rewards key off self.landing / touchdown-locked landing_root_xy, not cmd4, so scoring is unaffected.
-        disable_jump_on_landing = True
-        single_jump_command_prob = 1.0         # SINGLE JUMP per episode (reverted from 0.0=continuous). Continuous
-                                               # (Jun09_13-24-40) gave a noisy, bistable training signal (succ/flght
-                                               # oscillating 0.28-0.56) and lower peak; single-jump (Jun06_13-53-04) is
-                                               # far cleaner (flght 0.97-1.00, succ 0.77-0.86 smooth, peak 0.58, no late
-                                               # degradation). The post-landing topple is fixed WITHOUT continuous, via
-                                               # landing_buffer_steps=150 below (success now requires surviving 0.75s
-                                               # post-touchdown, so the ~0.75s topple is trained out) + the landing-pose
-                                               # fixes (target->default_dof_pos, default_pos/orientation). Play stays
-                                               # continuous regardless (play state machine is independent of train mode).
+        disable_jump_on_landing = False    # 单跳只练跳(user): 落地不切cmd4=0 (去站立). ⚠️去掉了 post-landing chase-hop 防护, 落地欠程时可能hop追目标, 观察.
+        single_jump_command_prob = 1.0     # 单跳: 一个episode一跳、跳完停站立 (撤回连续跳的 0.0). single-jump(Jun06) 比
+                                           # continuous(Jun09 noisy bistable succ/flght 0.28-0.56) 干净(flght0.97-1.0/succ0.77-0.86平滑);
+                                           # 连续跳落地立刻再跳没法蓄力 -> 每跳只 0.13m; 单跳能蓄力 -> 纯力矩~0.77m.
 
         class ranges(GO2OmniJumpCurriculumTorqueCfg.commands.ranges):
             jump_height = [0.40, 0.70]   # unchanged from the proven May28 baseline
@@ -426,7 +447,9 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
                                              # so the error term = wz^2 = damp spin during flight -> fixes the heading
                                              # drift. Kept WELL below the main jump rewards (peak25/vz15/landing20); it's
                                              # a stabilizer. Stage2: open commands[2] -> same term becomes turn-tracking.
-            forward_reach = 30.0             # 20 -> 30: STRENGTHEN "farther = better" (user). Make distance-reach the
+            forward_reach = 60.0             # 保留强的(user, 2026-07-04): option-1 eval欠程的真凶是 PROBE(喂不可能命令)不是
+                                             # forward_reach. probe关了+漏算失败修了(dx_env诚实=命令都够得到)后, forward_reach强是好事:
+                                             # 推策略把够得到的命令跳准跳足, 精度奖励(projected_landing/landing_position)防过冲, 平衡在正好落点.
                                              # DOMINANT driver so the policy pushes HARD to reach far. WATCH: if it trades
                                              # away HEIGHT (peak drops) or PRECISION, ease back to 25; if unstable, 20.
                                              # distance-progressive EFFORT reward (see _reward_forward_reach). Rewards
@@ -623,23 +646,34 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
             "rew_dof_pos_limits",    # joint-limit penalty — watch it shrinks as the over-deep squat stops jamming
             "squat_qualified_rate",  # frac of takeoffs preceded by a HELD squat; compare to jump_flight_rate
             # ---- distance curriculum (watch these to see the dx ramp progress) ----
-            "landing_dx_max",            # current forward dx upper bound (grows as the curriculum advances)
+            "landing_dx_max",            # per-env 双向课程: 全局最大上界 (最强 env)
+            "landing_dx_mean",           # per-env 双向课程: 群体平均上界 = 真实纯力矩能力 (★盯这个诚实收敛~0.6-0.7)
+            "landing_dx_min",            # per-env 双向课程: 最弱 env 上界
             "landing_dx_stable_cum",     # CUMULATIVE far-band stable-hit the gate reads (>= thr AND enough samples -> advance)
             "landing_stable_hit_uniform",# 又准又稳 over all dx (uniform)
-            "landing_hit_rate",          # accuracy (ignores stability)
+            "landing_hit_rate",          # accuracy (ignores stability) — ⚠️ uniform/near-inflated, NOT capability
+            "landing_farband_hit_smooth",# ★ HONEST 远端掌握度 (平滑, 抗 far_n~0.1 噪声) — 盯这个, 别信 hit_rate/dx_max
         ]
 
     class test(GO2OmniJumpCurriculumTorqueCfg.test):
         vel = GO2OmniJumpCurriculumTorqueCfg.test.vel.clone()
         vel[0] = 0.0   # Stage 1: land in place (dx=0). Set vel[0]>0 to play directed jumps.
         vel[1] = 0.0
-        single_jump_play = True
+        single_jump_play = True    # 单跳: play 跳一次就停站立 (撤回连续跳的 False)
 
 
 class GO2OmniJumpLandingTorqueCfgPPO(GO2OmniJumpCurriculumTorqueCfgPPO):
+    class policy(GO2OmniJumpCurriculumTorqueCfgPPO.policy):
+        # Step H (final): τ_comp is a DETERMINISTIC independent head (12 outputs), NOT part of the PPO
+        # action (num_actions stays 12 = τ_jump). BC hits only comp_head; PPO over τ_jump = single-head.
+        aux_head_dim = 12
+
     class algorithm(GO2OmniJumpCurriculumTorqueCfgPPO.algorithm):
         sym_coef = 1.0   # was 0.5: match my_go2_jump — tighter LEFT-RIGHT mirror symmetry
                          # (front-rear is handled by the pushoff_leg_sync reward, not sym_loss)
+        # Step H (final): τ_comp is OUT of the PPO action, so act_permutation stays 12-dim (inherited
+        # = single-head). BC loss weight for the deterministic comp_head:
+        bc_coef = 1.0
         entropy_coef = 0.003   # 0.001 -> 0.003: MORE exploration. At 0.001 noise_std collapsed to ~0.04 -> the
                                # policy got too CONSERVATIVE (peak ~0.50, undershoots far) and plateaued; the old
                                # high+far run had noise ~0.39. 0.003 settles noise ~0.32 (memory) = that exploration

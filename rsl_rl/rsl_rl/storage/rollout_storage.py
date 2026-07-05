@@ -46,6 +46,7 @@ class RolloutStorage:
             self.action_mean = None
             self.action_sigma = None
             self.hidden_states = None
+            self.pd_target = None   # Step H: PD_full raw-action target for stabiliser-head BC (None = feature off)
         
         def clear(self):
             self.__init__()
@@ -83,6 +84,9 @@ class RolloutStorage:
         self.saved_hidden_states_a = None
         self.saved_hidden_states_c = None
 
+        # Step H: lazy-init BC target buffer (stays None for tasks that never set transition.pd_target)
+        self.pd_targets = None
+
         self.step = 0
 
     def add_transitions(self, transition: Transition):
@@ -97,6 +101,12 @@ class RolloutStorage:
         self.actions_log_prob[self.step].copy_(transition.actions_log_prob.view(-1, 1))
         self.mu[self.step].copy_(transition.action_mean)
         self.sigma[self.step].copy_(transition.action_sigma)
+        # Step H: store PD BC target (lazy-alloc on first non-None; buffer stays None for other tasks)
+        if transition.pd_target is not None:
+            if self.pd_targets is None:
+                self.pd_targets = torch.zeros(
+                    self.num_transitions_per_env, self.num_envs, transition.pd_target.shape[-1], device=self.device)
+            self.pd_targets[self.step].copy_(transition.pd_target)
         self._save_hidden_states(transition.hidden_states)
         self.step += 1
 
@@ -162,6 +172,7 @@ class RolloutStorage:
         advantages = self.advantages.flatten(0, 1)
         old_mu = self.mu.flatten(0, 1)
         old_sigma = self.sigma.flatten(0, 1)
+        pd_targets = self.pd_targets.flatten(0, 1) if self.pd_targets is not None else None  # Step H
 
         for epoch in range(num_epochs):
             for i in range(num_mini_batches):
@@ -179,8 +190,9 @@ class RolloutStorage:
                 advantages_batch = advantages[batch_idx]
                 old_mu_batch = old_mu[batch_idx]
                 old_sigma_batch = old_sigma[batch_idx]
+                pd_target_batch = pd_targets[batch_idx] if pd_targets is not None else None  # Step H
                 yield obs_batch, critic_observations_batch, actions_batch, target_values_batch, advantages_batch, returns_batch, \
-                       old_actions_log_prob_batch, old_mu_batch, old_sigma_batch, (None, None), None
+                       old_actions_log_prob_batch, old_mu_batch, old_sigma_batch, (None, None), None, pd_target_batch
 
     # for RNNs only
     def reccurent_mini_batch_generator(self, num_mini_batches, num_epochs=8):
@@ -230,6 +242,6 @@ class RolloutStorage:
                 hid_c_batch = hid_c_batch[0] if len(hid_c_batch)==1 else hid_a_batch
 
                 yield obs_batch, critic_obs_batch, actions_batch, values_batch, advantages_batch, returns_batch, \
-                       old_actions_log_prob_batch, old_mu_batch, old_sigma_batch, (hid_a_batch, hid_c_batch), masks_batch
+                       old_actions_log_prob_batch, old_mu_batch, old_sigma_batch, (hid_a_batch, hid_c_batch), masks_batch, None  # Step H: BC N/A for RNN
                 
                 first_traj = last_traj

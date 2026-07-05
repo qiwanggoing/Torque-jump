@@ -334,12 +334,38 @@ class GO2OmniJumpCurriculumTorque(GO2OmniJumpTorque):
 
         self.rl_prior_alpha[:] = rl_alpha
         self.pd_prior_alpha[:] = pd_alpha
-        self.residual_torques_action = residual_torques * rl_alpha * self.current_torque_limit_scale
-        self.pd_prior_torques = (
-            self.p_gains * (self.default_joint_pd_target - self.dof_pos) - self.d_gains * self.dof_vel
-        ) * pd_alpha
 
-        self.torques_action = self.residual_torques_action + self.pd_prior_torques
+        # PD_full (UNWEIGHTED): both the stabiliser head's BC target and the α-weighted scaffold.
+        pd_full = self.p_gains * (self.default_joint_pd_target - self.dof_pos) - self.d_gains * self.dof_vel
+
+        if getattr(self.cfg.control, "aux_stabilizer_head", False):
+            # === Step H (final): τ_comp is a DETERMINISTIC PD-mimic FED BY THE RUNNER (env.comp_torque),
+            # NOT a PPO action -> PPO over τ_jump (= `actions` here, 12-dim) is byte-identical to single-head.
+            # τ = residual·rl_alpha·scale  +  pd_alpha·PD_full  +  (pd_prior_weight − pd_alpha)·τ_comp
+            #   ├ τ_jump  : IDENTICAL to single-head path -> early dynamics = proven "can-jump" recipe.
+            #   ├ pd_alpha·PD : PD scaffold, fades 0.5 → 0.
+            #   └ (pd_w−pd_alpha)·τ_comp : stabiliser (BC→PD) TAKES OVER PD's share, 0 (early) → 0.5 (late).
+            scale = self.current_torque_limit_scale
+            pd_w = float(self.cfg.control.pd_prior_weight)          # 0.5
+            comp_weight = max(0.0, pd_w - pd_alpha)                  # 0 (early, gscale=0) -> pd_w (late)
+            tau_jump = residual_torques * rl_alpha * scale           # residual = actions·τlim (full τ_jump)
+            comp_raw = getattr(self, "comp_torque", None)            # runner-fed τ_comp (raw action, 12-dim)
+            if comp_raw is not None:
+                tau_comp = comp_raw * torques_limits_eff * scale
+            else:
+                tau_comp = torch.zeros_like(tau_jump)                # reset step before runner sets it
+            self.residual_torques_action = tau_jump
+            self.pd_prior_torques = pd_alpha * pd_full
+            self.torques_action = tau_jump + pd_alpha * pd_full + comp_weight * tau_comp
+            # BC target in RAW-ACTION space (unit-consistent with comp_head): the raw action that
+            # reproduces PD_full through τ_comp's own (torque_limit·scale) gain.
+            denom = torch.clamp(torques_limits_eff * scale, min=1e-6)
+            self.pd_action_target = (pd_full / denom).detach()
+        else:
+            # === original single-head convex blend (num_actions=12 tasks: UNCHANGED) ===
+            self.residual_torques_action = residual_torques * rl_alpha * self.current_torque_limit_scale
+            self.pd_prior_torques = pd_full * pd_alpha
+            self.torques_action = self.residual_torques_action + self.pd_prior_torques
         torques_limits = torch.clamp(self.torque_limits, min=1e-6).clone()
 
         if self.cfg.control.activation_process:

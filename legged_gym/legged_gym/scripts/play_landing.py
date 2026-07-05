@@ -23,12 +23,64 @@ import torch
 
 from legged_gym.envs import *
 from legged_gym.utils import task_registry, get_args
+from legged_gym.utils.helpers import get_load_path
+from legged_gym import LEGGED_GYM_ROOT_DIR
+import os
+import math
 
-# === command to visualise (training ranges: dx in [0,0.40], height in [0.40,0.70]) ===
-DX = 0.9       # forward landing displacement (m)
-DY = 0.0        # lateral landing displacement (m)
-HEIGHT = 0.7   # jump-height command
-STAND_ONLY = False  # PURE-STAND test: command cmd4=0.45 (<=0.5 threshold -> NEVER jumps) + zero displacement,
+
+def _env_float(name, default):
+    value = os.environ.get(name)
+    if value is None:
+        return float(default)
+    try:
+        return float(value)
+    except ValueError:
+        print(f"[play_landing] invalid {name}={value!r}; using {default}", flush=True)
+        return float(default)
+
+
+def _env_bool(name, default):
+    value = os.environ.get(name)
+    if value is None:
+        return bool(default)
+    return value.strip().lower() in ("1", "true", "yes", "y", "on")
+
+
+def train_step_count_at_iter(target_iter, W, X, sf, mf, dt, nspe):
+    """Reproduce TRAINING's step_count at iteration N (for faithful PD/general_scale replay).
+
+    step() runs ~1/(dt*freq) physics substeps per env.step, each doing step_count += 1, and
+    current_freq ramps sf->mf as general_scale goes 0->1 LINEARLY over step_count in [W, X]
+    (warmup_steps W, x0 X). So step/iter = nspe/(dt*freq) is NON-LINEAR: 96 during warmup (freq=sf)
+    down to 48 at pure torque (freq=mf). The old play used LINEAR nspe*N -> ~2x off in warmup/fade
+    -> replayed a wrong (PD-heavier) general_scale for fade-era ckpts. This closed form integrates
+    the ramp; verified vs the measured x0=48000 -> fade completes ~iter650. Pure-torque ckpts (past x0)
+    were already correct (both linear and this land past x0 -> general_scale=1), so only fade ckpts change.
+    """
+    r0 = nspe / (dt * sf)                 # step/iter during warmup (freq = sf), e.g. 48/(0.005*100)=96
+    iw = W / r0                           # iteration at which warmup ends (step_count reaches W)
+    if target_iter <= iw:
+        return r0 * target_iter
+    Delta = X - W
+    a = (mf - sf) / (2.0 * Delta)
+    b = sf
+    iter_fade_end = iw + (dt / nspe) * (a * Delta * Delta + b * Delta)   # step_count reaches X here
+    if target_iter <= iter_fade_end:
+        c = (nspe / dt) * (target_iter - iw)
+        u = (-b + math.sqrt(b * b + 4.0 * a * c)) / (2.0 * a)
+        return W + u
+    r_end = nspe / (dt * mf)              # step/iter during pure torque (freq = mf) = 48
+    return X + r_end * (target_iter - iter_fade_end)
+
+# === command to visualise =====================================================
+# Defaults are conservative for deterministic/no-noise play. Override without
+# editing this file, e.g.:
+#   PLAY_LANDING_DX=0.7 PLAY_LANDING_HEIGHT=0.7 python legged_gym/scripts/play_landing.py --task=go2_omnijump_landing_torque
+DX = _env_float("PLAY_LANDING_DX", 0.5)       # forward landing displacement (m)
+DY = _env_float("PLAY_LANDING_DY", 0.0)       # lateral landing displacement (m)
+HEIGHT = _env_float("PLAY_LANDING_HEIGHT", 0.7)  # jump-height command
+STAND_ONLY = _env_bool("PLAY_LANDING_STAND_ONLY", False)  # PURE-STAND test: command cmd4=0.45 (<=0.5 threshold -> NEVER jumps) + zero displacement,
                     # so the robot is told to just stand quietly at spawn (landing_target=spawn -> err=0).
                     # Watch how stable the stand is / how often it twitches a foot off. Set False for normal jumps.
 # ====================================================================================
@@ -54,8 +106,12 @@ def main():
         env_cfg.commands.jump_command_range = [0.49, 0.49]   # cmd4 always 0.45 <= 0.5 -> NEVER fires a jump (pure stand)
         env_cfg.commands.landing_disp_x_stage2 = [0.0, 0.0]  # landing_target = spawn -> zero landing error
         env_cfg.commands.landing_disp_y_stage2 = [0.0, 0.0]
-    # NOTE: leaving jump_command_range at the config DEFAULT [0.45,1.0] -> cmd4 varies, so post-landing the robot
-    # gets STAND commands (cmd4<=0.5) and holds. Forcing [1.0,1.0] removes stand cmds -> it never stops -> drifts.
+    else:
+        # play: EVERY episode is a JUMP (cmd4=1), NO stand episodes -> strictly follow the DX jump command.
+        # The old warning about [1,1] "never stops -> drifts" NO LONGER applies now the single-jump setup is
+        # restored: disable_jump_on_landing=True force-stands cmd4=0 in the landing buffer + single_jump_play=True
+        # resets after ONE jump -> jump once -> land -> stand -> reset -> repeat (every play episode is a jump).
+        env_cfg.commands.jump_command_range = [1.0, 1.0]
     # Clean conditions (the eval that scored 0.98 used these; isolates the policy).
     env_cfg.noise.add_noise = False
     env_cfg.domain_rand.randomize_friction = False
@@ -64,13 +120,52 @@ def main():
     env_cfg.rewards.landing_tilt_terminate = 0.0   # MEASURE mode: disable the tilt-reset so we see the TRUE max nose-down
     train_cfg.runner.resume = True
 
+    # PD-replay: auto-read the loaded checkpoint's iter N so the env replays THAT iter's PD ratio
+    # (general_scale -> pd_alpha), instead of forcing pure torque. We pin step_count = num_steps_per_env
+    # * N EVERY STEP (in the rollout below) -> same mechanism as the old BIG override, but at the
+    # checkpoint's own general_scale. We do NOT set test.use_test: with control_type='TG' that's the only
+    # thing that would trigger the growth-replay, BUT it ALSO force-overwrites commands[:]=test.vel every
+    # step -> that's what killed the DX command (REALcmd0 came out 0).
+    log_root = os.path.join(LEGGED_GYM_ROOT_DIR, 'logs', train_cfg.runner.experiment_name)
+    _load_run = args.load_run if args.load_run is not None else train_cfg.runner.load_run
+    _checkpoint = args.checkpoint if args.checkpoint is not None else train_cfg.runner.checkpoint
+    _resume_path = get_load_path(log_root, load_run=_load_run, checkpoint=_checkpoint)
+    ckpt_iter = int(os.path.basename(_resume_path).replace('model_', '').replace('.pt', ''))
+    # REPLAY_STEP (= train's step_count at ckpt_iter) computed AFTER make_env — needs env.dt/start_freq/max_freq.
+
     env, _ = task_registry.make_env(name=args.task, args=args, env_cfg=env_cfg)
     ppo_runner, _ = task_registry.make_alg_runner(env=env, name=args.task, args=args, train_cfg=train_cfg)
     policy = ppo_runner.get_inference_policy(device=env.device)
+    actor_critic = ppo_runner.alg.actor_critic   # Step H: need comp_forward() to feed env.comp_torque (τ_comp)
 
-    BIG = 500000   # force the PD prior fully faded (general_scale=1 -> pd_alpha=0), matching iter 10000
+    # PD-replay step_count: reproduce TRAINING's NON-LINEAR step_count at ckpt_iter (freq ramp 96->48/iter),
+    # NOT the old linear 48*iter (which replayed too-much PD for fade-era ckpts). Pinned every rollout step below.
+    REPLAY_STEP = int(round(train_step_count_at_iter(
+        ckpt_iter,
+        float(env.cfg.growth.warmup_steps), float(env.cfg.growth.x0),
+        float(env.start_freq), float(env.max_freq),
+        float(env.dt), int(train_cfg.runner.num_steps_per_env))))
+    _pd_a = float(env.cfg.control.pd_prior_weight) * max(0.0, 1.0 - min(1.0, max(0.0,
+        (REPLAY_STEP - float(env.cfg.growth.warmup_steps)) / max(1.0, float(env.cfg.growth.x0) - float(env.cfg.growth.warmup_steps)))))
+    print(f"[play] {os.path.basename(_resume_path)} -> iter {ckpt_iter}: step_count={REPLAY_STEP} "
+          f"(non-linear fade-correct), replay pd_alpha={_pd_a:.3f}")
+
+    # (removed BIG=500000 pure-torque override — env now replays the checkpoint's own general_scale/pd_alpha)
     init = torch.tensor([float(env.cfg.init_state.pos[0]), float(env.cfg.init_state.pos[1])], device=env.device)
     spawn = env.env_origins[:, :2] + init
+
+    # EPISODE-0 fix: reset once up front so the FIRST episode runs from a CLEAN reset state (not the raw
+    # post-build state) -> without this the first jump fails and only after the first auto-reset is it normal.
+    env.reset()
+
+    # FIX: the env's __init__ reset drew commands[0]=0 (command_ranges wasn't [DX,DX] yet at that early
+    # reset) and resampling_time=20 holds it ALL episode -> the robot was getting an in-place (dx=0)
+    # command, not DX. Force the viewing command now + refresh landing_target so it truly jumps DX forward.
+    if not STAND_ONLY:
+        env.commands[:, 0] = DX
+        env.commands[:, 1] = DY
+        env.landing_target[:, 0] = env.root_states[:, 0] + DX
+        env.landing_target[:, 1] = env.root_states[:, 1] + DY
 
     # Side view of the spawn + landing strip.
     if getattr(env, "viewer", None) is not None:
@@ -81,8 +176,11 @@ def main():
             gymapi.Vec3(sx + 0.4, sy, 0.25),
         )
 
+    # The command/target override above changes observation slots. Refresh once so
+    # the very first policy action sees the requested DX instead of reset-time obs.
+    env.compute_observations()
     obs = env.get_observations()
-    print(f"[play_landing] cmd dx={DX} dy={DY} height={HEIGHT} | clean env, normal jump flow, pd_alpha=0", flush=True)
+    print(f"[play_landing] cmd dx={DX} dy={DY} height={HEIGHT} | clean env, normal jump flow, replay pd_alpha={_pd_a:.3f}", flush=True)
 
     import math
     pg2deg = lambda v: math.degrees(math.asin(max(-1.0, min(1.0, float(v)))))  # projected_gravity_x -> tilt deg
@@ -92,13 +190,10 @@ def main():
     STAND_CMD0 = False      # while STANDING (not jumping, cmd4<=0.5), force cmd4 to a CLEAR 0.0 (vs the 0.45 the env
                             # pins, which sits just under the 0.5 jump threshold). Tests if the stand-hop is the
                             # policy hesitating at a near-threshold command. Does NOT touch landing_target.
-    DISABLE_JUMP_ON_LAND = True  # TEST Option-1: the env keeps cmd4=1 through the whole 0.75s landing buffer (only
-                            # zeroes it at jump-FINISH), so post-touchdown the policy still sees "jump!" + a residual
-                            # landing error and HOPS to chase. Here we force cmd4=0 the instant has_landed -> if the
-                            # buffer-hop STOPS, the fix is "disable jump command AT TOUCHDOWN" (then bake into env+retrain).
+    DISABLE_JUMP_ON_LAND = False  # 单跳只练跳(user): 落地不 force cmd4=0, 跟训练 disable_jump_on_landing=False 一致.
     DEBUG_HOP = False      # True = print the per-step feet-off / per-episode reset debug (hop diagnosis).
                            # False = clean output: just the per-jump [land] line (peak height + forward reach).
-    MONITOR_CONTACT = True # True = once landed, print the FULL per-foot contact + height + drift + fwd vel EVERY
+    MONITOR_CONTACT = _env_bool("PLAY_LANDING_MONITOR_CONTACT", True) # True = once landed, print the FULL per-foot contact + height + drift + fwd vel EVERY
                            # step until the next reset (to see exactly what the feet do during the hop-then-slide).
     n_flights = 0          # all-feet-off phases this episode (1 = clean single jump; 2+ = extra in-place hop)
     feet_off_prev = False
@@ -108,10 +203,15 @@ def main():
     pl_steps = pl_all4 = 0   # post-landing: total steps + steps with ALL 4 feet planted (all4_frac~1 => SLIDE,
     pl_min_feet = 4          #   maintain_contact can't catch it; all4_frac low / min_feet<4 => STEP-creep, it can)
     for _ in range(100000):
-        env.step_count = BIG
-        env.common_step_counter = BIG
+        # PD-replay: pin step_count to the checkpoint's iter so general_scale/pd_alpha match training.
+        # (control_type='TG' -> _update_growth_scale won't override this; only use_test would, which we avoid.)
+        env.step_count = REPLAY_STEP
+        env.common_step_counter = REPLAY_STEP
         with torch.no_grad():
             actions = policy(obs.detach())
+            comp = actor_critic.comp_forward(obs.detach())   # Step H: deterministic τ_comp (PD-mimic)
+            if comp is not None:
+                env.comp_torque = comp                        # feed env so the stabiliser runs after PD fades
         obs, _, _, dones, infos = env.step(actions.detach())
         # TEST: while standing, force cmd4 to a CLEAR 0.0 (the env otherwise pins it to 0.45, just under the 0.5
         # jump threshold). If the stand-hop STOPS -> it was near-threshold command hesitation (cheap fix);
@@ -190,10 +290,14 @@ def main():
                 hit = (err <= 0.10) and (peak >= 0.40)
                 n_jump += 1
                 n_hit += int(hit)
-                # Clean per-jump readout: PEAK HEIGHT + 跳远 (forward reach) vs the command, plus accuracy.
-                print(f"[land #{n_jump}] cmd_dx={DX:.2f} | peak_height={peak:.3f}m  跳远 fwd={fwd:+.3f}m "
-                      f"(lat={lat:+.3f}) | land_err={err:.3f} {'HIT ' if hit else 'miss'} "
-                      f"hit_rate={n_hit/n_jump:.2f}", flush=True)
+                # DIAG: real dx command, how far AHEAD of the TAKEOFF point the target actually is, and the
+                # forward reach measured FROM THE TAKEOFF POINT (= this jump's TRUE distance, not cumulative).
+                cmd0 = float(env.commands[idx, 0])
+                tgt_ahead = float(env.landing_target[idx, 0] - env.takeoff_root_xy[idx, 0])
+                fwd_tk = float(land[0] - env.takeoff_root_xy[idx, 0])
+                print(f"[land #{n_jump}] REALcmd0={cmd0:+.2f} tgt_ahead={tgt_ahead:+.2f}m | peak={peak:.3f}m  "
+                      f"fwd_from_takeoff={fwd_tk:+.3f}m fwd_from_spawn={fwd:+.3f}m | land_err={err:.3f} "
+                      f"{'HIT ' if hit else 'miss'} hit_rate={n_hit/n_jump:.2f}", flush=True)
                 max_nd = 0.0
                 resets_since = 0
 

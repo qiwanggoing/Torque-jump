@@ -135,7 +135,14 @@ class OnPolicyRunner:
             with torch.inference_mode():
                 for i in range(self.num_steps_per_env):
                     actions = self.alg.act(obs, critic_obs)
+                    # Step H (final): feed the deterministic τ_comp to the env BEFORE stepping (env uses it
+                    # in _compute_torques). comp_forward returns None for tasks without the aux head.
+                    comp = self.alg.actor_critic.comp_forward(obs)
+                    if comp is not None:
+                        self.env.comp_torque = comp.detach()
                     obs, privileged_obs, rewards, dones, infos = self.env.step(actions)
+                    # Step H: grab the BC target the env computed in _compute_torques (None -> BC skipped).
+                    self.alg.transition.pd_target = getattr(self.env, "pd_action_target", None)
                     critic_obs = privileged_obs if privileged_obs is not None else obs
                     obs, critic_obs, rewards, dones = obs.to(self.device), critic_obs.to(self.device), rewards.to(
                         self.device), dones.to(self.device)

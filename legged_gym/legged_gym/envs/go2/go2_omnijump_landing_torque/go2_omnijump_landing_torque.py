@@ -79,6 +79,13 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
         # displacement. Initialised to spawn so step-0 obs is well-defined.
         self.landing_target = self.root_states[:, :2].clone()
 
+        # ANTI-CHEAT distance anchor: base xy at the SQUAT BOTTOM (deepest load, base_z lowest) of the
+        # current jump. Landing distance is measured squat-bottom -> land (NOT spawn -> land), so the
+        # ground creep during "stand -> squat" cannot farm distance, while the normal push-off travel
+        # (squat -> liftoff) still counts. Updated during loading in _update_jump_state; landing_target
+        # is locked to squat_root_xy + dx at takeoff. Reset to current xy at each _start_jump.
+        self.squat_root_xy = self.root_states[:, :2].clone()
+
         # Stage 2: widen the displacement ranges that the parent's
         # _resample_commands draws commands[0:2] from. Stage 1 leaves them [0,0]
         # (land in place -> behaviour identical to the proven vertical jumper).
@@ -106,9 +113,19 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
                 # spawn, so the (tight-sigma) landing reward is fully available during discovery.
                 self.landing_dx_max = float(getattr(self.cfg.commands, "landing_dx_start", 0.0))
                 self.command_ranges["lin_vel_x"] = [0.0, self.landing_dx_max]
-                self._far_stable_sum = 0.0   # cumulative far-band stable-hits since last advance
-                self._far_n_sum = 0.0        # cumulative far-band attempts since last advance
+                self._far_stable_sum = 0.0   # (global advance-only accumulators — inert under per-env curriculum)
+                self._far_n_sum = 0.0
                 self._dx_last_advance_step = 0
+                # PER-ENV 双向课程 (2026-07-04): 每个 env 自己的 dx 上界 (初始 landing_dx_start). 命令从
+                # [0, 自己上界] 抽; 落地 hit→+step_up / miss→−step_down. landing_dx_max 每步 = 全局最大(仅日志).
+                self.landing_dx_env = torch.full(
+                    (self.num_envs,), float(getattr(self.cfg.commands, "landing_dx_start", 0.0)), device=self.device
+                )
+                # frontier-probe 掩码: 本集命令探到上界之外的 env (排除出课程升降, 见 _update_jump_state).
+                self._dx_probe_mask = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+                # 本集这一跳是否"被计入的挑战跳"(起跳时锁: far & 非probe). 在 episode 末(_log_jump_episode_stats)评估升降,
+                # 命中(jump_target_hits>=1)→+step_up, 否则(落短/摔/够不到都算)→−step_down. 这样"摔/跳废"也算 down, 不再漏算.
+                self._ep_counted_far = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
             else:
                 self.command_ranges["lin_vel_x"] = list(self.cfg.commands.landing_disp_x_stage2)
 
@@ -124,6 +141,10 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
         # penalizes the messy exploratory pushes before the robot can jump (that broke discovery before).
         self._succ_rate_ema = 0.0
         self._takeoff_omega_on = False
+        # HONEST far-band mastery: decaying accumulators for a TRUSTWORTHY smoothed far-band hit rate
+        # (per-batch far_n ~0.1 -> landing_stable_hit_rate is pure noise). See _log_jump_episode_stats.
+        self._farband_hit_acc = 0.0
+        self._farband_n_acc = 0.0
 
     # ------------------------------------------------------------------ #
     # Reset — set landing target = spawn xy + commanded displacement.
@@ -150,6 +171,24 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
         # Only DISTANCE is biased (height untouched -- the goal is a stable landing at the farthest point,
         # not the highest jump). In-place phase (dx_max == 0) is a no-op, so discovery is untouched.
         super()._resample_commands(env_ids)
+        # PER-ENV 双向课程 (2026-07-04): 每个 env 从 [0, 自己上界 landing_dx_env] 抽 dx, 覆盖父类的 global 抽.
+        # play/eval(landing_dx_curriculum=False) 走父类的 command_ranges[DX,DX], 不进这段.
+        if (len(env_ids) > 0 and getattr(self, "landing_dx_curriculum", False)
+                and getattr(self.cfg.commands, "landing_dx_percurr", False)
+                and (not getattr(self.cfg.test, "use_test", False)) and hasattr(self, "landing_dx_env")):
+            de = self.landing_dx_env[env_ids]
+            n = len(env_ids)
+            base = torch.rand(n, device=self.device) * de                       # 主体: [0, 自己上界]
+            # FRONTIER PROBE: 一小撮 env 命令探到上界之外 [de, de*probe_hi] → 唤醒 forward_reach/takeoff_velocity_match
+            # 的"跳更远"梯度(命令不超上界时休眠). 探测 EXPECTED 够不到, 由 _dx_probe_mask 排除出课程升降(不污染诚实).
+            probe_frac = float(getattr(self.cfg.commands, "landing_dx_probe_frac", 0.0))
+            probe_hi = float(getattr(self.cfg.commands, "landing_dx_probe_hi", 1.4))
+            probe = torch.rand(n, device=self.device) < probe_frac
+            probe_val = de * (1.0 + (probe_hi - 1.0) * torch.rand(n, device=self.device))
+            self.commands[env_ids, 0] = torch.where(probe, probe_val, base)
+            self._dx_probe_mask[env_ids] = probe
+            return
+        # 单跳: landing_target 只在 reset_idx 设为 spawn+dx (撤回连续跳的 per-resample root+dx 更新).
         if len(env_ids) == 0 or not getattr(self.cfg.commands, "landing_dx_biased", False):
             return
         dx_max = float(self.command_ranges["lin_vel_x"][1])
@@ -169,9 +208,45 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
         super()._reset_jump_buffers(env_ids)
         if hasattr(self, "jump_target_hits"):
             self.jump_target_hits[env_ids] = 0.0
+        if hasattr(self, "_ep_counted_far"):
+            self._ep_counted_far[env_ids] = False   # 清本集"计入挑战跳"标记 (升降在 _log 里已用完)
+
+    def _start_jump(self, env_ids):
+        # Seed the squat-bottom anchor at jump start (mirrors the parent resetting jump_min_base_z to
+        # the current base_z): the deepest-load xy is then tracked DOWN from here during loading.
+        super()._start_jump(env_ids)
+        if len(env_ids) > 0:
+            self.squat_root_xy[env_ids] = self.root_states[env_ids, :2]
 
     def _update_jump_state(self):
+        # SQUAT-BOTTOM capture (BEFORE super updates jump_min_base_z): while loading, whenever the base
+        # reaches a new low, record its xy -> squat_root_xy ends at this jump's deepest-squat point.
+        _loading = self.jumping_state & (~self.has_taken_off)
+        _new_low = _loading & (self.root_states[:, 2] < self.jump_min_base_z)
+        if torch.any(_new_low):
+            self.squat_root_xy[_new_low] = self.root_states[_new_low, :2]
         super()._update_jump_state()
+        # ANTI-CHEAT squat-based target: at takeoff, LOCK landing_target = SQUAT-BOTTOM xy + commanded
+        # (dx, dy). Landing accuracy is then the real distance squat-bottom -> land, NOT spawn -> land:
+        # the "stand -> squat" ground creep (~0.42m observed) can no longer farm distance, while the
+        # normal push-off travel (squat -> liftoff) still counts as part of the jump. Locked ONCE ->
+        # a fixed world point through flight+landing. squat_root_xy holds this jump's deepest-load xy.
+        if torch.any(self.just_took_off):
+            self.landing_target[self.just_took_off, 0] = (
+                self.squat_root_xy[self.just_took_off, 0] + self.commands[self.just_took_off, 0]
+            )
+            self.landing_target[self.just_took_off, 1] = (
+                self.squat_root_xy[self.just_took_off, 1] + self.commands[self.just_took_off, 1]
+            )
+            # PER-ENV 课程: 起跳时锁"这一跳是否被计入的挑战跳"(命令 >= far_frac×自己上界 且 非 probe). episode 末
+            # (_log_jump_episode_stats) 按 jump_target_hits 评估升降 → 摔/跳废/落短(hits=0)都算 down, 修漏算失败偏差.
+            if (getattr(self, "landing_dx_curriculum", False)
+                    and getattr(self.cfg.commands, "landing_dx_percurr", False)
+                    and (not getattr(self.cfg.test, "use_test", False)) and hasattr(self, "landing_dx_env")):
+                jto = self.just_took_off
+                cmd_d = torch.norm(self.landing_target[jto, :2] - self.squat_root_xy[jto], dim=1)
+                far_frac = float(getattr(self.cfg.commands, "landing_dx_per_env_far_frac", 0.6))
+                self._ep_counted_far[jto] = (cmd_d >= far_frac * self.landing_dx_env[jto]) & (~self._dx_probe_mask[jto])
         # Accumulate "landed ON the commanded point" for the curriculum gate: a REAL jump
         # (peak gate, same as landing_position) whose recorded touchdown xy (self.landing_root_xy,
         # set by the parent at just_landed) is within tol of self.landing_target.
@@ -183,9 +258,29 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
             self.jump_target_hits += hit.float()
             # remember this jump's commanded distance (for the far-band advance gate)
             self._last_jump_cmd_dx[self.just_landed] = torch.norm(self.commands[self.just_landed, 0:2], dim=1)
+            # (PER-ENV 升降已移到 episode 末 _log_jump_episode_stats: 那里能把"摔/跳废/落短"都算 down, 不像这里
+            #  的 just_landed 只看"落了地的跳"→漏算失败→dx_env 虚涨. jump_target_hits 上面已累积供末尾评估.)
 
     def _log_jump_episode_stats(self, env_ids):
         super()._log_jump_episode_stats(env_ids)
+        # PER-ENV 双向课程升降 (2026-07-04, episode 末评估, 修漏算失败): 对本集"被计入的挑战跳"(_ep_counted_far,
+        # 起跳时锁的 far&非probe), 按 jump_target_hits(本集命中数, >=1=命中)升降 — 命中→+step_up, 否则(落短/摔/
+        # 跳废, hits=0)→−step_down. 之前在 just_landed 评估会漏掉"没干净落地的失败"(摔了不进 just_landed)→dx_env 虚涨;
+        # 移到 episode 末, 每个起跳的挑战跳都会被评一次(hits=0 就是 down). 在 _reset_jump_buffers 清缓冲之前跑.
+        if (getattr(self, "landing_dx_curriculum", False)
+                and getattr(self.cfg.commands, "landing_dx_percurr", False)
+                and (not getattr(self.cfg.test, "use_test", False)) and hasattr(self, "landing_dx_env")):
+            counted = self._ep_counted_far[env_ids]
+            hit = self.jump_target_hits[env_ids] >= 1.0
+            up = env_ids[counted & hit]
+            down = env_ids[counted & (~hit)]
+            self.landing_dx_env[up] += float(getattr(self.cfg.commands, "landing_dx_step_up", 0.02))
+            self.landing_dx_env[down] -= float(getattr(self.cfg.commands, "landing_dx_step_down", 0.10))
+            self.landing_dx_env.clamp_(
+                float(getattr(self.cfg.commands, "landing_dx_floor", 0.0)),
+                float(getattr(self.cfg.commands, "landing_dx_final", 2.0)),
+            )
+            self.landing_dx_max = float(self.landing_dx_env.max().item())
         # Smooth the successful-jump rate and LATCH the takeoff-omega gate once it clears the threshold
         # (one-way: stays on, never flickers off on a noisy dip). Discovery-safe: succ ~0 until the robot
         # can jump, so the gate only opens post-discovery regardless of how long discovery took.
@@ -214,6 +309,15 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
         self.extras["episode"]["landing_farband_n"] = far_n
         self.extras["episode"]["landing_farband_hit"] = far_hit
         self.extras["episode"]["landing_stable_hit_rate"] = far_hit / torch.clamp(far_n, min=1.0)  # per-batch (noisy) — diagnostic only
+        # HONEST smoothed far-band mastery: per-batch far_n ~0.1 -> the rate above is pure noise (0.0..0.35).
+        # Accumulate hits/attempts with a slow decay so the RATE is trustworthy (zero-far-band batches just
+        # decay both -> don't corrupt it). THIS is the number to WATCH for "can it hit the far end" — NOT
+        # landing_hit_rate (uniform, near-command-inflated) NOR landing_dx_max (strongest single env).
+        # Deterministic ground truth = scripts/eval_reach_ceiling.py (model_3000: ~0.6 total, wall at 0.6->0.7).
+        self._farband_hit_acc = 0.995 * self._farband_hit_acc + float(far_hit.item())
+        self._farband_n_acc = 0.995 * self._farband_n_acc + float(far_n.item())
+        self.extras["episode"]["landing_farband_hit_smooth"] = torch.tensor(
+            self._farband_hit_acc / max(self._farband_n_acc, 1.0), dtype=torch.float, device=self.device)
         # REAL curriculum state (curriculum_pd_prior is unreliable): general_scale ramps 0->1 (warmup->x0),
         # pd_alpha = 0.5*(1-general_scale). Watch this to SEE when PD actually fades (target: 1.0 by ~iter1200).
         self.extras["episode"]["curriculum_general_scale"] = torch.tensor(float(self.general_scale), device=self.device)
@@ -234,6 +338,15 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
         if not getattr(self, "landing_dx_curriculum", False):
             return
         if getattr(self.cfg.test, "use_test", False):
+            return
+        # PER-ENV 双向课程 (2026-07-04): 升降在 _update_jump_state(just_landed) per-env 做; 这里只出日志,
+        # 不做 global advance (取代下面 advance-only 那套 —— 它会被 PD辅助期+noise 冲虚高、只升不退).
+        if getattr(self.cfg.commands, "landing_dx_percurr", False) and hasattr(self, "landing_dx_env"):
+            self.landing_dx_max = float(self.landing_dx_env.max().item())
+            ep = self.extras.setdefault("episode", {})
+            ep["landing_dx_max"] = torch.tensor(self.landing_dx_max, device=self.device)
+            ep["landing_dx_mean"] = self.landing_dx_env.mean()
+            ep["landing_dx_min"] = self.landing_dx_env.min()
             return
         dx_final = float(getattr(self.cfg.commands, "landing_dx_final", 0.40))
         episode = self.extras.get("episode", {})

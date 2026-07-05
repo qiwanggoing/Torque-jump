@@ -51,7 +51,7 @@ class GO2OmniJumpTorque(GO2Torque):
         super()._init_buffers()
         self.default_joint_pd_target = self.default_dof_pos.repeat(self.num_envs, 1)
         self.residual_torques_action = torch.zeros(
-            self.num_envs, self.num_actions, dtype=torch.float, device=self.device
+            self.num_envs, self.num_dof, dtype=torch.float, device=self.device  # Step H: per-joint torque (12), not num_actions
         )
         self.pd_prior_torques = torch.zeros_like(self.residual_torques_action)
         self.pd_prior_alpha = torch.ones(self.num_envs, 1, dtype=torch.float, device=self.device)
