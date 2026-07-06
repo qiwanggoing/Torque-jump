@@ -212,6 +212,8 @@ def main():
     landed_ep = False      # did the robot land this episode (so the drift line is meaningful)
     pl_steps = pl_all4 = 0   # post-landing: total steps + steps with ALL 4 feet planted (all4_frac~1 => SLIDE,
     pl_min_feet = 4          #   maintain_contact can't catch it; all4_frac low / min_feet<4 => STEP-creep, it can)
+    prev_cs = None
+    prev_phase = None
     for _ in range(100000):
         # PD-replay: pin step_count to the checkpoint's iter so general_scale/pd_alpha match training.
         # (control_type='TG' -> _update_growth_scale won't override this; only use_test would, which we avoid.)
@@ -246,10 +248,24 @@ def main():
             pl_steps += 1
             pl_all4 += int(_nc >= 4)
             pl_min_feet = min(pl_min_feet, _nc)
-            if MONITOR_CONTACT:
-                print(f"    land+{pl_steps:3d} contact={_cs} nfeet={_nc} h={float(env.root_states[0,2]):.3f} "
-                      f"dx={drift_dx:+.3f} dy={drift_dy:+.3f} vx={float(env.root_states[0,7]):+.2f} "
-                      f"cmd4={float(env.commands[0,4]):.2f} jumping={int(env.jumping_state[0])}", flush=True)
+        if MONITOR_CONTACT:
+            _cs = env._get_contact_state()[0].int().tolist()
+            _nc = sum(_cs)
+            if not bool(env.jumping_state[0]):
+                _phase = "STAND"
+            elif not bool(env.has_taken_off[0]):
+                _phase = "SQUAT/TAKEOFF"
+            elif not bool(env.has_landed[0]):
+                _phase = "AIRBORNE"
+            else:
+                _phase = "LANDED"
+            if _cs != prev_cs or _phase != prev_phase:
+                _h = float(env.root_states[0, 2])
+                _vx = float(env.root_states[0, 7])
+                _vz = float(env.root_states[0, 9])
+                print(f"  [step {ep_len:3d}] phase={_phase:13s} | contact[FL,FR,RL,RR]={_cs} (n={_nc}) | h={_h:.3f}m | vx={_vx:+.2f}m/s vz={_vz:+.2f}m/s", flush=True)
+                prev_cs = _cs
+                prev_phase = _phase
         # Count distinct FLIGHT phases per episode: a clean single jump = 1 all-feet-off period; an EXTRA
         # in-place HOP after landing = a 2nd all-feet-off period. Catches the post-landing hop that the
         # land-event print misses (just_landed fires only on the FIRST touchdown).
@@ -286,6 +302,8 @@ def main():
             landed_ep = False
             pl_steps = pl_all4 = 0
             pl_min_feet = 4
+            prev_cs = None
+            prev_phase = None
         # track the worst nose-down tilt while airborne/landing (same units as cfg.rewards.landing_tilt_terminate)
         if bool(env.airborne[0]) or bool(env.prelanding[0]) or bool(env.landing[0]):
             max_nd = max(max_nd, float(env.projected_gravity[0, 0]))

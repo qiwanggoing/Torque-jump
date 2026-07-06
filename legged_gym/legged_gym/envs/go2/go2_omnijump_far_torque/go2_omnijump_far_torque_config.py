@@ -45,8 +45,8 @@ class GO2OmniJumpFarTorqueCfg(GO2OmniJumpLandingTorqueCfg):
             projected_landing = 0.0
             landing_position = 0.0
             takeoff_velocity_match = 0.0
-            # Remove post-landing velocity braking so high forward momentum is not taxed
-            landing_stability = 0.0
+            # Re-enable post-landing velocity braking to absorb touchdown impact and stop post-landing bouncing
+            landing_stability = 2.0
 
             # =========================================================================
             # 2. ACTIVATE OMNINET & REACH-MAXIMIZATION DRIVERS
@@ -60,10 +60,13 @@ class GO2OmniJumpFarTorqueCfg(GO2OmniJumpLandingTorqueCfg):
             successful_jump = 1000.0
 
             # =========================================================================
-            # 3. KEEP OUR PROVEN TORQUE TAKEOFF & ATTITUDE PROTECTION NET UNCHANGED
+            # 3. ANTI-STUTTER & LANDING STABILITY ANCHORS
             # =========================================================================
-            # stance_squat=3.0, clean_takeoff_bonus=3.0, foot_contact_sync=-4.0,
-            # jump_pitch_extra=12.0, landing_pitch_extra=5.0, default_hip_pos=2.0, etc.
+            # Strongly incentivize a clean, single-push takeoff without any stutter-step (re-plant)
+            clean_takeoff_bonus = 25.0  # raised from inherited 3.0 to overcome the +60.0 forward_reach pull
+            # Reward four feet planted when not airborne to prevent post-landing foot shuffling
+            maintain_contact = 0.5      # raised from inherited 0.3
+            # stance_squat=3.0, foot_contact_sync=-4.0, jump_pitch_extra=12.0, etc.
             # are all inherited intact from GO2OmniJumpLandingTorqueCfg.rewards.scales!
 
     class logging(GO2OmniJumpLandingTorqueCfg.logging):
