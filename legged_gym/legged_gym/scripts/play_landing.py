@@ -77,9 +77,11 @@ def train_step_count_at_iter(target_iter, W, X, sf, mf, dt, nspe):
 # Defaults are conservative for deterministic/no-noise play. Override without
 # editing this file, e.g.:
 #   PLAY_LANDING_DX=0.7 PLAY_LANDING_HEIGHT=0.7 python legged_gym/scripts/play_landing.py --task=go2_omnijump_landing_torque
-DX = _env_float("PLAY_LANDING_DX", 0.5)       # forward landing displacement (m)
+DX = _env_float("PLAY_LANDING_DX", 0.9)       # forward landing displacement (m). 新模型准确到 0.8; 0.9+ 够不到. 改数字试别的.
 DY = _env_float("PLAY_LANDING_DY", 0.0)       # lateral landing displacement (m)
-HEIGHT = _env_float("PLAY_LANDING_HEIGHT", 0.7)  # jump-height command
+HEIGHT = _env_float("PLAY_LANDING_HEIGHT", 0.6)  # jump-height command. ⚠️ 新模型训练范围 [0.4,0.6], 别超 0.6 (0.7=OOD假崩)
+ADDED_MASS = _env_float("PLAY_LANDING_ADDED_MASS", 0.0)  # kg added to BASE. 0.0 = URDF标称 = 真机 = 新模型([-1,+1])训练中心.
+                    # ⚠️ 新模型必须 0.0! 给 +2kg 是 OOD 会原地蹦假崩. (只有旧 [-1,+5] 模型才该设 2.0.)
 STAND_ONLY = _env_bool("PLAY_LANDING_STAND_ONLY", False)  # PURE-STAND test: command cmd4=0.45 (<=0.5 threshold -> NEVER jumps) + zero displacement,
                     # so the robot is told to just stand quietly at spawn (landing_target=spawn -> err=0).
                     # Watch how stable the stand is / how often it twitches a foot off. Set False for normal jumps.
@@ -116,7 +118,13 @@ def main():
     env_cfg.noise.add_noise = False
     env_cfg.domain_rand.randomize_friction = False
     env_cfg.domain_rand.push_robots = False
-    env_cfg.domain_rand.randomize_base_mass = False
+    # Base mass: default nominal (URDF = real robot). PLAY_LANDING_ADDED_MASS=2.0 pins +2kg to reproduce
+    # an OLD-DR ([-1,+5], mean +2kg) model's train performance (it undershoots at nominal). See mass diag.
+    if abs(ADDED_MASS) > 1e-6:
+        env_cfg.domain_rand.randomize_base_mass = True
+        env_cfg.domain_rand.added_mass_range = [ADDED_MASS, ADDED_MASS]
+    else:
+        env_cfg.domain_rand.randomize_base_mass = False
     env_cfg.rewards.landing_tilt_terminate = 0.0   # MEASURE mode: disable the tilt-reset so we see the TRUE max nose-down
     train_cfg.runner.resume = True
 
@@ -180,7 +188,8 @@ def main():
     # the very first policy action sees the requested DX instead of reset-time obs.
     env.compute_observations()
     obs = env.get_observations()
-    print(f"[play_landing] cmd dx={DX} dy={DY} height={HEIGHT} | clean env, normal jump flow, replay pd_alpha={_pd_a:.3f}", flush=True)
+    _mass_note = f"added_mass={ADDED_MASS:+.1f}kg" if abs(ADDED_MASS) > 1e-6 else "nominal mass (URDF)"
+    print(f"[play_landing] cmd dx={DX} dy={DY} height={HEIGHT} | {_mass_note} | normal jump flow, replay pd_alpha={_pd_a:.3f}", flush=True)
 
     import math
     pg2deg = lambda v: math.degrees(math.asin(max(-1.0, min(1.0, float(v)))))  # projected_gravity_x -> tilt deg
@@ -193,8 +202,9 @@ def main():
     DISABLE_JUMP_ON_LAND = False  # 单跳只练跳(user): 落地不 force cmd4=0, 跟训练 disable_jump_on_landing=False 一致.
     DEBUG_HOP = False      # True = print the per-step feet-off / per-episode reset debug (hop diagnosis).
                            # False = clean output: just the per-jump [land] line (peak height + forward reach).
-    MONITOR_CONTACT = _env_bool("PLAY_LANDING_MONITOR_CONTACT", True) # True = once landed, print the FULL per-foot contact + height + drift + fwd vel EVERY
-                           # step until the next reset (to see exactly what the feet do during the hop-then-slide).
+    MONITOR_CONTACT = _env_bool("PLAY_LANDING_MONITOR_CONTACT", False) # DEFAULT OFF = clean output (just the per-jump [land] line).
+                           # Set PLAY_LANDING_MONITOR_CONTACT=1 to also dump the FULL per-foot contact + height + drift + fwd vel
+                           # EVERY step after landing (the post-landing slide/hop diagnosis).
     n_flights = 0          # all-feet-off phases this episode (1 = clean single jump; 2+ = extra in-place hop)
     feet_off_prev = False
     ep_len = 0             # python-side per-episode step counter (env.episode_length_buf is already 0 by reset-print time)
@@ -262,7 +272,7 @@ def main():
                 tilt = pg2deg(env.projected_gravity[0, 0])   # nose-down tilt at reset (>0 nose-down); large => tipped over
                 print(f"[reset] ep_len={ep_len} tilt={tilt:.0f}deg h={float(env.root_states[0,2]):.2f} "
                       f"flight_phases={n_flights}  {'(clean: 1 jump)' if n_flights <= 1 else '<-- EXTRA HOP(s) after landing'}", flush=True)
-            if landed_ep:
+            if landed_ep and MONITOR_CONTACT:
                 _all4 = pl_all4 / max(pl_steps, 1)
                 print(f"  [post-land drift] dx={drift_dx:+.3f} dy={drift_dy:+.3f} "
                       f"|d|={(drift_dx ** 2 + drift_dy ** 2) ** 0.5:.3f}m  max|d|={max_drift:.3f}m  "

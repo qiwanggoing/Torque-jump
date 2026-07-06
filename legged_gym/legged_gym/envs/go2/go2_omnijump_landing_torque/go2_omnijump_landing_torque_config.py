@@ -54,6 +54,17 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
         # (Default False in the parent -> all other tasks with num_actions=12 are untouched.)
         aux_stabilizer_head = True
 
+    class domain_rand(GO2OmniJumpCurriculumTorqueCfg.domain_rand):
+        # RE-CENTER base-mass DR on the URDF-nominal robot (2026-07-05). The inherited range
+        # [-1, +5] (mean +2kg) was HEAVY-BIASED: the mass-BLIND policy (mass not in obs) tunes ONE
+        # push to the distribution's bulk (~+2kg), so it nails +2..+4kg (eval hit 1.00) but MISSES at
+        # nominal (added=0 = the real URDF robot: eval hit 0.00, systematic undershoot). Proven with
+        # eval_isolate massfix sweep. Real robot == URDF nominal, so center the range there. Keeps
+        # randomize_base_mass=True (real payload/battery/tolerance margin), just symmetric about 0.
+        # If the retrained policy is weak at the ±edges, TIGHTEN this or add base-mass to the obs
+        # (proper fix for a mass-sensitive jump: let the policy ADAPT the push to the actual mass).
+        added_mass_range = [-1.0, 1.0]
+
     class growth(GO2OmniJumpCurriculumTorqueCfg.growth):
         # PD fade EARLY (pure torque by ~iter500). The MIDDLE-window experiment (warmup 100000/x0 240000,
         # full PD until iter1450) FAILED: run Jun10_00-50-26 stayed squatQ=0 / peak 0.15 / NO jump for
@@ -196,7 +207,7 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
                                            # 连续跳落地立刻再跳没法蓄力 -> 每跳只 0.13m; 单跳能蓄力 -> 纯力矩~0.77m.
 
         class ranges(GO2OmniJumpCurriculumTorqueCfg.commands.ranges):
-            jump_height = [0.40, 0.70]   # unchanged from the proven May28 baseline
+            jump_height = [0.40, 0.60]   # 0.70 -> 0.60 (user 2026-07-05): 0.6 高度够用, 上限降一点=少把力气花在垂直
             lin_vel_x = [0.0, 0.0]       # repurposed: landing dx (m). Stage 1 = land in place.
             lin_vel_y = [0.0, 0.0]       # repurposed: landing dy (m). Stage 1 = land in place.
             ang_vel_yaw = [0.0, 0.0]
@@ -585,7 +596,8 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
                                              # (simpler than a reward; no standing-pose reward to make not-jumping comfy).
                                              # Zeroed during push-off / squat-down. NOTE: memory says -0.7 once caused
                                              # noise runaway -> watch noise_std; raise back if the anchor gets too loose.
-            default_hip_pos = 1.0            # 0.3 -> 1.0: the policy slid the front feet INWARD (hip adduction) to shuffle
+            default_hip_pos = 2.0            # 1.0 -> 2.0 (user 2026-07-05): 髋外展/内收 splay 差, 强锁髋(4个hip-abduction关节)到 default.
+                                             # [0.3 -> 1.0 史]: the policy slid the front feet INWARD (hip adduction) to shuffle
                                              # forward momentum (the stutter/run-up morphed into a SLIDE once the re-plant
                                              # termination forbade stepping). default_hip_pos keeps the 4 hip-abduction joints
                                              # near default; at 0.3 it earned only ~0.05 (hips drifting ~0.46 rad) -- too weak to

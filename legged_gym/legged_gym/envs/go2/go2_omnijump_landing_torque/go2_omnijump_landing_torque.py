@@ -271,7 +271,11 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
                 and getattr(self.cfg.commands, "landing_dx_percurr", False)
                 and (not getattr(self.cfg.test, "use_test", False)) and hasattr(self, "landing_dx_env")):
             counted = self._ep_counted_far[env_ids]
-            hit = self.jump_target_hits[env_ids] >= 1.0
+            # STABLE-HIT gate (2026-07-05): 升档要求"又准又稳"—— 落点近(jump_target_hits) AND 站稳(successful_jumps).
+            # 修复病根: 之前只看 jump_target_hits(落点近就升), 策略靠"往前扑落点凑近但摔了"也能顶高 dx_env
+            # -> dx 无限虚涨到 1.16 而 fb_smooth 崩到 0.16、succ 掉到 0.61(慢性退化). 现在摔了(successful=0)就不升
+            # -> dx 自停在能"又准又稳"命中的真实距离(~0.75), succ 不再被超调的猛扑拖垮.
+            hit = (self.jump_target_hits[env_ids] >= 1.0) & (self.successful_jumps[env_ids] >= 1.0)
             up = env_ids[counted & hit]
             down = env_ids[counted & (~hit)]
             self.landing_dx_env[up] += float(getattr(self.cfg.commands, "landing_dx_step_up", 0.02))
