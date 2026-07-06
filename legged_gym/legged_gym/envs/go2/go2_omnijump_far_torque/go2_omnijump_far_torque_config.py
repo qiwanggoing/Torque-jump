@@ -66,6 +66,27 @@ class GO2OmniJumpFarTorqueCfg(GO2OmniJumpLandingTorqueCfg):
             # jump_pitch_extra=12.0, landing_pitch_extra=5.0, default_hip_pos=2.0, etc.
             # are all inherited intact from GO2OmniJumpLandingTorqueCfg.rewards.scales!
 
+    class logging(GO2OmniJumpLandingTorqueCfg.logging):
+        print_episode_keys = [
+            k for k in GO2OmniJumpLandingTorqueCfg.logging.print_episode_keys
+            if k not in (
+                "rew_projected_landing",
+                "rew_landing_position",
+                "rew_takeoff_velocity_match",
+                "rew_landing_stability",
+                "landing_dx_max",
+                "landing_dx_mean",
+                "landing_dx_min",
+                "landing_dx_stable_cum",
+                "landing_stable_hit_uniform",
+                "landing_hit_rate",
+                "landing_farband_hit_smooth",
+            )
+        ] + [
+            "rew_forward_reach",
+            "rew_tracking_linear_velocity",
+        ]
+
 
 class GO2OmniJumpFarTorqueCfgPPO(GO2OmniJumpLandingTorqueCfgPPO):
     class runner(GO2OmniJumpLandingTorqueCfgPPO.runner):
