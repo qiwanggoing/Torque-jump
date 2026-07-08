@@ -33,6 +33,9 @@ class GO2OmniJumpFarTorqueCfg(GO2OmniJumpLandingTorqueCfg):
             ang_vel_yaw = [-0.5, 0.5]
 
     class rewards(GO2OmniJumpLandingTorqueCfg.rewards):
+        # Superlinear exponent for _reward_forward_reach (2.0 = quadratic scaling)
+        forward_reach_power = 2.0
+
         # Enable all-time linear velocity tracking matching OmniNet Table I semantics
         tracking_linear_velocity_all_time = True
         tracking_sigma = 0.5

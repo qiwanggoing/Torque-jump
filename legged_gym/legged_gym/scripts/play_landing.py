@@ -85,6 +85,10 @@ ADDED_MASS = _env_float("PLAY_LANDING_ADDED_MASS", 0.0)  # kg added to BASE. 0.0
 STAND_ONLY = _env_bool("PLAY_LANDING_STAND_ONLY", False)  # PURE-STAND test: command cmd4=0.45 (<=0.5 threshold -> NEVER jumps) + zero displacement,
                     # so the robot is told to just stand quietly at spawn (landing_target=spawn -> err=0).
                     # Watch how stable the stand is / how often it twitches a foot off. Set False for normal jumps.
+NO_RSI = _env_bool("PLAY_LANDING_NO_RSI", True)  # force rsi_prob=0 during play. RSI is a TRAINING exploration
+                    # mechanism (air-drops a fraction of resets into a squat/mid-launch state); in play it makes the
+                    # single viewed robot RANDOMLY spawn in flight -> confusing. Default True = clean deterministic
+                    # spawns (normal stand->jump). Set PLAY_LANDING_NO_RSI=0 to SEE the RSI air-drops (e.g. far task).
 # ====================================================================================
 
 
