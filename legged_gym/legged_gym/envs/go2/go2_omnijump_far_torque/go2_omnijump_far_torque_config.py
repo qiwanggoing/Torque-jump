@@ -37,6 +37,22 @@ class GO2OmniJumpFarTorqueCfg(GO2OmniJumpLandingTorqueCfg):
         tracking_linear_velocity_all_time = True
         tracking_sigma = 0.5
 
+        # ---- RSI-FORWARD (expand reach past the ~0.7m ceiling; Olsen 2025 RSI-along-projectile) ----
+        # Air-drop a fraction of resets into a squat that is LAUNCHING FORWARD (matched ballistic vx,vz to a
+        # far distance) so the value fn learns "far forward flight = high return" and the standing policy
+        # chases a bigger forward push. This is the ONE paper-backed lever for breaking the local optimum
+        # where the rear thighs sit idle (torque_diag: rear-thigh cmd/Y1<1 = unused gradient). The forward vx
+        # is GATED on the succ-latch (_takeoff_omega_on) so it never fires before the jump is discovered.
+        rsi_prob = 0.15                # 15% of resets = RSI air-drop
+        rsi_static_frac = 0.4          # of those: 40% static-squat (push-from-standstill / countermovement
+                                       # half, keeps the fold trained), 60% launch-forward (reach-expansion)
+        rsi_forward_vx = True          # give the LAUNCH sub-mode a matched forward vx (teach DISTANCE)
+        rsi_forward_dist_min = 0.8     # ballistic target distance for the forward-launch RSI: just BEYOND the
+        rsi_forward_dist_max = 1.4     # current ~0.7 reach -> a REPRODUCIBLE "reach a bit farther" pull
+        rsi_forward_vx_max = 4.0       # clamp the injected forward speed (avoid unphysical air-drops)
+        rsi_vel_z_min = 1.5            # launch vz range (total apex ~0.31-0.66) that pairs with the forward vx
+        rsi_vel_z_max = 3.0
+
         class scales(GO2OmniJumpLandingTorqueCfg.rewards.scales):
             # =========================================================================
             # 1. STRIP AWAY LANDING PRECISION & BRAKING CONSTRAINTS

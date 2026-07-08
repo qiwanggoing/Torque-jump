@@ -249,6 +249,27 @@ class GO2OmniJumpTorque(GO2Torque):
                 rsi_vel_z = torch.where(static_mask, static_vz, launch_vz)
                 self.root_states[rsi_ids, 9] = rsi_vel_z
 
+                # ---- FORWARD RSI (teach DISTANCE, not just height) ----
+                # The vz-only drop above teaches "launch UP = good" -> vertical jumps only. To break the
+                # forward-reach ceiling, give the LAUNCH sub-mode a matched HORIZONTAL velocity: drop the env
+                # at the squat carrying the ballistic launch (vx, vz) of a jump covering a far distance d, so
+                # the value fn learns "launch FORWARD at speed = high return" and the standing policy chases a
+                # bigger forward push (Olsen 2025: RSI states sampled along the projectile arc). Only the LAUNCH
+                # envs get vx; STATIC envs stay vx=0 (they train the push-from-standstill / countermovement).
+                # DISCOVERY-SAFE: gated on the succ-latch (_takeoff_omega_on) -- before the policy can jump,
+                # demoing a fast forward launch it can't reproduce would collapse discovery (the old RSI
+                # pop-collapse). Opt-in via rsi_forward_vx (default off -> landing & every other task unchanged).
+                if getattr(self.cfg.rewards, "rsi_forward_vx", False) and getattr(self, "_takeoff_omega_on", False):
+                    fwd_d_min = float(getattr(self.cfg.rewards, "rsi_forward_dist_min", 0.8))
+                    fwd_d_max = float(getattr(self.cfg.rewards, "rsi_forward_dist_max", 1.4))
+                    fwd_vx_max = float(getattr(self.cfg.rewards, "rsi_forward_vx_max", 4.0))
+                    d_rsi = torch_rand_float(fwd_d_min, fwd_d_max, (len(rsi_ids), 1), device=self.device).squeeze(1)
+                    # d = vx * T, T = 2*vz/g  ->  vx = d*g / (2*vz)  (ballistic launch matched to distance d)
+                    vx_launch = (d_rsi * 9.81) / (2.0 * launch_vz.clamp(min=0.5))
+                    vx_launch = vx_launch.clamp(max=fwd_vx_max)
+                    rsi_vel_x = torch.where(static_mask, torch.zeros_like(vx_launch), vx_launch)
+                    self.root_states[rsi_ids, 7] = rsi_vel_x   # world +x = spawn heading = forward
+
                 self.dof_pos[rsi_ids] = self.q_squat_target.unsqueeze(0)
                 self.dof_vel[rsi_ids] = 0.0
 
