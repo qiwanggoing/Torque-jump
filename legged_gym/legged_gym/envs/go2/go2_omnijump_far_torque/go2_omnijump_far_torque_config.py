@@ -58,10 +58,19 @@ class GO2OmniJumpFarTorqueCfg(GO2OmniJumpLandingTorqueCfg):
             # =========================================================================
             # 1. STRIP AWAY LANDING PRECISION & BRAKING CONSTRAINTS
             # =========================================================================
-            # Remove penalties for landing away from a specific (dx, dy) coordinate
+            # Remove the LANDING-PRECISION penalties (we don't care WHERE it lands, only HOW FAR).
             projected_landing = 0.0
             landing_position = 0.0
-            takeoff_velocity_match = 0.0
+            # takeoff_velocity_match RESTORED to 15 (was 0). It is NOT a landing-precision term -- it is the
+            # proven CAUSE-side launch driver (rewards the takeoff velocity vector of a ballistic launch toward
+            # the target, fires AT takeoff). Stripping it left far with NO early launch driver, so from-scratch
+            # discovery STARVED: run Jul09_00-31-03 never found the squat-jump (squat_qualified flat 0,
+            # forward_reach never fired, peak 0.30 < 0.40 gate) because projected_peak only pays once already
+            # jumping high (chicken-egg). Restoring it bootstraps the forward launch AND drives distance (target
+            # = squat + cmd[1,2] -> rewards launching toward 1-2m; robot undershoots so there's no cap/oppose
+            # issue). This makes far ~= "landing minus the precision terms", which discovers reliably. tracking
+            # stays 0 (that was the drift-bug bootstrap the previous run relied on; this is the clean replacement).
+            takeoff_velocity_match = 15.0
             # Re-enable post-landing velocity braking to absorb touchdown impact and stop post-landing bouncing
             landing_stability = 2.0
 
