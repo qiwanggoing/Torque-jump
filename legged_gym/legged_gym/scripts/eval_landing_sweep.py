@@ -65,6 +65,9 @@ def main():
     env_cfg.domain_rand.randomize_base_mass = TRAIN_COND
     env_cfg.domain_rand.push_robots = False        # training also disables push DURING the jump
     env_cfg.rewards.landing_tilt_terminate = 0.0
+    env_cfg.rewards.rsi_prob = 0.0                 # NO RSI air-drops during eval (isolate the policy; RSI is a
+                                                   # training-only exploration mechanism that would randomly spawn
+                                                   # envs mid-flight and corrupt the distance measurement)
     train_cfg.runner.resume = True
 
     log_root = os.path.join(LEGGED_GYM_ROOT_DIR, 'logs', train_cfg.runner.experiment_name)
