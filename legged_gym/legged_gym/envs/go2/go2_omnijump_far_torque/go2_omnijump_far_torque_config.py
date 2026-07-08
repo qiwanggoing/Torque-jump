@@ -41,13 +41,20 @@ class GO2OmniJumpFarTorqueCfg(GO2OmniJumpLandingTorqueCfg):
         # ---- RSI-FORWARD (expand reach past the ~0.7m ceiling; Olsen 2025 RSI-along-projectile) ----
         # Air-drop a fraction of resets into a squat that is LAUNCHING FORWARD (matched ballistic vx,vz to a
         # far distance) so the value fn learns "far forward flight = high return" and the standing policy
-        # chases a bigger forward push. This is the ONE paper-backed lever for breaking the local optimum
-        # where the rear thighs sit idle (torque_diag: rear-thigh cmd/Y1<1 = unused gradient). The forward vx
-        # is GATED on the succ-latch (_takeoff_omega_on) so it never fires before the jump is discovered.
-        rsi_prob = 0.15                # 15% of resets = RSI air-drop
+        # chases a bigger forward push.
+        # ⚠️ DISABLED (2026-07-09): rsi_prob=0.15 BROKE JUMP DISCOVERY. Root cause + memory's explicit warning:
+        # the base RSI air-drop is UN-gated (fires from iter0) and teleports envs INTO the squat gate-EXEMPT ->
+        # it demonstrates ONLY the push half, never the stand->fold half -> the shared policy is pulled toward
+        # "pop" and the standing rollouts never learn to fold -> squat_qualified collapses to 0 -> the whole
+        # jump-reward chain (incl. successful_jump) never unlocks. PROOF: Jul06_18-03-25 (rsi_prob=0) hit
+        # squat_qualified 0.94 @ iter100 / successful_jump 0.96 @ iter200 (INSTANT); every rsi_prob=0.15 run
+        # (Jul08+/Jul09) had squat_qualified -> 0 and succ stuck ~0.08. (landing set rsi_prob=0 for exactly this
+        # reason.) The forward-vx gate only covered vx, NOT the air-drop itself. RE-ENABLE RSI ONLY once discovery
+        # is solid AND the WHOLE air-drop is gated post-discovery (or resume from an already-discovered jumper).
+        rsi_prob = 0.0                 # OFF = discovery works (Jul06 condition). RSI-forward params below kept for later.
         rsi_static_frac = 0.4          # of those: 40% static-squat (push-from-standstill / countermovement
                                        # half, keeps the fold trained), 60% launch-forward (reach-expansion)
-        rsi_forward_vx = True          # give the LAUNCH sub-mode a matched forward vx (teach DISTANCE)
+        rsi_forward_vx = True          # give the LAUNCH sub-mode a matched forward vx (teach DISTANCE) [inert while rsi_prob=0]
         rsi_forward_dist_min = 0.8     # ballistic target distance for the forward-launch RSI: just BEYOND the
         rsi_forward_dist_max = 1.4     # current ~0.7 reach -> a REPRODUCIBLE "reach a bit farther" pull
         rsi_forward_vx_max = 4.0       # clamp the injected forward speed (avoid unphysical air-drops)
