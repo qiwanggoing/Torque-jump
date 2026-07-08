@@ -33,10 +33,8 @@ class GO2OmniJumpFarTorqueCfg(GO2OmniJumpLandingTorqueCfg):
             ang_vel_yaw = [-0.5, 0.5]
 
     class rewards(GO2OmniJumpLandingTorqueCfg.rewards):
-        # Superlinear exponent for _reward_forward_reach (2.0 = quadratic scaling)
-        forward_reach_power = 2.0
-
-        # Enable all-time linear velocity tracking matching OmniNet Table I semantics
+        # (quadratic forward_reach REVERTED -> linear, see far env: it squashed distance in the achievable
+        # <1m range and made the policy a vertical hopper.)
         tracking_linear_velocity_all_time = True
         tracking_sigma = 0.5
 
@@ -68,12 +66,27 @@ class GO2OmniJumpFarTorqueCfg(GO2OmniJumpLandingTorqueCfg):
             landing_stability = 2.0
 
             # =========================================================================
-            # 2. ACTIVATE OMNINET & REACH-MAXIMIZATION DRIVERS
+            # 2. MAX-DISTANCE OBJECTIVE (2026-07-08 fix: the previous run became a VERTICAL HOPPER)
             # =========================================================================
-            # Activate OmniNet Table I linear velocity tracking to drive forward momentum
-            tracking_linear_velocity = 2.0
-            # Keep our massive forward reach distance reward as the dominant objective
+            # forward_reach (LINEAR, inherited) = the SOLE dominant objective. It rewards the ballistic
+            # projected forward reach (vx * flight_time) -> optimizes launch SPEED and ANGLE for max distance,
+            # and IMPLICITLY values the height that lengthens flight time -> height needs no separate reward.
             forward_reach = 60.0
+            # projected_peak (HEIGHT) -> 0: it was the vertical-hop attractor (earned rew 0.278, dominant). The
+            # policy farmed pure height (peak 0.50) and barely moved forward (~0.13m). Kill it; let height EMERGE
+            # from the ~45deg ballistic optimum via forward_reach's flight-time term.
+            projected_peak = 0.0
+            # tracking_linear_velocity -> 0: SEMANTICS BUG. commands[0:2] are METRES (landing displacement), not
+            # m/s; tracking them as an all-time velocity target rewarded forward DRIFT/slide (earned rew 0.286,
+            # dominant) and muddied the objective. forward_reach already carries the takeoff-velocity signal.
+            tracking_linear_velocity = 0.0
+            # USE ALL CAPABILITY (user): wake the IDLE REAR THIGHS. torque_diag proved the rear thighs sit at
+            # cmd/Y1 < 1 (unused gradient) while the policy scales distance ONLY via the rear HIP. four_leg_push
+            # grades each ON-GROUND leg up to a GRF target (surplus is free -> no front==rear constraint) so an
+            # idling leg drags the mean down -> the policy recruits it. Gated (succ-latch + real-push force floor
+            # > body weight) = discovery-safe. WATCH value_loss: it blew the critic once at a higher weight -> if
+            # value_loss spikes or it won't jump forward, set this to 0 first when bisecting.
+            four_leg_push = 5.0
             # Keep flight-time and jump success rewards (gated by our squat gate height)
             all_feet_airborne = 3.0
             successful_jump = 1000.0
@@ -105,13 +118,19 @@ class GO2OmniJumpFarTorqueCfg(GO2OmniJumpLandingTorqueCfg):
                 "landing_farband_hit_smooth",
             )
         ] + [
-            "rew_forward_reach",
-            "rew_tracking_linear_velocity",
+            "rew_forward_reach",       # ★ the distance objective — should now DOMINATE and rise
+            "rew_four_leg_push",        # rear-thigh recruitment (use-all-capability lever) — watch it wake
+            "rew_projected_peak",       # HEIGHT — now weight 0, should read ~0 (no vertical-hop farming)
         ]
 
 
 class GO2OmniJumpFarTorqueCfgPPO(GO2OmniJumpLandingTorqueCfgPPO):
+    class algorithm(GO2OmniJumpLandingTorqueCfgPPO.algorithm):
+        entropy_coef = 0.005          # was 0.003: explore harder to ESCAPE the vertical-hop local optimum the
+                                      # previous run collapsed into (noise_std fell to 0.044 by iter1000).
     class runner(GO2OmniJumpLandingTorqueCfgPPO.runner):
         experiment_name = "go2_omnijump_far_torque"
         run_name = "far_jump_v1"
         max_iterations = 3000
+        entropy_anneal_iter = 1500    # was 500: keep exploring forward launches much longer before annealing.
+        entropy_coef_final = 0.001    # WATCH noise_std: if it runs away past ~0.5, lower entropy_coef.
