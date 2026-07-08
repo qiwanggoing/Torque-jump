@@ -72,10 +72,14 @@ class GO2OmniJumpFarTorqueCfg(GO2OmniJumpLandingTorqueCfg):
             # projected forward reach (vx * flight_time) -> optimizes launch SPEED and ANGLE for max distance,
             # and IMPLICITLY values the height that lengthens flight time -> height needs no separate reward.
             forward_reach = 60.0
-            # projected_peak (HEIGHT) -> 0: it was the vertical-hop attractor (earned rew 0.278, dominant). The
-            # policy farmed pure height (peak 0.50) and barely moved forward (~0.13m). Kill it; let height EMERGE
-            # from the ~45deg ballistic optimum via forward_reach's flight-time term.
-            projected_peak = 0.0
+            # projected_peak (HEIGHT): RESTORED to 20. Zeroing it (2026-07-08) KILLED JUMP DISCOVERY -- with no
+            # height bootstrap and forward_reach gated on pz>0.4, the policy never got airborne, forward_reach
+            # NEVER fired (rew 0.000 all run), succ collapsed to 0, peak ~0.1 (eval: 0 real jumps). projected_peak
+            # is the DISCOVERY bootstrap (pulls the jump UP so forward_reach can then fire). It no longer causes a
+            # vertical hop, because forward_reach is now LINEAR (earns >> projected_peak) -> DISTANCE dominates
+            # while height just bootstraps discovery + lengthens flight time. (The vertical hop was the QUADRATIC
+            # squashing forward_reach, not projected_peak; reverting the quadratic was the real fix.)
+            projected_peak = 20.0
             # tracking_linear_velocity -> 0: SEMANTICS BUG. commands[0:2] are METRES (landing displacement), not
             # m/s; tracking them as an all-time velocity target rewarded forward DRIFT/slide (earned rew 0.286,
             # dominant) and muddied the objective. forward_reach already carries the takeoff-velocity signal.
@@ -125,12 +129,10 @@ class GO2OmniJumpFarTorqueCfg(GO2OmniJumpLandingTorqueCfg):
 
 
 class GO2OmniJumpFarTorqueCfgPPO(GO2OmniJumpLandingTorqueCfgPPO):
-    class algorithm(GO2OmniJumpLandingTorqueCfgPPO.algorithm):
-        entropy_coef = 0.005          # was 0.003: explore harder to ESCAPE the vertical-hop local optimum the
-                                      # previous run collapsed into (noise_std fell to 0.044 by iter1000).
     class runner(GO2OmniJumpLandingTorqueCfgPPO.runner):
         experiment_name = "go2_omnijump_far_torque"
         run_name = "far_jump_v1"
         max_iterations = 3000
-        entropy_anneal_iter = 1500    # was 500: keep exploring forward launches much longer before annealing.
-        entropy_coef_final = 0.001    # WATCH noise_std: if it runs away past ~0.5, lower entropy_coef.
+        # (entropy REVERTED to the inherited landing default 0.003 / anneal@500. The aggressive
+        #  0.005 / anneal@1500 was bundled into the collapsed run -> isolate the projected_peak-restore fix.
+        #  The proven vertical-hop run discovered the jump fine on the default entropy.)
