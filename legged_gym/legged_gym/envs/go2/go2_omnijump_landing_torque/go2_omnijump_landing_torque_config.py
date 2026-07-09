@@ -474,7 +474,17 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
                                              # STABLE positive signal for trying-its-best/reaching-far so it never gives up. Strong
                                              # (>= projected_peak 20) so DISTANCE outranks HEIGHT. TUNE vs precision rewards if it
                                              # overshoots near commands or starves precision.
-            four_leg_push = 5.0             # ENABLED (2026-07-09, user "port far's rear-leg drive to landing"). Grades each
+            four_leg_push = 10.0           # 5 -> 10 (2026-07-09, stroke diag): per-band torque_diag on the best jumper
+                                             # (Jul05_13-55-46) showed four_leg IS active in the propulsion band (0.30-0.35) but
+                                             # ~3x WEAKER than the only push driver takeoff_velocity_match (four_leg 0.011-0.022 vs
+                                             # tvm 0.065) -> too weak to overcome the rear-thigh idle (rear-thigh util ~0.30 the whole
+                                             # stroke). PITCH is NOT the lock (pitch/omega penalties are -0.0001..-0.0016 in the push =
+                                             # 40-300x smaller than the drivers; the pitch penalties are already one-sided/nose-up-free).
+                                             # So the lever is four_leg WEIGHT, not pitch. Doubled to make the rear-thigh recruitment
+                                             # gradient competitive with tvm. WATCH Loss/value_loss (old critic-blow) + a possible tug-of-
+                                             # war with takeoff_velocity_match (rear-thigh push may pull CoM vel off v_req); if precision
+                                             # or discovery drops, step back to 5 then 0. Grades each
+                                             # ENABLED (2026-07-09, user "port far's rear-leg drive to landing"). Grades each
                                              # ON-GROUND leg's vertical GRF up to a target (surplus free -> rear may dominate,
                                              # front-first allowed) so an IDLE leg drags the mean down -> the policy recruits it.
                                              # Two preconditions from the old note are now MET: (1) the "rear thigh idle" premise
