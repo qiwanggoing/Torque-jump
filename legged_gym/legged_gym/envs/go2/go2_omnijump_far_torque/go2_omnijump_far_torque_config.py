@@ -29,7 +29,11 @@ class GO2OmniJumpFarTorqueCfg(GO2OmniJumpLandingTorqueCfg):
             # Demand massive forward jumping reach / speed (1.0m to 2.0m target reach)
             lin_vel_x = [1.0, 2.0]
             lin_vel_y = [-0.3, 0.3]
-            jump_height = [0.40, 0.60]
+            jump_height = [0.40, 0.40]   # FLOOR only (was [0.4,0.6]). Height is now a one-sided FLOOR (see the
+                                         # far env's _reward_projected_peak override): reach 0.40 (min real jump)
+                                         # then FREE above -> forward_reach picks the distance-optimal apex. We
+                                         # don't care about height beyond the 0.40 floor (user); do NOT command a
+                                         # high apex or projected_peak will push effort into vertical instead of reach.
             ang_vel_yaw = [-0.5, 0.5]
 
     class rewards(GO2OmniJumpLandingTorqueCfg.rewards):
