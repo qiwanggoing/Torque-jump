@@ -499,6 +499,18 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
                                              # each leg's force onto the v_req LAUNCH direction instead of vertical GRF.
                                              # (_reward_four_leg_push still exists: grades each ON-GROUND leg's vertical GRF up to a
                                              # target so an IDLE leg drags the mean down. Left in code, weight 0, for the record.)
+            actuator_utilization = 3.0       # NEW (2026-07-09): CAPABILITY-ELICITATION prior. push_stroke_diag proved the policy
+                                             # does the CHEAPEST push (shallow squat calf -1.39 vs baseline -2.40, knee stroke 0.30
+                                             # vs 1.56 rad, force window 66 vs 93ms, tucks at takeoff with 0.25 rad extension to
+                                             # spare) because every task reward SATURATES once v_req/target is met -> hardware
+                                             # under-used. This rewards SUSTAINED productive actuator power vs the T-N PEAK-power
+                                             # envelope over the push (concentric, motor-level = NOT gameable by posture like
+                                             # four_leg's GRF). Task-agnostic: normalising by peak power makes speed-saturated joints
+                                             # (calf) drop out so the gradient auto-recruits the idle hips/thighs. SECONDARY weight
+                                             # (task rewards tvm=15/pland=15 keep WHAT; this shapes HOW). 3.0 = FIRST GUESS -> multi-
+                                             # seed: verify util rises + knee stroke/force-window lengthen + reach>0.85; if value_loss
+                                             # spikes or discovery/precision drop, lower to 1-2; if effect too weak, raise. See
+                                             # _reward_actuator_utilization + push_stroke_diag/torque_diag for verification.
             projected_landing = 15.0         # 10 -> 15: BOOST. USER PRINCIPLE: jump-DISTANCE/accuracy rewards must OUTRANK jump-HEIGHT
                                              # rewards. After projected_peak 25->20, height earned ~0.60 (pp 0.38 + takeoff_vz 0.22) still
                                              # exceeded distance ~0.43 (landing_position + this), so raise the distance side above height.
