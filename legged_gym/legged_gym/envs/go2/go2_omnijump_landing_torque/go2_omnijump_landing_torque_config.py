@@ -471,11 +471,16 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
                                              # STABLE positive signal for trying-its-best/reaching-far so it never gives up. Strong
                                              # (>= projected_peak 20) so DISTANCE outranks HEIGHT. TUNE vs precision rewards if it
                                              # overshoots near commands or starves precision.
-            four_leg_push = 0.0             # DISABLED (user): it blew the critic (value_loss 0.18->4.0 @iter1031) and
-                                             # never worked (rew flat ~0.017). _reward_four_leg_push still exists (push-up-to-
-                                             # target per ON-GROUND leg, rear may dominate, front-first allowed) -> re-enable by
-                                             # setting weight only AFTER re-verifying the "rear idle" premise with the FIXED
-                                             # torque_diag (the old "rear thigh ~0.3" finding used the broken pd0/general_scale=1 eval).
+            four_leg_push = 5.0             # ENABLED (2026-07-09, user "port far's rear-leg drive to landing"). Grades each
+                                             # ON-GROUND leg's vertical GRF up to a target (surplus free -> rear may dominate,
+                                             # front-first allowed) so an IDLE leg drags the mean down -> the policy recruits it.
+                                             # Two preconditions from the old note are now MET: (1) the "rear thigh idle" premise
+                                             # is RE-VERIFIED with the fixed torque_diag (landing: rear-thigh cmd/Y1<1 = unused
+                                             # gradient, distance scaled only via rear hip); (2) the old critic-blow (value_loss
+                                             # 0.18->4.0) did NOT recur under Step H -- three far runs trained fine with
+                                             # four_leg_push=5 and RECRUITED both thighs (torque_diag). Gated (succ-latch +
+                                             # real-push force floor > body weight) = discovery-safe. WATCH Loss/value_loss: if it
+                                             # spikes or precision/discovery drops, this is the first thing to revert to 0.
             projected_landing = 15.0         # 10 -> 15: BOOST. USER PRINCIPLE: jump-DISTANCE/accuracy rewards must OUTRANK jump-HEIGHT
                                              # rewards. After projected_peak 25->20, height earned ~0.60 (pp 0.38 + takeoff_vz 0.22) still
                                              # exceeded distance ~0.43 (landing_position + this), so raise the distance side above height.
