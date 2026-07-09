@@ -207,10 +207,20 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
                                            # 连续跳落地立刻再跳没法蓄力 -> 每跳只 0.13m; 单跳能蓄力 -> 纯力矩~0.77m.
 
         class ranges(GO2OmniJumpCurriculumTorqueCfg.commands.ranges):
-            jump_height = [0.40, 0.60]   # REVERTED 0.50 -> 0.60 (2026-07-09) back to the Jul05_17-47-45 BEST config.
-                                         # The 0.60->0.50 drift (2026-07-08) made landing WORSE (height = flight
-                                         # time = range; capping it shortened the jump); eval confirmed. Restoring
-                                         # the proven baseline before layering four_leg_push on top.
+            jump_height = [0.40, 0.50]   # 0.60 -> 0.50 (2026-07-09, LAUNCH-ANGLE fix). launch_diag on the best jumper
+                                         # (Jul05_13-55-46) showed the takeoff is 63-67deg = FAR too steep vs the 45deg
+                                         # range-optimum, AND launch speed is CAPPED at 2.49 m/s (knee-velocity wall: same
+                                         # at dx0.7 & 0.8 -> can't push faster). So the fixed speed budget is spent mostly
+                                         # going UP (vz2.3 vs vx1.0). Re-aiming FLATTER converts that to range for FREE
+                                         # (point-mass: same 2.49 m/s at 45deg = 0.63m vs 0.45-0.50m now = +0.13..0.18m,
+                                         # ~+25%). v_req angle = atan2(vz_req, d/flight_t) with vz_req=sqrt(2g(h-0.30)):
+                                         # 45deg-optimal height is h = 0.30 + d/4 (~0.48 at d0.7, ~0.51 at d0.85), so 0.50.
+                                         # GENTLE step (0.60->0.50, NOT lower) + multi-seed: memory warns hard height cuts
+                                         # crashed discovery (height=flight time helps hit far). The earlier 0.50->0.60
+                                         # revert was judged on the peak/seed-confounded "best" metric, not launch angle;
+                                         # with the angle data the flatter direction is correct. WATCH: launch angle -> ~50deg,
+                                         # reach > 0.85, and succ/discovery must NOT collapse. If still too steep, next knob
+                                         # is projected_peak 20->15 (do it SEPARATELY to avoid confounding).
             lin_vel_x = [0.0, 0.0]       # repurposed: landing dx (m). Stage 1 = land in place.
             lin_vel_y = [0.0, 0.0]       # repurposed: landing dy (m). Stage 1 = land in place.
             ang_vel_yaw = [0.0, 0.0]
@@ -474,26 +484,21 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
                                              # STABLE positive signal for trying-its-best/reaching-far so it never gives up. Strong
                                              # (>= projected_peak 20) so DISTANCE outranks HEIGHT. TUNE vs precision rewards if it
                                              # overshoots near commands or starves precision.
-            four_leg_push = 10.0           # 5 -> 10 (2026-07-09, stroke diag): per-band torque_diag on the best jumper
-                                             # (Jul05_13-55-46) showed four_leg IS active in the propulsion band (0.30-0.35) but
-                                             # ~3x WEAKER than the only push driver takeoff_velocity_match (four_leg 0.011-0.022 vs
-                                             # tvm 0.065) -> too weak to overcome the rear-thigh idle (rear-thigh util ~0.30 the whole
-                                             # stroke). PITCH is NOT the lock (pitch/omega penalties are -0.0001..-0.0016 in the push =
-                                             # 40-300x smaller than the drivers; the pitch penalties are already one-sided/nose-up-free).
-                                             # So the lever is four_leg WEIGHT, not pitch. Doubled to make the rear-thigh recruitment
-                                             # gradient competitive with tvm. WATCH Loss/value_loss (old critic-blow) + a possible tug-of-
-                                             # war with takeoff_velocity_match (rear-thigh push may pull CoM vel off v_req); if precision
-                                             # or discovery drops, step back to 5 then 0. Grades each
-                                             # ENABLED (2026-07-09, user "port far's rear-leg drive to landing"). Grades each
-                                             # ON-GROUND leg's vertical GRF up to a target (surplus free -> rear may dominate,
-                                             # front-first allowed) so an IDLE leg drags the mean down -> the policy recruits it.
-                                             # Two preconditions from the old note are now MET: (1) the "rear thigh idle" premise
-                                             # is RE-VERIFIED with the fixed torque_diag (landing: rear-thigh cmd/Y1<1 = unused
-                                             # gradient, distance scaled only via rear hip); (2) the old critic-blow (value_loss
-                                             # 0.18->4.0) did NOT recur under Step H -- three far runs trained fine with
-                                             # four_leg_push=5 and RECRUITED both thighs (torque_diag). Gated (succ-latch +
-                                             # real-push force floor > body weight) = discovery-safe. WATCH Loss/value_loss: if it
-                                             # spikes or precision/discovery drops, this is the first thing to revert to 0.
+            four_leg_push = 0.0            # RE-DISABLED (2026-07-09, HEADING FAILURE). The 5->10 experiment BACKFIRED:
+                                             # heading_diag (cmd dx=0.8, 256env deterministic) — four_leg=10 (Jul09_19-11-19 m3000)
+                                             # jumps SIDEWAYS: mean|yaw|=85deg, |yaw|>20deg for 100% of landings, |roll|=25deg, and
+                                             # forward reach DROPS to 0.40m (baseline 13-55 = |yaw|7.7deg, dx0.55). four_leg=5
+                                             # (Jul09_13-26-13) stayed clean early (m1500 |yaw|3.3deg, dx0.53 = NO farther than
+                                             # baseline) but COLLAPSED late (m3000 doesn't jump). Dose-response confirms four_leg IS
+                                             # the cause. MECHANISM: rewarding all-4-legs VERTICAL GRF fights a forward jump, which
+                                             # naturally UNLOADS the rear legs (nose-up pitch shifts weight forward); the policy's
+                                             # escape is to roll/yaw the body sideways so all 4 feet stay loaded -> sideways jump,
+                                             # LESS reach. So "rear-thigh idle" is not wasted capability — it's forward-launch
+                                             # mechanics. Vertical-GRF four_leg is the WRONG tool at EVERY weight (0 = baseline = best,
+                                             # 0.85 clean). Do NOT re-enable in this form; if pursuing rear-leg recruitment, project
+                                             # each leg's force onto the v_req LAUNCH direction instead of vertical GRF.
+                                             # (_reward_four_leg_push still exists: grades each ON-GROUND leg's vertical GRF up to a
+                                             # target so an IDLE leg drags the mean down. Left in code, weight 0, for the record.)
             projected_landing = 15.0         # 10 -> 15: BOOST. USER PRINCIPLE: jump-DISTANCE/accuracy rewards must OUTRANK jump-HEIGHT
                                              # rewards. After projected_peak 25->20, height earned ~0.60 (pp 0.38 + takeoff_vz 0.22) still
                                              # exceeded distance ~0.43 (landing_position + this), so raise the distance side above height.
