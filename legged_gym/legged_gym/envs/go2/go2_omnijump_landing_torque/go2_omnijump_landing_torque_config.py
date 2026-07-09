@@ -207,7 +207,10 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
                                            # 连续跳落地立刻再跳没法蓄力 -> 每跳只 0.13m; 单跳能蓄力 -> 纯力矩~0.77m.
 
         class ranges(GO2OmniJumpCurriculumTorqueCfg.commands.ranges):
-            jump_height = [0.40, 0.50]   # 0.60 -> 0.50 (user 2026-07-08): 进一步降低峰值上限，把电机力矩集中分配于前向跨距与稳定落地
+            jump_height = [0.40, 0.60]   # REVERTED 0.50 -> 0.60 (2026-07-09) back to the Jul05_17-47-45 BEST config.
+                                         # The 0.60->0.50 drift (2026-07-08) made landing WORSE (height = flight
+                                         # time = range; capping it shortened the jump); eval confirmed. Restoring
+                                         # the proven baseline before layering four_leg_push on top.
             lin_vel_x = [0.0, 0.0]       # repurposed: landing dx (m). Stage 1 = land in place.
             lin_vel_y = [0.0, 0.0]       # repurposed: landing dy (m). Stage 1 = land in place.
             ang_vel_yaw = [0.0, 0.0]
@@ -556,10 +559,11 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
                                              # complement to clean_landing for the post-touchdown shuffle (lifting a foot
                                              # in the settle now costs this). MODERATE: a big value also pays the pre-jump
                                              # STAND -> could make "don't jump" comfy (discovery risk). Watch jump_flight_rate.
-            landing_stability = 0.0          # RE-ENABLED to BRAKE the landing momentum: per-step trace showed the
-               # robot lands at vx~1.3 m/s, bounces (all feet off, +0.06m) and coasts
-               # ~0.30m forward to a stop (the "post-landing slide"). This rewards LOW
-               # base velocity during the landing buffer -> absorb/stop on the spot.
+            landing_stability = 1.0          # REVERTED 0.0 -> 1.0 (2026-07-09) back to the Jul05_17-47-45 BEST config
+                                             # (part of the 2026-07-08 drift that made landing worse). BRAKES the landing
+                                             # momentum: per-step trace showed the robot lands at vx~1.3 m/s, bounces and
+                                             # coasts ~0.30m forward; this rewards LOW base velocity during the landing
+                                             # buffer -> absorb/stop on the spot.
             # NOTE: landing_stability_lin_sigma / _ang_sigma live in `class rewards` (NOT here in scales) — the
             # reward fn reads cfg.rewards.<name>. They were MISPLACED here, so cfg.rewards.<name> fell back to the
             # default 0.25 -> exp(-2.5^2/0.25)~0 -> the brake had ZERO gradient (verified: stab~0.000, slide 0.7m).
