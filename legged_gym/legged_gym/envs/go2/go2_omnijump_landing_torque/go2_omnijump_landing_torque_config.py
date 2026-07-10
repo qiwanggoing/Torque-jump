@@ -207,20 +207,7 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
                                            # 连续跳落地立刻再跳没法蓄力 -> 每跳只 0.13m; 单跳能蓄力 -> 纯力矩~0.77m.
 
         class ranges(GO2OmniJumpCurriculumTorqueCfg.commands.ranges):
-            jump_height = [0.40, 0.50]   # 0.60 -> 0.50 (2026-07-09, LAUNCH-ANGLE fix). launch_diag on the best jumper
-                                         # (Jul05_13-55-46) showed the takeoff is 63-67deg = FAR too steep vs the 45deg
-                                         # range-optimum, AND launch speed is CAPPED at 2.49 m/s (knee-velocity wall: same
-                                         # at dx0.7 & 0.8 -> can't push faster). So the fixed speed budget is spent mostly
-                                         # going UP (vz2.3 vs vx1.0). Re-aiming FLATTER converts that to range for FREE
-                                         # (point-mass: same 2.49 m/s at 45deg = 0.63m vs 0.45-0.50m now = +0.13..0.18m,
-                                         # ~+25%). v_req angle = atan2(vz_req, d/flight_t) with vz_req=sqrt(2g(h-0.30)):
-                                         # 45deg-optimal height is h = 0.30 + d/4 (~0.48 at d0.7, ~0.51 at d0.85), so 0.50.
-                                         # GENTLE step (0.60->0.50, NOT lower) + multi-seed: memory warns hard height cuts
-                                         # crashed discovery (height=flight time helps hit far). The earlier 0.50->0.60
-                                         # revert was judged on the peak/seed-confounded "best" metric, not launch angle;
-                                         # with the angle data the flatter direction is correct. WATCH: launch angle -> ~50deg,
-                                         # reach > 0.85, and succ/discovery must NOT collapse. If still too steep, next knob
-                                         # is projected_peak 20->15 (do it SEPARATELY to avoid confounding).
+            jump_height = [0.40, 0.60]   # 0.70 -> 0.60 (user 2026-07-05): 0.6 高度够用, 上限降一点=少把力气花在垂直
             lin_vel_x = [0.0, 0.0]       # repurposed: landing dx (m). Stage 1 = land in place.
             lin_vel_y = [0.0, 0.0]       # repurposed: landing dy (m). Stage 1 = land in place.
             ang_vel_yaw = [0.0, 0.0]
@@ -345,10 +332,6 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
         squat_pose_threshold = 3.2          # was 2.8: EASED (stuck @ squatQ~0.48). "in the squat" = pose_err<=3.2, shallower from
                                             # standing (7.1). THE depth knob: stuck-not-jumping (can't fold
                                             # enough) -> RAISE; jumps too shallow / want a deeper load -> LOWER.
-        launch_speed_cap_ratio = 1.4        # read by _reward_takeoff_velocity_match (one-sided launch reward). Keeps paying
-                                            # for launch speed up to 1.4x v_req then flat. Safety rail ONLY — the robot is
-                                            # < 1.0x v_req today, so it never binds (= effectively unsaturated). Lives here in
-                                            # `class rewards` (NOT in scales, or it'd be mis-read as a reward term).
         squat_hold_steps = 25               # was 40 (0.2s) -> 25 (0.125s): EASED to unstick. jump chain unlocks only after the squat POSE is HELD within
                                             # squat_pose_threshold for this many CONSECUTIVE steps (= 0.2s at
                                             # sim dt 0.005s). Closes the "flick through the pose for one frame
@@ -488,42 +471,11 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
                                              # STABLE positive signal for trying-its-best/reaching-far so it never gives up. Strong
                                              # (>= projected_peak 20) so DISTANCE outranks HEIGHT. TUNE vs precision rewards if it
                                              # overshoots near commands or starves precision.
-            four_leg_push = 0.0            # RE-DISABLED (2026-07-09, HEADING FAILURE). The 5->10 experiment BACKFIRED:
-                                             # heading_diag (cmd dx=0.8, 256env deterministic) — four_leg=10 (Jul09_19-11-19 m3000)
-                                             # jumps SIDEWAYS: mean|yaw|=85deg, |yaw|>20deg for 100% of landings, |roll|=25deg, and
-                                             # forward reach DROPS to 0.40m (baseline 13-55 = |yaw|7.7deg, dx0.55). four_leg=5
-                                             # (Jul09_13-26-13) stayed clean early (m1500 |yaw|3.3deg, dx0.53 = NO farther than
-                                             # baseline) but COLLAPSED late (m3000 doesn't jump). Dose-response confirms four_leg IS
-                                             # the cause. MECHANISM: rewarding all-4-legs VERTICAL GRF fights a forward jump, which
-                                             # naturally UNLOADS the rear legs (nose-up pitch shifts weight forward); the policy's
-                                             # escape is to roll/yaw the body sideways so all 4 feet stay loaded -> sideways jump,
-                                             # LESS reach. So "rear-thigh idle" is not wasted capability — it's forward-launch
-                                             # mechanics. Vertical-GRF four_leg is the WRONG tool at EVERY weight (0 = baseline = best,
-                                             # 0.85 clean). Do NOT re-enable in this form; if pursuing rear-leg recruitment, project
-                                             # each leg's force onto the v_req LAUNCH direction instead of vertical GRF.
-                                             # (_reward_four_leg_push still exists: grades each ON-GROUND leg's vertical GRF up to a
-                                             # target so an IDLE leg drags the mean down. Left in code, weight 0, for the record.)
-            actuator_utilization = 0.0       # RE-DISABLED (2026-07-10, NEGATIVE RESULT). At 12.0 the reward WAS optimised
-                                             # (rew rose 0.031->0.051, +64%) and DID what it was designed to (Jul10_01-52-32 m1800:
-                                             # squat DEEPER calf -1.39->-2.50, knee stroke 0.30->1.34 rad, force window 66->119ms,
-                                             # push util 0.267->0.291) -- BUT the payoff FAILED: launch speed DROPPED 2.26->2.16 m/s
-                                             # and reach got WORSE (0.8 hit@0.10 0.97->0.34). LESSON: jump distance = TERMINAL launch
-                                             # VELOCITY (ballistic boundary value), NOT integrated work/power. Maximising SUSTAINED
-                                             # power drives a long moderate-speed GRIND (max-power point is mid-speed X2/2, and util
-                                             # even penalises hitting the velocity wall = the max-speed launch), which CAPS terminal
-                                             # velocity. So "max actuator-power utilization" != "jump farther": the capability-
-                                             # elicitation prior elicits capability USE but not, for a LAUNCH task, performance. For
-                                             # launch/terminal-value tasks reward the OUTPUT (launch velocity/impulse), not process
-                                             # utilization. (kept in code, weight 0.) The util prior may still fit WORK/sustained tasks
-                                             # (climb/push/lift/sprint-stance) -- just not ballistic ones.
-            leg_extension = 0.0              # RE-DISABLED (2026-07-10, NEUTRAL RESULT). At 10.0 it DID work at the pose level
-                                             # (push_stroke_diag: takeoff calf -1.16 -> -0.85, tuck-at-takeoff ~100% -> 33%, rew_leg_extension
-                                             # rose 0.037->0.067) BUT launch speed stayed 2.25 (==baseline 2.26) and reach stayed ~0.8 -- the
-                                             # policy paid for "leave straight" by squatting SHALLOWER (calf bottom -1.64 vs -2.40), so net
-                                             # stroke didn't lengthen. SAME failure mode as actuator_utilization: a POSE/kinematic proxy the
-                                             # policy games while terminal velocity is unchanged. Lesson confirmed twice: posture/power != launch
-                                             # velocity. Superseded by the un-saturated launch-velocity reward (takeoff_velocity_match, one-sided).
-                                             # (_reward_leg_extension still exists, dormant at weight 0.)
+            four_leg_push = 0.0             # DISABLED (user): it blew the critic (value_loss 0.18->4.0 @iter1031) and
+                                             # never worked (rew flat ~0.017). _reward_four_leg_push still exists (push-up-to-
+                                             # target per ON-GROUND leg, rear may dominate, front-first allowed) -> re-enable by
+                                             # setting weight only AFTER re-verifying the "rear idle" premise with the FIXED
+                                             # torque_diag (the old "rear thigh ~0.3" finding used the broken pd0/general_scale=1 eval).
             projected_landing = 15.0         # 10 -> 15: BOOST. USER PRINCIPLE: jump-DISTANCE/accuracy rewards must OUTRANK jump-HEIGHT
                                              # rewards. After projected_peak 25->20, height earned ~0.60 (pp 0.38 + takeoff_vz 0.22) still
                                              # exceeded distance ~0.43 (landing_position + this), so raise the distance side above height.
@@ -564,9 +516,8 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
                                              # point + apex height). CAUSE-side "jump FAR and HIGH" driver — the
                                              # closeness rewards can't push reach (diminishing returns at undershoot).
                                              # = old takeoff_vz weight (15). At dx=0 it reduces to takeoff_vz (safe).
-                                             # 2026-07-10: made ONE-SIDED/UNSATURATED (see _reward_takeoff_velocity_match)
-                                             # to elicit max launch speed (recruit the idle rear thighs). Weight unchanged.
-                                             # (its knob launch_speed_cap_ratio lives in `class rewards`, NOT here in scales.)
+            launch_pitch_toward_vel = 3.0    # task-space launch alignment: reward body nose pointing along CoM velocity
+                                             # vector during ascending -> elicit rear-hip/thigh push along jump trajectory.
             # ---- structurally-inert rewards removed ----
             joint_angle_loaded = 0.0         # was 0.4: phase_loaded (jumping & ~taken_off & vz<=0) almost never
                                              # fires — the policy pre-squats during idle and pops straight up on
@@ -602,11 +553,10 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
                                              # complement to clean_landing for the post-touchdown shuffle (lifting a foot
                                              # in the settle now costs this). MODERATE: a big value also pays the pre-jump
                                              # STAND -> could make "don't jump" comfy (discovery risk). Watch jump_flight_rate.
-            landing_stability = 1.0          # REVERTED 0.0 -> 1.0 (2026-07-09) back to the Jul05_17-47-45 BEST config
-                                             # (part of the 2026-07-08 drift that made landing worse). BRAKES the landing
-                                             # momentum: per-step trace showed the robot lands at vx~1.3 m/s, bounces and
-                                             # coasts ~0.30m forward; this rewards LOW base velocity during the landing
-                                             # buffer -> absorb/stop on the spot.
+            landing_stability = 1.0          # RE-ENABLED to BRAKE the landing momentum: per-step trace showed the
+                                             # robot lands at vx~1.3 m/s, bounces (all feet off, +0.06m) and coasts
+                                             # ~0.30m forward to a stop (the "post-landing slide"). This rewards LOW
+                                             # base velocity during the landing buffer -> absorb/stop on the spot.
             # NOTE: landing_stability_lin_sigma / _ang_sigma live in `class rewards` (NOT here in scales) — the
             # reward fn reads cfg.rewards.<name>. They were MISPLACED here, so cfg.rewards.<name> fell back to the
             # default 0.25 -> exp(-2.5^2/0.25)~0 -> the brake had ZERO gradient (verified: stab~0.000, slide 0.7m).
@@ -698,6 +648,7 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
             if k not in ("jump_landing_rate", "jump_completed_cycles")
         ] + [
             "rew_takeoff_velocity_match",  # merged launch driver (jump far+high) — watch vs dx_max advancing
+            "rew_launch_pitch_toward_vel", # nose-velocity alignment during ascending -> rear-leg push
             "rew_projected_landing",
             "rew_landing_position",
             "rew_foot_contact_sync",

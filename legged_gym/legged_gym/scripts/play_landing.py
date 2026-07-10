@@ -79,7 +79,7 @@ def train_step_count_at_iter(target_iter, W, X, sf, mf, dt, nspe):
 #   PLAY_LANDING_DX=0.7 PLAY_LANDING_HEIGHT=0.7 python legged_gym/scripts/play_landing.py --task=go2_omnijump_landing_torque
 DX = _env_float("PLAY_LANDING_DX", 0.9)       # forward landing displacement (m). 新模型准确到 0.8; 0.9+ 够不到. 改数字试别的.
 DY = _env_float("PLAY_LANDING_DY", 0.0)       # lateral landing displacement (m)
-HEIGHT = _env_float("PLAY_LANDING_HEIGHT", 0.6)  # jump-height command. ⚠️ 新模型训练范围 [0.4,0.6], 别超 0.6 (0.7=OOD假崩)
+HEIGHT = _env_float("PLAY_LANDING_HEIGHT", 0.5)  # jump-height command. ⚠️ 新模型训练范围 [0.4,0.6], 别超 0.6 (0.7=OOD假崩)
 ADDED_MASS = _env_float("PLAY_LANDING_ADDED_MASS", 0.0)  # kg added to BASE. 0.0 = URDF标称 = 真机 = 新模型([-1,+1])训练中心.
                     # ⚠️ 新模型必须 0.0! 给 +2kg 是 OOD 会原地蹦假崩. (只有旧 [-1,+5] 模型才该设 2.0.)
 STAND_ONLY = _env_bool("PLAY_LANDING_STAND_ONLY", False)  # PURE-STAND test: command cmd4=0.45 (<=0.5 threshold -> NEVER jumps) + zero displacement,

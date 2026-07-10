@@ -9,7 +9,7 @@ observation, dense projected-landing + sparse landing-position rewards).
 import math
 
 import torch
-from isaacgym.torch_utils import get_euler_xyz
+from isaacgym.torch_utils import get_euler_xyz, quat_apply
 
 from legged_gym.envs.go2.go2_omnijump_curriculum_torque.go2_omnijump_curriculum_torque import (
     GO2OmniJumpCurriculumTorque,
@@ -34,6 +34,7 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
         "pitch_level",       # landing stability: pitch-specific tilt penalty
         "dof_pos_limits",    # penalize folding joints to the limit (over-deep squat hits the "wall")
         "takeoff_velocity_match",  # merged launch: takeoff velocity-vector match to (landing point + apex) — jump far+high
+        "launch_pitch_toward_vel", # task-space launch alignment: reward body nose pointing along velocity vector during ascending
         "landing_stability", # ABSORB the landing: reward low base velocity during the landing buffer so the forward
                              # momentum (vx~1.3 at touchdown) is BRAKED, not bounced+coasted (the post-landing slide)
         "grounded_jump",     # MUST-LAUNCH penalty (negative weight): close the retreat-to-not-jumping escape ->
@@ -45,14 +46,6 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
                                 # messy still allowed) -- replaces the hard clean_takeoff_terminate that killed discovery.
         "stand_no_takeoff",     # HARD penalty: cmd4=0 (STAND) but all feet leave the ground (a hop) -> punish ->
                                 # cmd4 becomes the real stand/jump switch. Gated post-discovery + grace (skips spawn drop).
-        "leg_extension",        # reward reaching FULL knee extension (calf -> -0.84 hardware limit) at the END of the
-                                # push + first ~60ms of flight -> COMPLETE the stroke (don't bail at -1.16 tucking) +
-                                # delay the tuck. Discovery-gated. See _reward_leg_extension. (util's replacement try.)
-        "actuator_utilization", # CAPABILITY-ELICITATION prior (task-agnostic): reward SUSTAINED productive actuator
-                                # power vs the per-joint T-N PEAK-power capability during the push. Concentric only
-                                # (tau*w>0 = doing work). At the velocity wall tau->0 so P->0 -> that joint drops out
-                                # -> gradient auto-recruits the joints with power headroom (hips/thighs) WITHOUT hand-
-                                # picking them. Discovery-gated (succ-latch + push + squat). See _reward_actuator_utilization.
     }   # clean_landing REMOVED (detector never armed -> ~0). Post-landing slide handled by landing_stability
         # (brake momentum) + disable_jump_on_landing (no commanded re-jump); error obs is real-time (no obs-hold).
 
@@ -74,10 +67,9 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
         "pitch_level": 0,
         "dof_pos_limits": 0,
         "takeoff_velocity_match": 0,   # active from step 1 (replaces takeoff_vertical_velocity)
+        "launch_pitch_toward_vel": 0,  # active from step 1 (ascending gate inside reward)
         "landing_stability": 0,   # active from step 1 (override parent's stage 3, which never fires one-stage)
         "grounded_jump": 0,   # stage 0; the real gate is the succ-EMA latch inside _reward_grounded_jump
-        "actuator_utilization": 0,   # stage 0; the real gate is the succ-EMA latch inside the reward (discovery-safe)
-        "leg_extension": 0,          # stage 0; the real gate is the succ-EMA latch inside the reward (discovery-safe)
     }   # clean_landing REMOVED (see whitelist note above)
 
     # ------------------------------------------------------------------ #
@@ -95,19 +87,6 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
         # (squat -> liftoff) still counts. Updated during loading in _update_jump_state; landing_target
         # is locked to squat_root_xy + dx at takeoff. Reset to current xy at each _start_jump.
         self.squat_root_xy = self.root_states[:, :2].clone()
-
-        # CAPABILITY prior: per-joint PEAK mechanical power along the concentric T-N envelope (a CONSTANT per
-        # joint, computed once). Envelope = flat Y1 up to X1, then linear to 0 at X2; power = tau*v peaks either
-        # at the corner (v=X1) or the vertex (v=X2/2). Used to normalise delivered power in _reward_actuator_utilization.
-        vl = self.dof_vel_limits.float()
-        Y1 = self.torque_limits.float()
-        X1 = vl * float(self.cfg.control.tn_knee_speed_ratio)
-        X2 = vl * float(self.cfg.control.tn_max_speed_ratio)
-        v_star = X2 / 2.0
-        p_flat = Y1 * X1
-        p_vertex = Y1 * v_star * (X2 - v_star) / (X2 - X1).clamp(min=1e-6)
-        p_peak = torch.where(v_star > X1, torch.maximum(p_flat, p_vertex), p_flat)  # [ndof] W
-        self._actuator_peak_power_total = float(p_peak.sum().clamp(min=1e-6).item())
 
         # Stage 2: widen the displacement ranges that the parent's
         # _resample_commands draws commands[0:2] from. Stage 1 leaves them [0,0]
@@ -567,16 +546,10 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
         # the ballistic launch needed to land on the commanded point AT the commanded apex height -> drives jump
         # HEIGHT (vz) and DISTANCE (forward v) together, as ONE reward. Fills the gap the closeness rewards
         # cannot: landing-accuracy already pays most of its value at an undershoot (diminishing returns), so
-        # nothing CAUSE-side pushed the launch FAR enough.
-        # 2026-07-10 CAPABILITY-ELICITATION change: was a TWO-SIDED vector match (1 - |v_act-v_req|/|v_req|) that
-        # PENALIZED over-launch -> capped launch speed at v_req, taught "reach exactly v_req and hold" (front legs
-        # + calves suffice; the rear thighs stay idle). Now ONE-SIDED / UNSATURATED: reward the CoM velocity
-        # component ALONG the v_req direction, /|v_req|. This (a) still rewards the correct AIM (projection kills a
-        # too-vertical or sideways launch), (b) == the old value 1.0 exactly when v_act == v_req (near commands
-        # unchanged, landing not broken), but (c) KEEPS PAYING past v_req up to launch_speed_cap_ratio -> always a
-        # gradient to launch HARDER, so PPO must recruit whatever actuator still has headroom (the rear thighs) to
-        # earn more. LINEAR from zero (discovery). At dx=0, v_req is purely vertical -> reduces to rewarding vz
-        # (== takeoff_vz, discovery-safe). The cap (1.4x) is only a safety rail; the robot is < 1.0x today.
+        # nothing CAUSE-side pushed the launch FAR enough. Vector-MATCH (not a direction dot-product) so a too-
+        # vertical over-launch can't fake the forward requirement; LINEAR (not exp) so there's a gradient from
+        # zero velocity (discovery). At dx=0 the required vector is purely vertical -> reduces to
+        # takeoff_vertical_velocity (discovery-safe) and subsumes horizontal_drift (sideways = mismatch).
         base_height = self.root_states[:, 2]
         min_height = float(getattr(self.cfg.rewards, "ascending_min_base_height", 0.18))
         vz = self.root_states[:, 9]
@@ -592,11 +565,24 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
         dir_xy = horiz_disp / d.clamp(min=1e-6).unsqueeze(1)
         v_req = torch.cat([(d / flight_t).unsqueeze(1) * dir_xy, vz_req.unsqueeze(1)], dim=1)   # (N,3)
         v_act = torch.cat([self.root_states[:, 7:9], vz.unsqueeze(1)], dim=1)                   # (N,3) world vel
-        v_req_norm = torch.norm(v_req, dim=1).clamp(min=1e-3)
-        v_along = (v_act * v_req).sum(dim=1) / v_req_norm         # CoM speed projected onto the launch direction
-        cap = float(getattr(self.cfg.rewards, "launch_speed_cap_ratio", 1.4))   # safety rail (robot < 1.0x today)
-        reward = torch.clamp(v_along / v_req_norm, min=0.0, max=cap)            # ==1.0 at v_req, keeps paying past it
-        return ascending.float() * reward
+        match = torch.clamp(
+            1.0 - torch.norm(v_act - v_req, dim=1) / torch.norm(v_req, dim=1).clamp(min=1e-3),
+            min=0.0, max=1.0,
+        )
+        return ascending.float() * match
+
+    def _reward_launch_pitch_toward_vel(self):
+        # 起跳上升段，奖励"机身鼻尖方向"对齐"起跳速度方向"(抬头往速度方向)。
+        # 逼后腿驱动的抬头起跳弧 -> 召后髋/后大腿 -> 更多冲量。任务空间姿态，不被蹲浅绕过。
+        base_h = self.root_states[:, 2]
+        min_h  = float(getattr(self.cfg.rewards, "ascending_min_base_height", 0.18))
+        vz = self.root_states[:, 9]
+        ascending = self.jumping_state & (vz > 0) & (~self.has_landed) & (base_h > min_h) & self._squat_deep_enough()
+        v = self.root_states[:, 7:10]
+        vdir = v / torch.norm(v, dim=1, keepdim=True).clamp(min=0.3)      # 速度方向(上-前)
+        fwd  = quat_apply(self.base_quat, self.forward_vec)               # 机身鼻尖方向(世界系)
+        align = (fwd * vdir).sum(dim=1)                                   # cos夹角 ∈[-1,1];机身水平时≈cos(50°)≈0.64
+        return ascending.float() * torch.clamp(align, min=0.0)           # 鼻尖越指向速度越高，自然封顶在"完全对齐"
 
     def _reward_forward_reach(self):
         # DISTANCE-PROGRESSIVE EFFORT reward, DECOUPLED from precise landing. Diagnosis: every jump reward
@@ -649,53 +635,6 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
         in_contact = contact.float()
         graded = (per_leg * in_contact).sum(dim=1) / in_contact.sum(dim=1).clamp(min=1.0)  # mean over ON-GROUND legs
         return active.float() * graded
-
-    def _reward_actuator_utilization(self):
-        # CAPABILITY-ELICITATION prior (task-agnostic). Standard task rewards (match v_req / land on point)
-        # SATURATE once the target is met -> the policy learns the CHEAPEST motion (shallow squat, short push,
-        # idle rear legs) and the hardware is under-used. This term rewards the policy for operating the actuators
-        # near their PHYSICAL power limit, SUSTAINED over the push, so it does the task WITH FULL CAPABILITY:
-        #   r = (sum of POSITIVE joint mechanical power) / (sum of per-joint T-N PEAK power)   in [0,1], per step.
-        # - tau*v (delivered torque x joint speed) = real mechanical power; clamp>0 = CONCENTRIC only (doing work,
-        #   not co-contraction/bracing which would farm |tau| with no output).
-        # - Normalised by the CONSTANT peak-power capability -> at the velocity wall tau->0 so P->0: a speed-
-        #   saturated joint (the calf/knee) simply drops out of the sum, and the gradient AUTO-RECRUITS whatever
-        #   joints still have power headroom (the idle hips/thighs) -- no hand-picked target joint (that is what
-        #   makes it task/robot-agnostic; four_leg's vertical-GRF form was gameable by posture -> sideways).
-        # - DENSE over the push (time-integrated by PPO) -> rewards riding the envelope the WHOLE stroke, not a
-        #   momentary peak. SECONDARY weight (below the task rewards): it shapes HOW (use all capability), the task
-        #   rewards keep WHAT (jump to the target). Discovery-safe: same succ-latch (_takeoff_omega_on) + push +
-        #   squat gate as four_leg, so it never fires before the policy can already jump.
-        if not getattr(self, "_takeoff_omega_on", False):
-            return torch.zeros(self.num_envs, device=self.device)
-        push = self.jumping_state & (~self.has_taken_off) & self._squat_deep_enough()
-        power = torch.clamp(self.torques * self.dof_vel, min=0.0).sum(dim=1)   # (N,) total positive mech power
-        util = torch.clamp(power / self._actuator_peak_power_total, 0.0, 1.0)
-        return push.float() * util
-
-    def _reward_leg_extension(self):
-        # Reward the knees reaching FULL extension (calf -> -0.84, the HARDWARE limit; a Go2 knee cannot go straighter
-        # and always keeps ~48deg bend) through the LATE (ascending) push AND the first ~60ms of flight. WHY:
-        # push_stroke_diag showed the policy BAILS EARLY -- it leaves the ground at calf -1.16 still TUCKING (knee
-        # retracting), i.e. it stops the push before the leg is done, so momentum is not fully transferred to the CoM;
-        # the FAST baseline (2.49 m/s) instead leaves at calf -0.84 (fully extended, knee decelerated = push COMPLETED).
-        # So rewarding "leave with the leg fully extended" = complete the stroke instead of bailing. The post-takeoff
-        # window (airborne_time < 0.06) also DELAYS the q_air tuck a beat so the launch shape is held (user's "1+2").
-        # Gate on the ASCENDING push (vz>0) so it does NOT fight the squat-DOWN fold. Discovery-safe (succ-latch +
-        # squat). CAVEAT: full extension is NECESSARY but not SUFFICIENT for launch SPEED (util taught us posture !=
-        # terminal velocity) -> verify with launch_diag/eval, not just the pose; if it just locks the knee slowly,
-        # the reach won't move. Weight is SECONDARY (task rewards keep the speed/target).
-        if not getattr(self, "_takeoff_omega_on", False):
-            return torch.zeros(self.num_envs, device=self.device)
-        ascending = self.root_states[:, 9] > 0.0
-        late_push = self.jumping_state & (~self.has_taken_off) & self._squat_deep_enough() & ascending
-        early_flight = self.airborne & (self.airborne_time < 0.06)
-        active = late_push | early_flight
-        calf = self.dof_pos[:, [2, 5, 8, 11]]                     # (N,4) the four knees
-        calf_ext = float(getattr(self.cfg.rewards, "leg_extension_target", -0.84))
-        sigma = float(getattr(self.cfg.rewards, "leg_extension_sigma", 0.25))
-        close = torch.exp(-torch.abs(calf - calf_ext) / sigma).mean(dim=1)   # 1.0 at full extension, ->0 when folded
-        return active.float() * close
 
     def _reward_landing_position(self):
         # DENSE over the landing/settling phase (Atanassov 2025 'base position landing'), using the

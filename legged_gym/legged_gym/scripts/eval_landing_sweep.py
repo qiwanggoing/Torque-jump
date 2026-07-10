@@ -22,7 +22,7 @@ from legged_gym import LEGGED_GYM_ROOT_DIR
 import os
 import math
 
-DX_LIST = [0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
+DX_LIST = [float(x) for x in os.environ["EVAL_DX_LIST"].split(",")] if os.environ.get("EVAL_DX_LIST") else [0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
 NUM_ENVS = 256
 STEPS_PER_DX = 1500
 # EVAL_TRAIN_COND=1 → 复现训练条件(obs噪声 + friction/mass domain-rand + 随机采样动作), 证明 eval 忠实、
