@@ -207,7 +207,7 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
                                            # 连续跳落地立刻再跳没法蓄力 -> 每跳只 0.13m; 单跳能蓄力 -> 纯力矩~0.77m.
 
         class ranges(GO2OmniJumpCurriculumTorqueCfg.commands.ranges):
-            jump_height = [0.40, 0.60]   # 0.70 -> 0.60 (user 2026-07-05): 0.6 高度够用, 上限降一点=少把力气花在垂直
+            jump_height = [0.40, 0.50]   # 0.60 -> 0.50 (2026-07-10, RE-APPLY the LAUNCH-ANGLE fix): 0.60 launched at
             lin_vel_x = [0.0, 0.0]       # repurposed: landing dx (m). Stage 1 = land in place.
             lin_vel_y = [0.0, 0.0]       # repurposed: landing dy (m). Stage 1 = land in place.
             ang_vel_yaw = [0.0, 0.0]
@@ -516,7 +516,17 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
                                              # point + apex height). CAUSE-side "jump FAR and HIGH" driver — the
                                              # closeness rewards can't push reach (diminishing returns at undershoot).
                                              # = old takeoff_vz weight (15). At dx=0 it reduces to takeoff_vz (safe).
-            launch_pitch_toward_vel = 3.0    # task-space launch alignment: reward body nose pointing along CoM velocity
+            launch_pitch_toward_vel = 10.0   # 3.0 -> 10.0 (2026-07-10): at 3.0 the term was INERT (rew~0.045, 18% of
+                                             # takeoff_velocity_match) -> body stayed level/slightly nose-DOWN (0% nose-up,
+                                             # align 0.40) -> policy just ignored it. Cranked ~3x so it's competitive with
+                                             # the launch reward, to see if it MOVES the launch attitude at all: either it
+                                             # pitches nose-UP toward v (rear-driven arc, the hoped-for lever), OR it FLATTENS
+                                             # the velocity so a level body aligns (also good = more forward). GATE unchanged
+                                             # = deep-squat (_squat_deep_enough) + ascending only. ⚠️watch: over-rotation ->
+                                             # nose-up ω carried into flight -> back-tipping landing (base_ang_vel_xy only
+                                             # damps nose-DOWN rate). If reach/landing degrade with no forward gain -> posture
+                                             # is the wrong lever (like leg_extension/util), drop it.
+                                             # task-space launch alignment: reward body nose pointing along CoM velocity
                                              # vector during ascending -> elicit rear-hip/thigh push along jump trajectory.
             # ---- structurally-inert rewards removed ----
             joint_angle_loaded = 0.0         # was 0.4: phase_loaded (jumping & ~taken_off & vz<=0) almost never
