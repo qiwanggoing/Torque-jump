@@ -45,6 +45,9 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
                                 # messy still allowed) -- replaces the hard clean_takeoff_terminate that killed discovery.
         "stand_no_takeoff",     # HARD penalty: cmd4=0 (STAND) but all feet leave the ground (a hop) -> punish ->
                                 # cmd4 becomes the real stand/jump switch. Gated post-discovery + grace (skips spawn drop).
+        "leg_extension",        # reward reaching FULL knee extension (calf -> -0.84 hardware limit) at the END of the
+                                # push + first ~60ms of flight -> COMPLETE the stroke (don't bail at -1.16 tucking) +
+                                # delay the tuck. Discovery-gated. See _reward_leg_extension. (util's replacement try.)
         "actuator_utilization", # CAPABILITY-ELICITATION prior (task-agnostic): reward SUSTAINED productive actuator
                                 # power vs the per-joint T-N PEAK-power capability during the push. Concentric only
                                 # (tau*w>0 = doing work). At the velocity wall tau->0 so P->0 -> that joint drops out
@@ -74,6 +77,7 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
         "landing_stability": 0,   # active from step 1 (override parent's stage 3, which never fires one-stage)
         "grounded_jump": 0,   # stage 0; the real gate is the succ-EMA latch inside _reward_grounded_jump
         "actuator_utilization": 0,   # stage 0; the real gate is the succ-EMA latch inside the reward (discovery-safe)
+        "leg_extension": 0,          # stage 0; the real gate is the succ-EMA latch inside the reward (discovery-safe)
     }   # clean_landing REMOVED (see whitelist note above)
 
     # ------------------------------------------------------------------ #
@@ -662,6 +666,30 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
         power = torch.clamp(self.torques * self.dof_vel, min=0.0).sum(dim=1)   # (N,) total positive mech power
         util = torch.clamp(power / self._actuator_peak_power_total, 0.0, 1.0)
         return push.float() * util
+
+    def _reward_leg_extension(self):
+        # Reward the knees reaching FULL extension (calf -> -0.84, the HARDWARE limit; a Go2 knee cannot go straighter
+        # and always keeps ~48deg bend) through the LATE (ascending) push AND the first ~60ms of flight. WHY:
+        # push_stroke_diag showed the policy BAILS EARLY -- it leaves the ground at calf -1.16 still TUCKING (knee
+        # retracting), i.e. it stops the push before the leg is done, so momentum is not fully transferred to the CoM;
+        # the FAST baseline (2.49 m/s) instead leaves at calf -0.84 (fully extended, knee decelerated = push COMPLETED).
+        # So rewarding "leave with the leg fully extended" = complete the stroke instead of bailing. The post-takeoff
+        # window (airborne_time < 0.06) also DELAYS the q_air tuck a beat so the launch shape is held (user's "1+2").
+        # Gate on the ASCENDING push (vz>0) so it does NOT fight the squat-DOWN fold. Discovery-safe (succ-latch +
+        # squat). CAVEAT: full extension is NECESSARY but not SUFFICIENT for launch SPEED (util taught us posture !=
+        # terminal velocity) -> verify with launch_diag/eval, not just the pose; if it just locks the knee slowly,
+        # the reach won't move. Weight is SECONDARY (task rewards keep the speed/target).
+        if not getattr(self, "_takeoff_omega_on", False):
+            return torch.zeros(self.num_envs, device=self.device)
+        ascending = self.root_states[:, 9] > 0.0
+        late_push = self.jumping_state & (~self.has_taken_off) & self._squat_deep_enough() & ascending
+        early_flight = self.airborne & (self.airborne_time < 0.06)
+        active = late_push | early_flight
+        calf = self.dof_pos[:, [2, 5, 8, 11]]                     # (N,4) the four knees
+        calf_ext = float(getattr(self.cfg.rewards, "leg_extension_target", -0.84))
+        sigma = float(getattr(self.cfg.rewards, "leg_extension_sigma", 0.25))
+        close = torch.exp(-torch.abs(calf - calf_ext) / sigma).mean(dim=1)   # 1.0 at full extension, ->0 when folded
+        return active.float() * close
 
     def _reward_landing_position(self):
         # DENSE over the landing/settling phase (Atanassov 2025 'base position landing'), using the

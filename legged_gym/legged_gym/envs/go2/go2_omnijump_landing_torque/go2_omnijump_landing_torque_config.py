@@ -499,22 +499,31 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
                                              # each leg's force onto the v_req LAUNCH direction instead of vertical GRF.
                                              # (_reward_four_leg_push still exists: grades each ON-GROUND leg's vertical GRF up to a
                                              # target so an IDLE leg drags the mean down. Left in code, weight 0, for the record.)
-            actuator_utilization = 12.0      # 3.0 -> 12.0 (2026-07-10): CAPABILITY-ELICITATION prior. push_stroke_diag proved the
-                                             # policy does the CHEAPEST push (shallow squat calf -1.39 vs baseline -2.40, knee stroke
-                                             # 0.30 vs 1.56 rad, force window 66 vs 93ms, tucks at takeoff with 0.25 rad extension to
-                                             # spare) because every task reward SATURATES once v_req/target is met -> hardware under-
-                                             # used (only 0.267 of total power capability used in the push). Rewards SUSTAINED
-                                             # productive actuator power vs the T-N PEAK-power envelope over the push (concentric,
-                                             # motor-level = NOT gameable by posture like four_leg's GRF -> no sideways). Task-agnostic:
-                                             # normalising by peak power makes speed-saturated joints (calf) drop out so the gradient
-                                             # auto-recruits the idle hips/thighs. WHY 3->12: at 3.0 the reward was FLAT ~0.008 in TB
-                                             # (Jul10_00-03-25) = NEVER OPTIMISED -- it is push-gated (~1-2% of steps) so its episode-
-                                             # average is tiny AND per-push-step it was 3*0.2=0.6 vs tvm's ~7.5 (~12x too weak). 12 makes
-                                             # it ~2.4/push-step ~= 1/3 of tvm = a REAL secondary (still < the task rewards tvm=15/
-                                             # pland=15 which keep WHAT; this shapes HOW). MULTI-SEED (2-3): verify rew_actuator_utilization
-                                             # RISES in TB (is being optimised) + knee stroke/force-window lengthen (push_stroke_diag) +
-                                             # idle hip/thigh util rises (torque_diag) + reach>0.85 (eval_sweep) AND value_loss/discovery/
-                                             # precision don't blow. If it backfires (messy jump / accuracy drop), step down to 6-8.
+            actuator_utilization = 0.0       # RE-DISABLED (2026-07-10, NEGATIVE RESULT). At 12.0 the reward WAS optimised
+                                             # (rew rose 0.031->0.051, +64%) and DID what it was designed to (Jul10_01-52-32 m1800:
+                                             # squat DEEPER calf -1.39->-2.50, knee stroke 0.30->1.34 rad, force window 66->119ms,
+                                             # push util 0.267->0.291) -- BUT the payoff FAILED: launch speed DROPPED 2.26->2.16 m/s
+                                             # and reach got WORSE (0.8 hit@0.10 0.97->0.34). LESSON: jump distance = TERMINAL launch
+                                             # VELOCITY (ballistic boundary value), NOT integrated work/power. Maximising SUSTAINED
+                                             # power drives a long moderate-speed GRIND (max-power point is mid-speed X2/2, and util
+                                             # even penalises hitting the velocity wall = the max-speed launch), which CAPS terminal
+                                             # velocity. So "max actuator-power utilization" != "jump farther": the capability-
+                                             # elicitation prior elicits capability USE but not, for a LAUNCH task, performance. For
+                                             # launch/terminal-value tasks reward the OUTPUT (launch velocity/impulse), not process
+                                             # utilization. (kept in code, weight 0.) The util prior may still fit WORK/sustained tasks
+                                             # (climb/push/lift/sprint-stance) -- just not ballistic ones.
+            leg_extension = 10.0             # NEW (2026-07-10, user): reward the KNEES reaching FULL extension (calf -> -0.84, the
+                                             # Go2 hardware limit) at the END of the push + first ~60ms of flight. push_stroke_diag: the
+                                             # policy BAILS EARLY (leaves at calf -1.16 still TUCKING = push not completed, momentum not
+                                             # fully transferred); the FAST baseline leaves at -0.84 fully extended. So reward "leave with
+                                             # the leg straight" = complete the stroke + delay the tuck (user's 1+2, via reward not the
+                                             # delicate default_pos/phase machine). exp kernel on |calf-(-0.84)|, gated to the ASCENDING
+                                             # push (won't fight the squat-down) + succ-latch. 10.0 = FIRST GUESS (util taught: 3 was too
+                                             # weak to be optimised, 12 worked). MULTI-SEED: verify rew_leg_extension RISES + takeoff calf
+                                             # moves -1.16 -> -0.84 (push_stroke_diag) + LAUNCH SPEED/reach improve (launch_diag/eval, NOT
+                                             # just the pose -- posture != terminal velocity, cf. util) + landing/discovery don't break
+                                             # (the post-takeoff tuck-delay is the riskiest bit for landing). If it just locks the knee
+                                             # slowly with no reach gain -> posture is the wrong lever, go to the un-saturated launch-vel reward.
             projected_landing = 15.0         # 10 -> 15: BOOST. USER PRINCIPLE: jump-DISTANCE/accuracy rewards must OUTRANK jump-HEIGHT
                                              # rewards. After projected_peak 25->20, height earned ~0.60 (pp 0.38 + takeoff_vz 0.22) still
                                              # exceeded distance ~0.43 (landing_position + this), so raise the distance side above height.
