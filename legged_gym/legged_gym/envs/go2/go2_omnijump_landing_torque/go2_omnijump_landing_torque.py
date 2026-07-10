@@ -584,6 +584,18 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
         align = (fwd * vdir).sum(dim=1)                                   # cos夹角 ∈[-1,1];机身水平时≈cos(50°)≈0.64
         return ascending.float() * torch.clamp(align, min=0.0)           # 鼻尖越指向速度越高，自然封顶在"完全对齐"
 
+    def _reward_default_hip_pos(self):
+        # COMMAND-CONDITIONAL hip-abduction lock (2026-07-11, lateral unlock). The parent term rewards keeping the four
+        # hip-abduction joints near default, which stops a forward jump from sliding the feet inward -- but it also forbids
+        # the hip abduction a SIDE jump needs. So we keep the full lock for forward commands (d_y=0) and relax it toward 0
+        # as the commanded lateral displacement grows: forward jumps stay anti-slide, lateral jumps are free to abduct.
+        hip_ids = [0, 3, 6, 9]
+        hip_error = torch.sum(torch.abs(self.dof_pos[:, hip_ids] - self.default_dof_pos[:, hip_ids]), dim=1)
+        r = torch.exp(-self.cfg.rewards.default_hip_pos_gain * hip_error)
+        dy_ref = float(getattr(self.cfg.rewards, "default_hip_pos_lat_ref", 0.15))
+        lat_free = torch.clamp(self.commands[:, 1].abs() / dy_ref, 0.0, 1.0)   # 0 forward -> 1 fully lateral
+        return r * (1.0 - lat_free)
+
     def _reward_forward_reach(self):
         # DISTANCE-PROGRESSIVE EFFORT reward, DECOUPLED from precise landing. Diagnosis: every jump reward
         # (projected_landing/landing_position/takeoff_velocity_match/successful_jump) is tied to HITTING the exact

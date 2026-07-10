@@ -106,7 +106,11 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
         # command_ranges["lin_vel_x"/"lin_vel_y"] accordingly at init.
         landing_stage = 2                      # STAGE 2 ON: env widens lin_vel_x/y ranges to the disp ranges below.
         landing_disp_x_stage2 = [0.0, 2.0]    # forward landing distance (m), Stage 2 (final range when curriculum off)
-        landing_disp_y_stage2 = [0.0, 0.0]     # FORWARD-ONLY start (lateral off). Open to [-0.20,0.20] once forward jumps land.
+        landing_disp_y_stage2 = [-0.30, 0.30]  # IN-PLANE OMNIDIRECTIONAL (2026-07-11): forward + side + diagonal. d_y is a
+                                               # fixed uniform range (no curriculum); d_x keeps its curriculum. Diagonal = both
+                                               # non-zero. Paired with a command-conditional default_hip_pos (relax the hip
+                                               # lock for lateral commands so the hips can abduct to push sideways). Yaw NOT
+                                               # unlocked yet (ang_vel_yaw=[0,0]); yaw-turning needs its own new rewards.
 
         # ---- DISTANCE CURRICULUM (Atanassov 2025 local-difficulty) ----
         # Start the forward dx range at 0 (pure in-place = the proven vertical-jump discovery; the
@@ -332,6 +336,9 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
         squat_pose_threshold = 3.2          # was 2.8: EASED (stuck @ squatQ~0.48). "in the squat" = pose_err<=3.2, shallower from
                                             # standing (7.1). THE depth knob: stuck-not-jumping (can't fold
                                             # enough) -> RAISE; jumps too shallow / want a deeper load -> LOWER.
+        default_hip_pos_lat_ref = 0.15      # read by _reward_default_hip_pos override (lateral unlock). The |d_y| (m) at which
+                                            # the hip-abduction lock is fully released; forward (d_y=0) keeps the full lock.
+                                            # Lives here in `class rewards` (NOT in scales, or it'd be mis-read as a reward term).
         squat_hold_steps = 25               # was 40 (0.2s) -> 25 (0.125s): EASED to unstick. jump chain unlocks only after the squat POSE is HELD within
                                             # squat_pose_threshold for this many CONSECUTIVE steps (= 0.2s at
                                             # sim dt 0.005s). Closes the "flick through the pose for one frame
@@ -516,18 +523,11 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
                                              # point + apex height). CAUSE-side "jump FAR and HIGH" driver — the
                                              # closeness rewards can't push reach (diminishing returns at undershoot).
                                              # = old takeoff_vz weight (15). At dx=0 it reduces to takeoff_vz (safe).
-            launch_pitch_toward_vel = 10.0   # 3.0 -> 10.0 (2026-07-10): at 3.0 the term was INERT (rew~0.045, 18% of
-                                             # takeoff_velocity_match) -> body stayed level/slightly nose-DOWN (0% nose-up,
-                                             # align 0.40) -> policy just ignored it. Cranked ~3x so it's competitive with
-                                             # the launch reward, to see if it MOVES the launch attitude at all: either it
-                                             # pitches nose-UP toward v (rear-driven arc, the hoped-for lever), OR it FLATTENS
-                                             # the velocity so a level body aligns (also good = more forward). GATE unchanged
-                                             # = deep-squat (_squat_deep_enough) + ascending only. ⚠️watch: over-rotation ->
-                                             # nose-up ω carried into flight -> back-tipping landing (base_ang_vel_xy only
-                                             # damps nose-DOWN rate). If reach/landing degrade with no forward gain -> posture
-                                             # is the wrong lever (like leg_extension/util), drop it.
-                                             # task-space launch alignment: reward body nose pointing along CoM velocity
-                                             # vector during ascending -> elicit rear-hip/thigh push along jump trajectory.
+            launch_pitch_toward_vel = 0.0    # RE-DISABLED (2026-07-11, FALSIFIED = 6th dead lever). At weight 10 it DID
+                                             # pitch the body nose-up (0%->100% nose-up, align 0.40->0.70) but the take-off
+                                             # speed COLLAPSED 2.25->1.08 m/s and reach fell to ~0.35 m: a nose-up attitude
+                                             # is mechanically incompatible with a strong downward push. The body stays level
+                                             # because that IS the strong-launch posture. Posture proxy, like leg_extension/util.
             # ---- structurally-inert rewards removed ----
             joint_angle_loaded = 0.0         # was 0.4: phase_loaded (jumping & ~taken_off & vz<=0) almost never
                                              # fires — the policy pre-squats during idle and pops straight up on
@@ -608,6 +608,9 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
                                              # (simpler than a reward; no standing-pose reward to make not-jumping comfy).
                                              # Zeroed during push-off / squat-down. NOTE: memory says -0.7 once caused
                                              # noise runaway -> watch noise_std; raise back if the anchor gets too loose.
+            # 2026-07-11 LATERAL: default_hip_pos is now COMMAND-CONDITIONAL (see _reward_default_hip_pos override in the
+            # landing env): full anti-slide hip lock for forward commands, relaxed toward 0 as |d_y| grows so a side jump can
+            # abduct the hips. Its knob default_hip_pos_lat_ref lives in `class rewards` (NOT here in scales).
             default_hip_pos = 2.0            # 1.0 -> 2.0 (user 2026-07-05): 髋外展/内收 splay 差, 强锁髋(4个hip-abduction关节)到 default.
                                              # [0.3 -> 1.0 史]: the policy slid the front feet INWARD (hip adduction) to shuffle
                                              # forward momentum (the stutter/run-up morphed into a SLIDE once the re-plant
