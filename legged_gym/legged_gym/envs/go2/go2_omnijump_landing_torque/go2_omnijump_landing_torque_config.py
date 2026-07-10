@@ -345,6 +345,10 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
         squat_pose_threshold = 3.2          # was 2.8: EASED (stuck @ squatQ~0.48). "in the squat" = pose_err<=3.2, shallower from
                                             # standing (7.1). THE depth knob: stuck-not-jumping (can't fold
                                             # enough) -> RAISE; jumps too shallow / want a deeper load -> LOWER.
+        launch_speed_cap_ratio = 1.4        # read by _reward_takeoff_velocity_match (one-sided launch reward). Keeps paying
+                                            # for launch speed up to 1.4x v_req then flat. Safety rail ONLY — the robot is
+                                            # < 1.0x v_req today, so it never binds (= effectively unsaturated). Lives here in
+                                            # `class rewards` (NOT in scales, or it'd be mis-read as a reward term).
         squat_hold_steps = 25               # was 40 (0.2s) -> 25 (0.125s): EASED to unstick. jump chain unlocks only after the squat POSE is HELD within
                                             # squat_pose_threshold for this many CONSECUTIVE steps (= 0.2s at
                                             # sim dt 0.005s). Closes the "flick through the pose for one frame
@@ -512,18 +516,14 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
                                              # launch/terminal-value tasks reward the OUTPUT (launch velocity/impulse), not process
                                              # utilization. (kept in code, weight 0.) The util prior may still fit WORK/sustained tasks
                                              # (climb/push/lift/sprint-stance) -- just not ballistic ones.
-            leg_extension = 10.0             # NEW (2026-07-10, user): reward the KNEES reaching FULL extension (calf -> -0.84, the
-                                             # Go2 hardware limit) at the END of the push + first ~60ms of flight. push_stroke_diag: the
-                                             # policy BAILS EARLY (leaves at calf -1.16 still TUCKING = push not completed, momentum not
-                                             # fully transferred); the FAST baseline leaves at -0.84 fully extended. So reward "leave with
-                                             # the leg straight" = complete the stroke + delay the tuck (user's 1+2, via reward not the
-                                             # delicate default_pos/phase machine). exp kernel on |calf-(-0.84)|, gated to the ASCENDING
-                                             # push (won't fight the squat-down) + succ-latch. 10.0 = FIRST GUESS (util taught: 3 was too
-                                             # weak to be optimised, 12 worked). MULTI-SEED: verify rew_leg_extension RISES + takeoff calf
-                                             # moves -1.16 -> -0.84 (push_stroke_diag) + LAUNCH SPEED/reach improve (launch_diag/eval, NOT
-                                             # just the pose -- posture != terminal velocity, cf. util) + landing/discovery don't break
-                                             # (the post-takeoff tuck-delay is the riskiest bit for landing). If it just locks the knee
-                                             # slowly with no reach gain -> posture is the wrong lever, go to the un-saturated launch-vel reward.
+            leg_extension = 0.0              # RE-DISABLED (2026-07-10, NEUTRAL RESULT). At 10.0 it DID work at the pose level
+                                             # (push_stroke_diag: takeoff calf -1.16 -> -0.85, tuck-at-takeoff ~100% -> 33%, rew_leg_extension
+                                             # rose 0.037->0.067) BUT launch speed stayed 2.25 (==baseline 2.26) and reach stayed ~0.8 -- the
+                                             # policy paid for "leave straight" by squatting SHALLOWER (calf bottom -1.64 vs -2.40), so net
+                                             # stroke didn't lengthen. SAME failure mode as actuator_utilization: a POSE/kinematic proxy the
+                                             # policy games while terminal velocity is unchanged. Lesson confirmed twice: posture/power != launch
+                                             # velocity. Superseded by the un-saturated launch-velocity reward (takeoff_velocity_match, one-sided).
+                                             # (_reward_leg_extension still exists, dormant at weight 0.)
             projected_landing = 15.0         # 10 -> 15: BOOST. USER PRINCIPLE: jump-DISTANCE/accuracy rewards must OUTRANK jump-HEIGHT
                                              # rewards. After projected_peak 25->20, height earned ~0.60 (pp 0.38 + takeoff_vz 0.22) still
                                              # exceeded distance ~0.43 (landing_position + this), so raise the distance side above height.
@@ -564,6 +564,9 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
                                              # point + apex height). CAUSE-side "jump FAR and HIGH" driver — the
                                              # closeness rewards can't push reach (diminishing returns at undershoot).
                                              # = old takeoff_vz weight (15). At dx=0 it reduces to takeoff_vz (safe).
+                                             # 2026-07-10: made ONE-SIDED/UNSATURATED (see _reward_takeoff_velocity_match)
+                                             # to elicit max launch speed (recruit the idle rear thighs). Weight unchanged.
+                                             # (its knob launch_speed_cap_ratio lives in `class rewards`, NOT here in scales.)
             # ---- structurally-inert rewards removed ----
             joint_angle_loaded = 0.0         # was 0.4: phase_loaded (jumping & ~taken_off & vz<=0) almost never
                                              # fires — the policy pre-squats during idle and pops straight up on

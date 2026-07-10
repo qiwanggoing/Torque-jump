@@ -567,10 +567,16 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
         # the ballistic launch needed to land on the commanded point AT the commanded apex height -> drives jump
         # HEIGHT (vz) and DISTANCE (forward v) together, as ONE reward. Fills the gap the closeness rewards
         # cannot: landing-accuracy already pays most of its value at an undershoot (diminishing returns), so
-        # nothing CAUSE-side pushed the launch FAR enough. Vector-MATCH (not a direction dot-product) so a too-
-        # vertical over-launch can't fake the forward requirement; LINEAR (not exp) so there's a gradient from
-        # zero velocity (discovery). At dx=0 the required vector is purely vertical -> reduces to
-        # takeoff_vertical_velocity (discovery-safe) and subsumes horizontal_drift (sideways = mismatch).
+        # nothing CAUSE-side pushed the launch FAR enough.
+        # 2026-07-10 CAPABILITY-ELICITATION change: was a TWO-SIDED vector match (1 - |v_act-v_req|/|v_req|) that
+        # PENALIZED over-launch -> capped launch speed at v_req, taught "reach exactly v_req and hold" (front legs
+        # + calves suffice; the rear thighs stay idle). Now ONE-SIDED / UNSATURATED: reward the CoM velocity
+        # component ALONG the v_req direction, /|v_req|. This (a) still rewards the correct AIM (projection kills a
+        # too-vertical or sideways launch), (b) == the old value 1.0 exactly when v_act == v_req (near commands
+        # unchanged, landing not broken), but (c) KEEPS PAYING past v_req up to launch_speed_cap_ratio -> always a
+        # gradient to launch HARDER, so PPO must recruit whatever actuator still has headroom (the rear thighs) to
+        # earn more. LINEAR from zero (discovery). At dx=0, v_req is purely vertical -> reduces to rewarding vz
+        # (== takeoff_vz, discovery-safe). The cap (1.4x) is only a safety rail; the robot is < 1.0x today.
         base_height = self.root_states[:, 2]
         min_height = float(getattr(self.cfg.rewards, "ascending_min_base_height", 0.18))
         vz = self.root_states[:, 9]
@@ -586,11 +592,11 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
         dir_xy = horiz_disp / d.clamp(min=1e-6).unsqueeze(1)
         v_req = torch.cat([(d / flight_t).unsqueeze(1) * dir_xy, vz_req.unsqueeze(1)], dim=1)   # (N,3)
         v_act = torch.cat([self.root_states[:, 7:9], vz.unsqueeze(1)], dim=1)                   # (N,3) world vel
-        match = torch.clamp(
-            1.0 - torch.norm(v_act - v_req, dim=1) / torch.norm(v_req, dim=1).clamp(min=1e-3),
-            min=0.0, max=1.0,
-        )
-        return ascending.float() * match
+        v_req_norm = torch.norm(v_req, dim=1).clamp(min=1e-3)
+        v_along = (v_act * v_req).sum(dim=1) / v_req_norm         # CoM speed projected onto the launch direction
+        cap = float(getattr(self.cfg.rewards, "launch_speed_cap_ratio", 1.4))   # safety rail (robot < 1.0x today)
+        reward = torch.clamp(v_along / v_req_norm, min=0.0, max=cap)            # ==1.0 at v_req, keeps paying past it
+        return ascending.float() * reward
 
     def _reward_forward_reach(self):
         # DISTANCE-PROGRESSIVE EFFORT reward, DECOUPLED from precise landing. Diagnosis: every jump reward
