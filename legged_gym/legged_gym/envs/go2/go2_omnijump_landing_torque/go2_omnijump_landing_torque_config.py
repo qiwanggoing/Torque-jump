@@ -145,8 +145,10 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
         # 的距离 = 该 env 真能稳命中的上界. PD辅助/noise冲上去的, 纯力矩后跳不到→自动降级收敛回真实~0.6, 无需门/gate.
         landing_dx_percurr = True              # 开 per-env 双向课程(取代 global advance-only)
         landing_dx_step_up = 0.02              # 命中挑战命令 → 自己上界 +这么多
-        landing_dx_step_down = 0.14            # 0.10→0.14 (2026-07-04, 升档贴近确定性能力): 升:降=1:7 → 收敛到挑战命中≈88%
-                                               # (要更可靠才升, 单次走运的噪声命中推不动). 配合 hit_tol 收紧(下面) → dx_env 贴"精准落上".
+        landing_dx_step_down = 0.18            # 0.14→0.18 (2026-07-11, 抬自限门到90%): 升:降=1:9 → 收敛到挑战命中≈90%
+                                               # (=用户"门槛调到0.9"). 平衡命中率 = step_down/(step_up+step_down) = 0.18/0.20 = 0.90.
+                                               # 更保守 → 每个env上界停在"90%可靠"的距离、离够不到的边缘更远 → 命令更少落进够不到区 →
+                                               # 更少毒化策略 → 治后期崩(overshoot→毒化→塌). [0.10→0.14 史: 升档贴近确定性能力].
         landing_dx_per_env_far_frac = 0.6      # 只 dx>=0.6×自己上界的"挑战命令"结果决定升降(近端命令不影响,防虚升)
         landing_dx_floor = 0.0                 # 上界下限(不降到负)
         # ── FRONTIER PROBE (2026-07-04, option-1, 配 forward_reach 2×): 一小撮 env 命令探到自己上界之外
