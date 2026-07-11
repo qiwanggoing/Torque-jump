@@ -350,7 +350,12 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
         if getattr(self.cfg.commands, "landing_dx_percurr", False) and hasattr(self, "landing_dx_env"):
             self.landing_dx_max = float(self.landing_dx_env.max().item())
             ep = self.extras.setdefault("episode", {})
-            ep["landing_dx_max"] = torch.tensor(self.landing_dx_max, device=self.device)
+            # 2026-07-11: report the 90th-PERCENTILE bound as `landing_dx_max`, NOT the single-luckiest-env max.
+            # The max over 4096 noisy per-env random walks is always a high outlier that does NOT match
+            # deterministic play; p90 = the top-decile STABLY-reached distance (a far more honest "reach upper
+            # bound"). The true max is kept as landing_dx_maxenv for reference.
+            ep["landing_dx_max"] = torch.quantile(self.landing_dx_env.float(), 0.90)
+            ep["landing_dx_maxenv"] = torch.tensor(self.landing_dx_max, device=self.device)
             ep["landing_dx_mean"] = self.landing_dx_env.mean()
             ep["landing_dx_min"] = self.landing_dx_env.min()
             return

@@ -105,7 +105,13 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
         # Set landing_stage = 2 to open the ranges below; the env widens
         # command_ranges["lin_vel_x"/"lin_vel_y"] accordingly at init.
         landing_stage = 2                      # STAGE 2 ON: env widens lin_vel_x/y ranges to the disp ranges below.
-        landing_disp_x_stage2 = [0.0, 2.0]    # forward landing distance (m), Stage 2 (final range when curriculum off)
+        landing_disp_x_stage2 = [0.5, 1.5]    # FIXED forward range (2026-07-11, user): no curriculum-from-0 -> command
+                                              # 0.5-1.5 m directly from the start. Goal = FARTHER: every command is far, so
+                                              # forward_reach (capped-at-command) always pays for jumping as far as possible,
+                                              # pushing toward the physical reach instead of the conservative curriculum's
+                                              # parked ~0.6 m. ⚠️ discovery: the jump is still bootstrapped by squat/launch/
+                                              # height rewards (which don't need the landing point), but if early flight_rate
+                                              # stays 0, lower the floor (e.g. 0.2) or add a brief warmup.
         landing_disp_y_stage2 = [-0.30, 0.30]  # IN-PLANE OMNIDIRECTIONAL (2026-07-11): forward + side + diagonal. d_y is a
                                                # fixed uniform range (no curriculum); d_x keeps its curriculum. Diagonal = both
                                                # non-zero. Paired with a command-conditional default_hip_pos (relax the hip
@@ -121,7 +127,8 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
         # is height-only and would let an in-place policy keep advancing). After each bump both rates
         # dip and must be re-earned at the new distance. Trains forward jumping in ONE from-scratch
         # run without the discovery cliff that a one-shot dx[0,0.40] open hits.
-        landing_dx_curriculum = True
+        landing_dx_curriculum = False        # OFF (2026-07-11, user): no curriculum-from-0. Command is drawn uniformly
+                                             # from landing_disp_x_stage2 = [0.5, 1.5] m (see else-branch in _init_buffers).
         # BIASED command sampling (Atanassov local-difficulty): concentrate most jump commands at the FAR
         # frontier (the goal = farthest landing point) instead of uniform over [0, dx_max]. The policy then
         # practices mostly where it counts; a spread fraction is kept for the easy->hard gradient + retention.
@@ -544,17 +551,11 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
                                              # Farm-safe: stops at the gate, and squatting-without-jumping earns no
                                              # successful_jump anyway. (history: 0.5/2.0 weight-only + time-window all failed.)
             # ---- air-time + stay-planted boosts (user) ----
-            clean_takeoff_bonus = 3.0        # SOFT clean-takeoff: extra flight reward for a no-re-plant (clean
-                                             # single-push) takeoff. Clean jump earns all_feet_airborne + this;
-                                             # a stutter-stepped jump earns all_feet_airborne only -> clean pays
-                                             # MORE but messy is NOT forbidden (discovery-safe, replaces the hard
-                                             # clean_takeoff_terminate gate). Tune: higher = stronger pull to clean.
-            stand_no_takeoff = -5.0          # HARD penalty (user): cmd4=0 (STAND) but all feet leave the ground
-                                             # (a hop) -> punish, so cmd4 is the real switch (cmd4=0 => stay grounded
-                                             # in the resting squat, cmd4=1 => jump). Only fires at cmd4<=0.5 +
-                                             # post-discovery + after grace -> never touches a commanded jump or
-                                             # discovery. Tune harder (-8/-10) if the hop survives; the resting
-                                             # squat (the desired stand) is unaffected (only LEAVING the ground costs).
+            clean_takeoff_bonus = 0.0        # DELETED (2026-07-11): reward-distribution audit showed it was INERT
+                                             # (contributed 0.0001 = 0.0% -> never actually firing). Removed.
+            stand_no_takeoff = 0.0           # DELETED (2026-07-11): jump-only config (jump_command_range=[1,1]) never
+                                             # commands stand, so this never fires (contributed -0.002). Removed.
+                                             # (was -5.0; only fired at cmd4<=0.5 which the jump-only config never samples.)
             all_feet_airborne = 3.0          # 2.0 -> 3.0: more air-time pressure. Gated (squat_deep + height_progress)
                                              # so it can't be farmed by a tucked sprawl. The policy currently UNDERSHOOTS
                                              # the commanded apex (peak ~0.50 vs cmd ~0.55) -> this pushes it to the FULL
