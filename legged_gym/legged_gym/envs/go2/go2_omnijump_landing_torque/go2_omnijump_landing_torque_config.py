@@ -614,7 +614,9 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
             # 2026-07-11 LATERAL: default_hip_pos is now COMMAND-CONDITIONAL (see _reward_default_hip_pos override in the
             # landing env): full anti-slide hip lock for forward commands, relaxed toward 0 as |d_y| grows so a side jump can
             # abduct the hips. Its knob default_hip_pos_lat_ref lives in `class rewards` (NOT here in scales).
-            default_hip_pos = 2.0            # 1.0 -> 2.0 (user 2026-07-05): 髋外展/内收 splay 差, 强锁髋(4个hip-abduction关节)到 default.
+            default_hip_pos = 4.0            # 2.0 -> 4.0 (2026-07-11): 治"前腿叉开". hip_feet_traj 铁证前髋蹬伸段外展到 +0.60/-0.64
+                                             # (default +0.10/-0.10) = 前腿叉很开, 2.0 压不住. 加强锁髋(仍command-conditional: 侧跳时放开).
+                                             # ⚠️叉开可能是平衡功能性的 -> 训完看①前髋@push 从0.60往0.10收 ②够程1.0m没掉. [1.0->2.0 史]:
                                              # [0.3 -> 1.0 史]: the policy slid the front feet INWARD (hip adduction) to shuffle
                                              # forward momentum (the stutter/run-up morphed into a SLIDE once the re-plant
                                              # termination forbade stepping). default_hip_pos keeps the 4 hip-abduction joints
