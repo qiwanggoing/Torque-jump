@@ -614,9 +614,10 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
             # 2026-07-11 LATERAL: default_hip_pos is now COMMAND-CONDITIONAL (see _reward_default_hip_pos override in the
             # landing env): full anti-slide hip lock for forward commands, relaxed toward 0 as |d_y| grows so a side jump can
             # abduct the hips. Its knob default_hip_pos_lat_ref lives in `class rewards` (NOT here in scales).
-            default_hip_pos = 4.0            # 2.0 -> 4.0 (2026-07-11): 治"前腿叉开". hip_feet_traj 铁证前髋蹬伸段外展到 +0.60/-0.64
-                                             # (default +0.10/-0.10) = 前腿叉很开, 2.0 压不住. 加强锁髋(仍command-conditional: 侧跳时放开).
-                                             # ⚠️叉开可能是平衡功能性的 -> 训完看①前髋@push 从0.60往0.10收 ②够程1.0m没掉. [1.0->2.0 史]:
+            default_hip_pos = 2.0            # 4.0 -> 2.0 REVERT (2026-07-13): hip=4.0 证伪. 确定性 eval 铁证 4.0 虽把蹬地前髋叉开从
+                                             # +0.60 收到 +0.13(好看达成), 但把整条腿的蹬伸协调压垮: 距离跟踪没了(cmd0.5-1.2都跳固定0.80m,
+                                             # 只0.7中), 大腿募集 89%->62%, 够程 0.95->0.80m. 前髋叉开是"功能性"的(=前向速度来源), 硬锁髋直接跟
+                                             # takeoff_velocity_match 抢权重, PPO 退到"整洁固定小跳". 叉开接受为功能性, 不为好看牺牲够程. [1.0->2.0 史]:
                                              # [0.3 -> 1.0 史]: the policy slid the front feet INWARD (hip adduction) to shuffle
                                              # forward momentum (the stutter/run-up morphed into a SLIDE once the re-plant
                                              # termination forbade stepping). default_hip_pos keeps the 4 hip-abduction joints
@@ -725,8 +726,8 @@ class GO2OmniJumpLandingTorqueCfgPPO(GO2OmniJumpCurriculumTorqueCfgPPO):
         load_run = -1
         checkpoint = -1
         resume_path = None
-        max_iterations = 3000    # 10000 -> 3000 (user): PD fades early (~iter800), then plenty of room for the
-                                 # pure-torque policy to consolidate + dx_max to evolve (with the safety-revert).
+        max_iterations = 5000    # 3000 -> 5000 (user 2026-07-13): longer consolidation window (best ckpt has been mid-run,
+                                 # ~1200-2100; 5000 gives room to see if far-command training keeps improving or plateaus).
         # entropy_coef ANNEALS 0.005 -> 0.001 at entropy_anneal_iter (HARD STEP, on_policy_runner.py:129-133).
         # MOVED 2800 -> 500 for the real-Go2 actuator. The 0.005 START is the ONLY force pushing action_std UP;
         # with the weak real calf the precise squat-jump can't survive high noise, so noise_std running away
