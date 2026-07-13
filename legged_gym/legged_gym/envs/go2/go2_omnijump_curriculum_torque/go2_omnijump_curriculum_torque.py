@@ -66,6 +66,7 @@ class GO2OmniJumpCurriculumTorque(GO2OmniJumpTorque):
         "joint_angle_extended": 0,
         "horizontal_drift": 0,
         "takeoff_direction": 0,
+        "run_up_step": 0,
         "default_pos": 0,
         "default_hip_pos": 0,
         "aerial_dof_acc": 0,

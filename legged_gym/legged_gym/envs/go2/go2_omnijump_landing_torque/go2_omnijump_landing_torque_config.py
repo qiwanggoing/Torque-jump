@@ -456,9 +456,14 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
         # (robot jumps clean-but-short instead of running up -> no forced collapse). WATCH successful_jump_rate /
         # jump_flight after general_scale crosses 0.9 (~iter1000): a brief dip is fine, a crash-to-0 that does
         # NOT recover = the run-up was load-bearing and cut too hard -> fall back to a soft step penalty.
-        run_up_step_terminate = True        # ON: terminate a bounding run-up stride
-        run_up_step_max = 0.10              # > this front-foot fwd step (m) between two load touchdowns = a run-up
-        run_up_step_min_gscale = 0.9        # only once PD ~faded (general_scale>=0.9, mature pure torque)
+        run_up_step_terminate = False       # OFF (2026-07-13): HARD termination death-spiraled -- at general_scale 0.9
+                                            # (iter~1000) it cut 100% of jumps (all run up) at once -> succ/squat/flight
+                                            # crashed to 0 and never recovered (run Jul13_13-38-38). Replaced by the
+                                            # SOFT per-step penalty `run_up_step` (scale below): the robot keeps
+                                            # completing jumps + all other rewards, just pays for the stride -> smooth
+                                            # gradient to shrink it, no cliff. See _reward_run_up_step.
+        run_up_step_max = 0.10              # > this front-foot fwd step (m) between two load touchdowns = a run-up stride
+        run_up_step_min_gscale = 0.9        # (only used if run_up_step_terminate re-enabled) general_scale gate for the hard cut
         # CLEAN-LANDING (user request): no small hop / shuffle-step after touchdown -> ONE clean settle. Once
         # all 4 feet HOLD contact for clean_landing_plant_hold steps (skips the impact chatter), any foot
         # lifting is penalized per-step by _reward_clean_landing (weight `clean_landing` in scales). PENALTY,
@@ -548,6 +553,14 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
                                              # point + apex height). CAUSE-side "jump FAR and HIGH" driver — the
                                              # closeness rewards can't push reach (diminishing returns at undershoot).
                                              # = old takeoff_vz weight (15). At dx=0 it reduces to takeoff_vz (safe).
+            run_up_step = -20.0              # SOFT ANTI-RUN-UP penalty (2026-07-13, replaces hard termination that
+                                             # death-spiraled). Dense per-step over loading+airborne, magnitude =
+                                             # meters a FRONT foot stepped forward beyond run_up_step_max (0.10) between
+                                             # two load touchdowns (see _reward_run_up_step). A clean jump / in-place
+                                             # re-plant = ~0 = no penalty; a bounding run-up (~0.27 m stride) pays.
+                                             # -20 is the MAIN TUNING KNOB: too weak -> run-up persists; too strong ->
+                                             # robot stops jumping (soft collapse). Gated on _takeoff_omega_on (early,
+                                             # so the run-up habit never forms). WATCH rew_run_up_step trend + succ/flight.
             launch_pitch_toward_vel = 0.0    # RE-DISABLED (2026-07-11, FALSIFIED = 6th dead lever). At weight 10 it DID
                                              # pitch the body nose-up (0%->100% nose-up, align 0.40->0.70) but the take-off
                                              # speed COLLAPSED 2.25->1.08 m/s and reach fell to ~0.35 m: a nose-up attitude

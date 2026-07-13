@@ -34,6 +34,7 @@ class GO2OmniJumpTorque(GO2Torque):
         "projected_peak",             # Olsen: reward projected peak height during pushoff
         "horizontal_drift",           # enforce vertical-only jumps when xy cmd is zero
         "takeoff_direction",          # one-shot at just_took_off: vz / ||v|| → encourage vertical takeoff
+        "run_up_step",                # SOFT penalty: front-foot forward stride (m) beyond run_up_step_max (anti run-up)
         "default_pos",                # mygo2jump-style L1 toward q_squat (whole-body squat bias)
         "default_hip_pos",            # mygo2jump-style exp reward for hip joints near default
         "landing_stability",          # Atanassov-style: penalize lin/ang vel during landing buffer
@@ -103,6 +104,7 @@ class GO2OmniJumpTorque(GO2Torque):
         self.front_foot_lifted = torch.zeros(self.num_envs, 2, dtype=torch.bool, device=self.device)   # a front foot has lifted during this load (arms the re-contact step measurement)
         self.front_foot_incon_prev = torch.zeros(self.num_envs, 2, dtype=torch.bool, device=self.device) # front-foot load-phase contact state last step (for the re-contact edge)
         self.run_up_step = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)            # latched: a front foot stepped forward > run_up_step_max between two load-phase touchdowns
+        self.run_up_step_dist = torch.zeros(self.num_envs, device=self.device)                         # CONTINUOUS: max front-foot forward step (m) between two load touchdowns this jump (for the soft penalty)
         self.landing_plant_hold = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)     # consecutive all-4-feet-contact steps in the landing buffer (clean-landing settle detector)
         self.landing_planted = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)        # latched once the feet HELD (clean_landing_plant_hold steps) -> "settled, now watch for re-lift"
         self.landing_relift = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)         # a foot LIFTED after the clean plant (hop / shuffle-step) -> clean-landing violation
@@ -204,6 +206,7 @@ class GO2OmniJumpTorque(GO2Torque):
         self.jump_min_contact[env_ids] = 4     # clean-takeoff re-plant detector: reset to "no foot lifted yet"
         self.jump_replant[env_ids] = False
         self.run_up_step[env_ids] = False
+        self.run_up_step_dist[env_ids] = 0.0
         self.front_foot_lifted[env_ids] = False
         self.front_foot_incon_prev[env_ids] = False
         self.front_foot_last_contact_x[env_ids] = 0.0
@@ -454,6 +457,7 @@ class GO2OmniJumpTorque(GO2Torque):
         self.jump_min_contact[env_ids] = 4     # clean-takeoff re-plant detector: reset to "no foot lifted yet"
         self.jump_replant[env_ids] = False
         self.run_up_step[env_ids] = False
+        self.run_up_step_dist[env_ids] = 0.0
         self.front_foot_lifted[env_ids] = False
         self.front_foot_incon_prev[env_ids] = False
         self.front_foot_last_contact_x[env_ids] = 0.0
@@ -491,6 +495,7 @@ class GO2OmniJumpTorque(GO2Torque):
         self.jump_min_contact[env_ids] = 4     # clean-takeoff re-plant detector: reset to "no foot lifted yet"
         self.jump_replant[env_ids] = False
         self.run_up_step[env_ids] = False
+        self.run_up_step_dist[env_ids] = 0.0
         self.front_foot_lifted[env_ids] = False
         self.front_foot_incon_prev[env_ids] = False
         self.front_foot_last_contact_x[env_ids] = 0.0
@@ -590,6 +595,10 @@ class GO2OmniJumpTorque(GO2Torque):
         step_fwd = front_x - self.front_foot_last_contact_x                                   # forward step vs liftoff x
         _step_max = float(getattr(self.cfg.rewards, "run_up_step_max", 0.10))
         self.run_up_step |= loading & torch.any(recontact & (step_fwd > _step_max), dim=1)
+        # CONTINUOUS max forward step this jump (for the soft penalty): only the step at a re-contact edge counts.
+        step_events = torch.where(recontact, step_fwd, torch.zeros_like(step_fwd))
+        max_step_now = step_events.max(dim=1).values
+        self.run_up_step_dist = torch.where(loading, torch.maximum(self.run_up_step_dist, max_step_now), self.run_up_step_dist)
         self.front_foot_lifted |= self.front_foot_incon_prev & (~front_con)                   # arm once a front foot lifts
         self.front_foot_last_contact_x = torch.where(front_con, front_x, self.front_foot_last_contact_x)  # update AFTER step read
         self.front_foot_incon_prev = front_con.clone()
@@ -1424,6 +1433,21 @@ class GO2OmniJumpTorque(GO2Torque):
         ascending = self.jumping_state & (~self.has_landed) & (vz > 0) & (base_height > min_height)
         ascending = ascending & self._squat_deep_enough()   # squat-depth gate: no dip -> no takeoff reward
         return ascending.float() * vertical_frac
+
+    def _reward_run_up_step(self):
+        # SOFT run-up penalty (replaces the HARD run_up_step termination, which cut 100% of jumps at once and
+        # death-spiraled). Dense per-step over the jump (loading + airborne): penalize the METERS a front foot
+        # stepped forward beyond run_up_step_max between two load touchdowns. Returns a POSITIVE magnitude; the
+        # config scale `run_up_step` is NEGATIVE. The robot still COMPLETES the jump and keeps every other
+        # reward -> it gets a smooth gradient to shrink the stride (0.27 -> 0.10 -> clean) instead of a cliff.
+        # Gated on the succ-latch (_takeoff_omega_on, ~iter220): activates EARLY (soft penalty won't blow up the
+        # critic under PD assist) so the policy grows up without forming the strong run-up habit. dist ~0 for a
+        # clean jump / in-place re-plant -> no penalty.
+        if not getattr(self, "_takeoff_omega_on", False):
+            return torch.zeros(self.num_envs, device=self.device)
+        T = float(getattr(self.cfg.rewards, "run_up_step_max", 0.10))
+        active = self.jumping_state & (~self.has_landed)
+        return active.float() * torch.clamp(self.run_up_step_dist - T, min=0.0)
 
     def _reward_joint_angle_loaded(self):
         # Phase 1: fold legs during squat-down + pre-pushoff (loaded/spring-loaded posture).
