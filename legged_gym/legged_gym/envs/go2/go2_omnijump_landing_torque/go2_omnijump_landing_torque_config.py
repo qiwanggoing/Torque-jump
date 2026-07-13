@@ -105,8 +105,11 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
         # Set landing_stage = 2 to open the ranges below; the env widens
         # command_ranges["lin_vel_x"/"lin_vel_y"] accordingly at init.
         landing_stage = 2                      # STAGE 2 ON: env widens lin_vel_x/y ranges to the disp ranges below.
-        landing_disp_x_stage2 = [0.5, 1.5]    # FIXED forward range (2026-07-11, user): no curriculum-from-0 -> command
-                                              # 0.5-1.5 m directly from the start. Goal = FARTHER: every command is far, so
+        landing_disp_x_stage2 = [0.65, 2.0]   # FIXED forward range (2026-07-14, user): 0.5-1.5 -> 0.65-2.0. Every command is
+                                              # now ABOVE the clean-jump ceiling (~0.6 m without run-up), so paired with the
+                                              # strong run_up_step penalty below the policy is forced to jump as far as it can
+                                              # WITHOUT the front-foot run-up stride, landing short of the command (forward_reach
+                                              # stays unsaturated -> a permanent "reach farther, cleanly" gradient). Was 0.5-1.5:
                                               # forward_reach (capped-at-command) always pays for jumping as far as possible,
                                               # pushing toward the physical reach instead of the conservative curriculum's
                                               # parked ~0.6 m. ⚠️ discovery: the jump is still bootstrapped by squat/launch/
@@ -128,7 +131,7 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
         # dip and must be re-earned at the new distance. Trains forward jumping in ONE from-scratch
         # run without the discovery cliff that a one-shot dx[0,0.40] open hits.
         landing_dx_curriculum = False        # OFF (2026-07-11, user): no curriculum-from-0. Command is drawn uniformly
-                                             # from landing_disp_x_stage2 = [0.5, 1.5] m (see else-branch in _init_buffers).
+                                             # from landing_disp_x_stage2 = [0.65, 2.0] m (see else-branch in _init_buffers).
         # BIASED command sampling (Atanassov local-difficulty): concentrate most jump commands at the FAR
         # frontier (the goal = farthest landing point) instead of uniform over [0, dx_max]. The policy then
         # practices mostly where it counts; a spread fraction is kept for the easy->hard gradient + retention.
@@ -553,14 +556,20 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
                                              # point + apex height). CAUSE-side "jump FAR and HIGH" driver — the
                                              # closeness rewards can't push reach (diminishing returns at undershoot).
                                              # = old takeoff_vz weight (15). At dx=0 it reduces to takeoff_vz (safe).
-            run_up_step = -20.0              # SOFT ANTI-RUN-UP penalty (2026-07-13, replaces hard termination that
+            run_up_step = -150.0             # SOFT ANTI-RUN-UP penalty (2026-07-13, replaces hard termination that
                                              # death-spiraled). Dense per-step over loading+airborne, magnitude =
                                              # meters a FRONT foot stepped forward beyond run_up_step_max (0.10) between
                                              # two load touchdowns (see _reward_run_up_step). A clean jump / in-place
                                              # re-plant = ~0 = no penalty; a bounding run-up (~0.27 m stride) pays.
-                                             # -20 is the MAIN TUNING KNOB: too weak -> run-up persists; too strong ->
-                                             # robot stops jumping (soft collapse). Gated on _takeoff_omega_on (early,
-                                             # so the run-up habit never forms). WATCH rew_run_up_step trend + succ/flight.
+                                             # -20 -> -150 (2026-07-14): -20 was OUTBID (run Jul13_15-11-53: 100% of jumps
+                                             # still ran up 0.18-0.29 m; rew_run_up_step only -0.15 vs forward_reach +1.04).
+                                             # The step buys ~0.5-0.8 reward of far-command reach; -150 makes the episode
+                                             # penalty ~-1.1 (≈ forward_reach) so "clean jump + land short" beats "step + hit".
+                                             # MAIN TUNING KNOB: too weak -> run-up persists (runup>0.10 stays ~1.0); too
+                                             # strong -> succ/flight drop (soft collapse) -> back off. Gated on _takeoff_omega_on
+                                             # (early, before the habit forms). WATCH rew_run_up_step trend + succ/flight + the
+                                             # eval_runup_reach 'runup(m)' column. NB paired with [0.65,2.0] cmd range (all
+                                             # commands far -> stepping is MORE tempting, so -150 may still be a touch weak).
             launch_pitch_toward_vel = 0.0    # RE-DISABLED (2026-07-11, FALSIFIED = 6th dead lever). At weight 10 it DID
                                              # pitch the body nose-up (0%->100% nose-up, align 0.40->0.70) but the take-off
                                              # speed COLLAPSED 2.25->1.08 m/s and reach fell to ~0.35 m: a nose-up attitude
