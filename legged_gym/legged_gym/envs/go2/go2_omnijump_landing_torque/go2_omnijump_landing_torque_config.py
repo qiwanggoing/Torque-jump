@@ -468,6 +468,15 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
                                             # gradient to shrink it, no cliff. See _reward_run_up_step.
         run_up_step_max = 0.10              # > this front-foot fwd step (m) between two load touchdowns = a run-up stride
         run_up_step_min_gscale = 0.9        # (only used if run_up_step_terminate re-enabled) general_scale gate for the hard cut
+        run_up_ramp_steps = 90000          # RAMP the run_up_step penalty from run_up_ramp_start_frac up to full over this many
+                                            # common-steps AFTER the succ-latch. 90000 = gate ~iter300(step28k) -> full ~iter2000
+                                            # (step118k), a SLOW ramp well past PD fade-out (~iter1000). Kills the step-shock that
+                                            # collapsed the static -150 (see run_up_step). 0 = ramp off (full scale at gate).
+        run_up_ramp_start_frac = 0.1333    # eff scale at the gate = this × run_up_step = 0.1333×(-150) = -20 (the known-SAFE weak
+                                            # level: the -20 run never collapsed). Starting at -20 (not 0) keeps anti-run-up pressure
+                                            # from the gate so the habit can't re-entrench during the early ramp; then it climbs to
+                                            # -150 by iter2000. Curve: iter300 -20, 500 -41, 700 -59(≈safe -60), 1000 -81, 1500 -115,
+                                            # 2000 -150. 0 = ramp starts from 0.
         # CLEAN-LANDING (user request): no small hop / shuffle-step after touchdown -> ONE clean settle. Once
         # all 4 feet HOLD contact for clean_landing_plant_hold steps (skips the impact chatter), any foot
         # lifting is penalized per-step by _reward_clean_landing (weight `clean_landing` in scales). PENALTY,
@@ -557,7 +566,7 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
                                              # point + apex height). CAUSE-side "jump FAR and HIGH" driver — the
                                              # closeness rewards can't push reach (diminishing returns at undershoot).
                                              # = old takeoff_vz weight (15). At dx=0 it reduces to takeoff_vz (safe).
-            run_up_step = -60.0              # SOFT ANTI-RUN-UP penalty (2026-07-13, replaces hard termination that
+            run_up_step = -150.0             # SOFT ANTI-RUN-UP penalty (2026-07-13, replaces hard termination that
                                              # death-spiraled). Dense per-step over loading+airborne, magnitude =
                                              # meters a FRONT foot stepped forward beyond run_up_step_max (0.10) between
                                              # two load touchdowns (see _reward_run_up_step). A clean jump / in-place
@@ -570,15 +579,19 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
                                              #    policy (jump-contingent reward then was only ~+7.6) -> value_loss spiked 0.53,
                                              #    mean_reward +5->-12, policy FLED to "don't jump" (succ 0.83->0). Same cliff as
                                              #    the hard termination, via penalty.
-                                             #  -60 (2026-07-14): return penalty ~-6.3 at gate-open, UNDER the ~-75 collapse
-                                             #    ceiling (jump-contingent ~+7.6) so jumping still wins, yet rew_* ~-0.51 > the
-                                             #    ~0.4 bite floor (the step's marginal reach reward) so it should still bite.
-                                             # MAIN TUNING KNOB: outbid (runup>0.10 stays ~1.0, succ healthy) -> nudge to -70;
-                                             # collapse (succ/flight->0, value_loss spike near gate-open ~iter300) -> back to -45,
-                                             # or switch to a RAMP (0->target over ~800 iter after gate) to kill the step-shock.
-                                             # Gated on _takeoff_omega_on. WATCH rew_run_up_step + succ/flight + value_loss around
-                                             # gate-open + eval_runup_reach 'runup(m)'. Paired with [0.5,1.5] cmd range (near
-                                             # commands give a cleanly-hittable anchor = lower collapse risk).
+                                             #  -60 (Jul13_20-32-42) PARTIAL: no collapse, run-up HALVED (stride 0.29->0.145)
+                                             #    but NOT killed (far-cmd runup>0.10 still ~100%, stride 0.14-0.17>threshold);
+                                             #    reach deflated 0.9->~0.7 (honest). -60 static was too weak to reach the 0.10 floor.
+                                             #  -150 + SLOW RAMP -20->-150 (2026-07-14, user): endpoint -150 but RAMPED from a
+                                             #    -20 floor at the gate (run_up_ramp_start_frac) up to -150 at ~iter2000
+                                             #    (run_up_ramp_steps=90000). Starts at the known-safe -20 (never collapsed) so
+                                             #    pressure exists from the gate but no step-shock; climbs SLOWLY past PD fade
+                                             #    (iter700 -59≈safe-60, iter1000 -81, iter1500 -115). Stride<=0.10 -> 0 cost for
+                                             #    ANY scale, so the strong endpoint just makes over-stride expensive.
+                                             # WATCH: rew_run_up_step (tensorboard ONLY -- rsl_rl console does NOT print it!) +
+                                             # succ/flight + value_loss, esp. LATE (~iter1500-2000) as the ramp nears full: a late
+                                             # collapse there => the stride has an irreducible floor -> lower the endpoint. Also
+                                             # eval_runup_reach 'runup(m)'. Paired with [0.5,1.5] cmd range (near-cmd clean anchor).
             launch_pitch_toward_vel = 0.0    # RE-DISABLED (2026-07-11, FALSIFIED = 6th dead lever). At weight 10 it DID
                                              # pitch the body nose-up (0%->100% nose-up, align 0.40->0.70) but the take-off
                                              # speed COLLAPSED 2.25->1.08 m/s and reach fell to ~0.35 m: a nose-up attitude

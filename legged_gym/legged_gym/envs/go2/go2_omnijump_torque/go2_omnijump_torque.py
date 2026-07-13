@@ -1443,11 +1443,29 @@ class GO2OmniJumpTorque(GO2Torque):
         # Gated on the succ-latch (_takeoff_omega_on, ~iter220): activates EARLY (soft penalty won't blow up the
         # critic under PD assist) so the policy grows up without forming the strong run-up habit. dist ~0 for a
         # clean jump / in-place re-plant -> no penalty.
+        # RAMP (2026-07-14): a STRONG penalty switched on FULL at the gate death-spiraled -- run Jul13_19-46-39
+        # (-150, step-function) dumped ~-15 return at once on a 100%-run-up policy, which fled to "don't jump".
+        # So ramp the magnitude 0->1 over run_up_ramp_steps common-steps (~800 iters) AFTER the latch: the cost
+        # rises slowly, the policy shrinks the stride a little at each level (migrates to a clean takeoff) instead
+        # of hitting a cliff. Once stride<=T the penalty is 0 for any scale, so the strong endpoint only makes an
+        # over-stride expensive. run_up_ramp_steps=0 -> ramp disabled (old full-strength-at-gate behavior).
         if not getattr(self, "_takeoff_omega_on", False):
             return torch.zeros(self.num_envs, device=self.device)
+        ramp = 1.0
+        ramp_steps = float(getattr(self.cfg.rewards, "run_up_ramp_steps", 0.0))
+        if ramp_steps > 0.0:
+            latch = getattr(self, "_run_up_latch_step", -1)
+            if latch < 0:
+                ramp = 0.0
+            else:
+                progress = min(1.0, max(0.0, (self.common_step_counter - latch) / ramp_steps))
+                # ramp the multiplier from run_up_ramp_start_frac (e.g. 20/150 -> a safe -20 floor at the gate,
+                # so anti-run-up pressure exists from the start) up to 1.0 (full scale) at ramp_steps.
+                sfrac = float(getattr(self.cfg.rewards, "run_up_ramp_start_frac", 0.0))
+                ramp = sfrac + (1.0 - sfrac) * progress
         T = float(getattr(self.cfg.rewards, "run_up_step_max", 0.10))
         active = self.jumping_state & (~self.has_landed)
-        return active.float() * torch.clamp(self.run_up_step_dist - T, min=0.0)
+        return ramp * active.float() * torch.clamp(self.run_up_step_dist - T, min=0.0)
 
     def _reward_joint_angle_loaded(self):
         # Phase 1: fold legs during squat-down + pre-pushoff (loaded/spring-loaded posture).

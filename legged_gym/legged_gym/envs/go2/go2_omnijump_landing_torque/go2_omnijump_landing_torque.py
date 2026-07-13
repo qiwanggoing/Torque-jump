@@ -143,6 +143,7 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
         # penalizes the messy exploratory pushes before the robot can jump (that broke discovery before).
         self._succ_rate_ema = 0.0
         self._takeoff_omega_on = False
+        self._run_up_latch_step = -1   # common_step_counter at which _takeoff_omega_on latched (for run_up_step ramp)
         # HONEST far-band mastery: decaying accumulators for a TRUSTWORTHY smoothed far-band hit rate
         # (per-batch far_n ~0.1 -> landing_stable_hit_rate is pure noise). See _log_jump_episode_stats.
         self._farband_hit_acc = 0.0
@@ -293,6 +294,8 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
         if "successful_jump_rate" in self.extras.get("episode", {}):
             self._succ_rate_ema = 0.99 * self._succ_rate_ema + 0.01 * float(self.extras["episode"]["successful_jump_rate"])
             if self._succ_rate_ema >= float(getattr(self.cfg.rewards, "takeoff_omega_succ_gate", 0.80)):
+                if not self._takeoff_omega_on:
+                    self._run_up_latch_step = int(self.common_step_counter)   # anchor the run_up_step ramp here
                 self._takeoff_omega_on = True
         jump_den = torch.clamp(self.jump_starts[env_ids], min=1.0)
         self.extras["episode"]["landing_hit_rate"] = torch.mean(self.jump_target_hits[env_ids] / jump_den)
