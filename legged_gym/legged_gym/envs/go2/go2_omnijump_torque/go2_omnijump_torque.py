@@ -94,6 +94,15 @@ class GO2OmniJumpTorque(GO2Torque):
         self.jump_min_pose_err = torch.full((self.num_envs,), 1e3, device=self.device)  # min |dof-q_squat| before takeoff (squat-POSE gate); 1e3 = not-yet-reached
         self.jump_min_contact = torch.full((self.num_envs,), 4, dtype=torch.long, device=self.device)  # min #feet in contact during the load (4 = no foot lifted yet); clean-takeoff re-plant detector
         self.jump_replant = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)           # a foot RE-CONTACTED during the load after lifting (stutter-step / run-up) -> clean-takeoff violation
+        # RUN-UP-STEP detector: the FORWARD distance a FRONT foot travels between two load-phase touchdowns.
+        # A clean jump re-plants the front feet in place (step ~0); a bounding run-up STEPS them forward
+        # (~0.27 m). Measures exactly that step; run_up_step latches once either front foot re-contacts
+        # > run_up_step_max ahead of where it lifted off. (Distinguishes a run-up STRIDE from an in-place
+        # re-plant / a pure body-slide, which jump_replant and base-creep cannot.)
+        self.front_foot_last_contact_x = torch.zeros(self.num_envs, 2, device=self.device)             # x of FL,FR at their last load-phase contact frame (the liftoff x)
+        self.front_foot_lifted = torch.zeros(self.num_envs, 2, dtype=torch.bool, device=self.device)   # a front foot has lifted during this load (arms the re-contact step measurement)
+        self.front_foot_incon_prev = torch.zeros(self.num_envs, 2, dtype=torch.bool, device=self.device) # front-foot load-phase contact state last step (for the re-contact edge)
+        self.run_up_step = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)            # latched: a front foot stepped forward > run_up_step_max between two load-phase touchdowns
         self.landing_plant_hold = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)     # consecutive all-4-feet-contact steps in the landing buffer (clean-landing settle detector)
         self.landing_planted = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)        # latched once the feet HELD (clean_landing_plant_hold steps) -> "settled, now watch for re-lift"
         self.landing_relift = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)         # a foot LIFTED after the clean plant (hop / shuffle-step) -> clean-landing violation
@@ -194,6 +203,10 @@ class GO2OmniJumpTorque(GO2Torque):
         self.jump_min_pose_err[env_ids] = 1e3  # squat-POSE gate: reset to not-yet-reached sentinel
         self.jump_min_contact[env_ids] = 4     # clean-takeoff re-plant detector: reset to "no foot lifted yet"
         self.jump_replant[env_ids] = False
+        self.run_up_step[env_ids] = False
+        self.front_foot_lifted[env_ids] = False
+        self.front_foot_incon_prev[env_ids] = False
+        self.front_foot_last_contact_x[env_ids] = 0.0
         self.landing_plant_hold[env_ids] = 0     # clean-landing detector: reset
         self.landing_planted[env_ids] = False
         self.landing_relift[env_ids] = False
@@ -440,6 +453,10 @@ class GO2OmniJumpTorque(GO2Torque):
         self.jump_min_pose_err[env_ids] = 1e3  # squat-POSE gate: reset to not-yet-reached sentinel
         self.jump_min_contact[env_ids] = 4     # clean-takeoff re-plant detector: reset to "no foot lifted yet"
         self.jump_replant[env_ids] = False
+        self.run_up_step[env_ids] = False
+        self.front_foot_lifted[env_ids] = False
+        self.front_foot_incon_prev[env_ids] = False
+        self.front_foot_last_contact_x[env_ids] = 0.0
         self.landing_plant_hold[env_ids] = 0     # clean-landing detector: reset
         self.landing_planted[env_ids] = False
         self.landing_relift[env_ids] = False
@@ -473,6 +490,10 @@ class GO2OmniJumpTorque(GO2Torque):
         self.jump_min_pose_err[env_ids] = 1e3  # squat-POSE gate: reset to not-yet-reached sentinel
         self.jump_min_contact[env_ids] = 4     # clean-takeoff re-plant detector: reset to "no foot lifted yet"
         self.jump_replant[env_ids] = False
+        self.run_up_step[env_ids] = False
+        self.front_foot_lifted[env_ids] = False
+        self.front_foot_incon_prev[env_ids] = False
+        self.front_foot_last_contact_x[env_ids] = 0.0
         self.landing_plant_hold[env_ids] = 0     # clean-landing detector: reset
         self.landing_planted[env_ids] = False
         self.landing_relift[env_ids] = False
@@ -552,6 +573,26 @@ class GO2OmniJumpTorque(GO2Torque):
         _n_contact = contact_filt.sum(dim=1)
         self.jump_replant |= loading & (self.jump_min_contact < 4) & (_n_contact > self.jump_min_contact)
         self.jump_min_contact = torch.where(loading, torch.minimum(self.jump_min_contact, _n_contact), self.jump_min_contact)
+        # RUN-UP-STEP (refines jump_replant with the STEP LENGTH): measure how far a FRONT foot moves forward
+        # between lifting off and re-planting during the load. front_x = world-x of FL,FR; front_con = front
+        # foot in load-phase contact. On a re-contact edge (was off, now on, after having lifted) the forward
+        # step = front_x - liftoff_x. Latch run_up_step if it exceeds run_up_step_max -> a bounding run-up
+        # (the front feet stride forward) is caught, while an in-place re-plant / body-slide (step ~0) is not.
+        front_x = self.rigid_body_states[:, self.feet_indices[:2], 0]                        # [N,2] FL,FR world x
+        # RAW contact at a FIRM threshold (NOT contact_filt): the 1 N / sticky contact_filt that jump_replant
+        # uses catches grazing / a 1-step contact hangover during the takeoff swing -> spurious "re-plants" that
+        # fire on clean jumps too. A firm raw threshold (~20 N = real weight-bearing) cleanly separates a
+        # planted foot from a swinging one, so only a true forward STRIDE (lift, swing, weight-bearing re-plant)
+        # is caught (validated: clean short jump ~0%, run-up ~100%).
+        _ct = float(getattr(self.cfg.rewards, "run_up_step_contact_thresh", 20.0))
+        front_con = (self.contact_forces[:, self.feet_indices[:2], 2] > _ct) & loading.unsqueeze(1)  # front foot weight-bearing during load
+        recontact = (~self.front_foot_incon_prev) & front_con & self.front_foot_lifted        # re-touch after a lift
+        step_fwd = front_x - self.front_foot_last_contact_x                                   # forward step vs liftoff x
+        _step_max = float(getattr(self.cfg.rewards, "run_up_step_max", 0.10))
+        self.run_up_step |= loading & torch.any(recontact & (step_fwd > _step_max), dim=1)
+        self.front_foot_lifted |= self.front_foot_incon_prev & (~front_con)                   # arm once a front foot lifts
+        self.front_foot_last_contact_x = torch.where(front_con, front_x, self.front_foot_last_contact_x)  # update AFTER step read
+        self.front_foot_incon_prev = front_con.clone()
         self.jump_min_base_z = torch.where(
             loading,
             torch.minimum(self.jump_min_base_z, self.root_states[:, 2]),
@@ -953,6 +994,15 @@ class GO2OmniJumpTorque(GO2Torque):
         # stutter only emerges much later, so the gate never blocks discovery. Off by default (other tasks).
         if getattr(self.cfg.rewards, "clean_takeoff_terminate", False):
             pass # Replaced by reward gate in _squat_deep_enough to prevent value function explosion
+        # RUN-UP-STEP TERMINATION (user 2026-07-13): forbid the bounding run-up. If a FRONT foot steps forward
+        # > run_up_step_max between two load-phase touchdowns (self.run_up_step), END the episode -> far reach
+        # can only come from ONE clean push, not a stride. HARD termination (not the soft reward-gate, which
+        # poisoned the value fn -> death spiral, [[project_collapse_clean_takeoff_gate]]). Gated on general_scale
+        # (PD essentially faded, mature pure-torque policy): firing while PD still assists (low general_scale)
+        # historically exploded the critic. An in-place re-plant / body-slide (step ~0) is NOT terminated.
+        if getattr(self.cfg.rewards, "run_up_step_terminate", False):
+            if float(self.general_scale) >= float(getattr(self.cfg.rewards, "run_up_step_min_gscale", 0.9)):
+                self.reset_buf |= self.run_up_step
         # PITCH/TILT TERMINATION (hard, user request): the soft pitch penalties got traded off and the body
         # still descends/lands NOSE-DOWN (front-feet-first, topple risk). End the episode if the base pitches
         # nose-down beyond a hard limit during the descent/landing -> "stay level into touchdown" becomes

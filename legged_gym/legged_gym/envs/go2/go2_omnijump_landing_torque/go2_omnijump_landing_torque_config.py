@@ -443,6 +443,22 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
                                             # all re-plant -> jump rewards ~0 -> the robot may sit in the squat
                                             # and never jump. WATCH squatQ/jump_flight in the first ~iter150; if
                                             # flight stays ~0 (no jumping), discovery died -> raise min_step.
+        # RUN-UP-STEP TERMINATION (user 2026-07-13): the policy reaches far by a BOUNDING RUN-UP -- the front
+        # feet STRIDE forward ~0.27 m (lift, swing, re-plant) before the real takeoff (measured: ~42% of the
+        # 1.1 m "reach" is this ground stride, only ~0.6 m is the true aerial jump). Forbid it: END the episode
+        # if a front foot steps forward > run_up_step_max between two load-phase touchdowns. Allowed (step ~0):
+        # in-place squat adjustment, a rearward squat, the base sliding forward over PLANTED feet during the push.
+        # Uses the front-foot STEP length (not the flaky binary jump_replant, which also fires on in-place
+        # re-plants / squat-contact jitter). HARD termination (soft reward-gate = death spiral). Gated on
+        # general_scale >= run_up_step_min_gscale so it hits a MATURE pure-torque policy (PD faded) -- firing
+        # under PD assist historically blew up the critic ([[project_collapse_clean_takeoff_gate]]).
+        # ⚠️ EXPECT: reach drops to the honest clean standing-jump (~0.6 m or less); far cmds get undershot
+        # (robot jumps clean-but-short instead of running up -> no forced collapse). WATCH successful_jump_rate /
+        # jump_flight after general_scale crosses 0.9 (~iter1000): a brief dip is fine, a crash-to-0 that does
+        # NOT recover = the run-up was load-bearing and cut too hard -> fall back to a soft step penalty.
+        run_up_step_terminate = True        # ON: terminate a bounding run-up stride
+        run_up_step_max = 0.10              # > this front-foot fwd step (m) between two load touchdowns = a run-up
+        run_up_step_min_gscale = 0.9        # only once PD ~faded (general_scale>=0.9, mature pure torque)
         # CLEAN-LANDING (user request): no small hop / shuffle-step after touchdown -> ONE clean settle. Once
         # all 4 feet HOLD contact for clean_landing_plant_hold steps (skips the impact chatter), any foot
         # lifting is penalized per-step by _reward_clean_landing (weight `clean_landing` in scales). PENALTY,
