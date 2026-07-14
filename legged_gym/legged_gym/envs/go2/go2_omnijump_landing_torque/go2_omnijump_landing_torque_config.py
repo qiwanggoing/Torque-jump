@@ -49,6 +49,16 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
     # proven ~0.30 default stance (inherited). Revisit launch depth later via a milder crouch +
     # stronger default_hip_pos if pursuing more height.
 
+    class env(GO2OmniJumpCurriculumTorqueCfg.env):
+        # fatigue REMOVED from the observation (2026-07-14). It was inherited from the walk task
+        # (go2_torque), where it PAIRS with a fatigue penalty to spread load across legs. Here that
+        # penalty is off, fatigue never derates torque (feedback-only, per SATA paper), and a one-shot
+        # jump barely accumulates it -> the 12 fatigue dims were an inert input the net just ignored.
+        # Drop them: 69 -> 57 obs, 109 -> 97 privileged. NOTE: the motor_fatigue tensor is still
+        # updated in _compute_torques (unchanged dynamics); only its observation slice is removed.
+        num_observations = 57
+        num_privileged_obs = 97
+
     class control(GO2OmniJumpCurriculumTorqueCfg.control):
         # Step H: turn ON the dual-head aux-stabiliser torque path in _compute_torques.
         # (Default False in the parent -> all other tasks with num_actions=12 are untouched.)
@@ -105,12 +115,8 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
         # Set landing_stage = 2 to open the ranges below; the env widens
         # command_ranges["lin_vel_x"/"lin_vel_y"] accordingly at init.
         landing_stage = 2                      # STAGE 2 ON: env widens lin_vel_x/y ranges to the disp ranges below.
-        landing_disp_x_stage2 = [0.5, 1.5]    # FIXED forward range. 0.65-2.0 REVERTED (2026-07-14): raising the min to 0.65
-                                              # (above the clean-jump ceiling) removed every cleanly-hittable NEAR target, so
-                                              # "don't jump" beat "clean short jump" -> raised collapse risk (run Jul13_19-46-39
-                                              # died). Back to 0.5-1.5 = there ARE near commands the policy can hit cleanly = a
-                                              # positive anchor for "clean jump = good" while the anti-run-up penalty works. Goal
-                                              # = FARTHER: every command is far, so
+        landing_disp_x_stage2 = [0.5, 1.5]    # FIXED forward range (2026-07-11, user): no curriculum-from-0 -> command
+                                              # 0.5-1.5 m directly from the start. Goal = FARTHER: every command is far, so
                                               # forward_reach (capped-at-command) always pays for jumping as far as possible,
                                               # pushing toward the physical reach instead of the conservative curriculum's
                                               # parked ~0.6 m. ⚠️ discovery: the jump is still bootstrapped by squat/launch/
@@ -447,36 +453,6 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
                                             # all re-plant -> jump rewards ~0 -> the robot may sit in the squat
                                             # and never jump. WATCH squatQ/jump_flight in the first ~iter150; if
                                             # flight stays ~0 (no jumping), discovery died -> raise min_step.
-        # RUN-UP-STEP TERMINATION (user 2026-07-13): the policy reaches far by a BOUNDING RUN-UP -- the front
-        # feet STRIDE forward ~0.27 m (lift, swing, re-plant) before the real takeoff (measured: ~42% of the
-        # 1.1 m "reach" is this ground stride, only ~0.6 m is the true aerial jump). Forbid it: END the episode
-        # if a front foot steps forward > run_up_step_max between two load-phase touchdowns. Allowed (step ~0):
-        # in-place squat adjustment, a rearward squat, the base sliding forward over PLANTED feet during the push.
-        # Uses the front-foot STEP length (not the flaky binary jump_replant, which also fires on in-place
-        # re-plants / squat-contact jitter). HARD termination (soft reward-gate = death spiral). Gated on
-        # general_scale >= run_up_step_min_gscale so it hits a MATURE pure-torque policy (PD faded) -- firing
-        # under PD assist historically blew up the critic ([[project_collapse_clean_takeoff_gate]]).
-        # ⚠️ EXPECT: reach drops to the honest clean standing-jump (~0.6 m or less); far cmds get undershot
-        # (robot jumps clean-but-short instead of running up -> no forced collapse). WATCH successful_jump_rate /
-        # jump_flight after general_scale crosses 0.9 (~iter1000): a brief dip is fine, a crash-to-0 that does
-        # NOT recover = the run-up was load-bearing and cut too hard -> fall back to a soft step penalty.
-        run_up_step_terminate = False       # OFF (2026-07-13): HARD termination death-spiraled -- at general_scale 0.9
-                                            # (iter~1000) it cut 100% of jumps (all run up) at once -> succ/squat/flight
-                                            # crashed to 0 and never recovered (run Jul13_13-38-38). Replaced by the
-                                            # SOFT per-step penalty `run_up_step` (scale below): the robot keeps
-                                            # completing jumps + all other rewards, just pays for the stride -> smooth
-                                            # gradient to shrink it, no cliff. See _reward_run_up_step.
-        run_up_step_max = 0.10              # > this front-foot fwd step (m) between two load touchdowns = a run-up stride
-        run_up_step_min_gscale = 0.9        # (only used if run_up_step_terminate re-enabled) general_scale gate for the hard cut
-        run_up_ramp_steps = 90000          # RAMP the run_up_step penalty from run_up_ramp_start_frac up to full over this many
-                                            # common-steps AFTER the succ-latch. 90000 = gate ~iter300(step28k) -> full ~iter2000
-                                            # (step118k), a SLOW ramp well past PD fade-out (~iter1000). Kills the step-shock that
-                                            # collapsed the static -150 (see run_up_step). 0 = ramp off (full scale at gate).
-        run_up_ramp_start_frac = 0.1333    # eff scale at the gate = this × run_up_step = 0.1333×(-150) = -20 (the known-SAFE weak
-                                            # level: the -20 run never collapsed). Starting at -20 (not 0) keeps anti-run-up pressure
-                                            # from the gate so the habit can't re-entrench during the early ramp; then it climbs to
-                                            # -150 by iter2000. Curve: iter300 -20, 500 -41, 700 -59(≈safe -60), 1000 -81, 1500 -115,
-                                            # 2000 -150. 0 = ramp starts from 0.
         # CLEAN-LANDING (user request): no small hop / shuffle-step after touchdown -> ONE clean settle. Once
         # all 4 feet HOLD contact for clean_landing_plant_hold steps (skips the impact chatter), any foot
         # lifting is penalized per-step by _reward_clean_landing (weight `clean_landing` in scales). PENALTY,
@@ -566,32 +542,6 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
                                              # point + apex height). CAUSE-side "jump FAR and HIGH" driver — the
                                              # closeness rewards can't push reach (diminishing returns at undershoot).
                                              # = old takeoff_vz weight (15). At dx=0 it reduces to takeoff_vz (safe).
-            run_up_step = -150.0             # SOFT ANTI-RUN-UP penalty (2026-07-13, replaces hard termination that
-                                             # death-spiraled). Dense per-step over loading+airborne, magnitude =
-                                             # meters a FRONT foot stepped forward beyond run_up_step_max (0.10) between
-                                             # two load touchdowns (see _reward_run_up_step). A clean jump / in-place
-                                             # re-plant = ~0 = no penalty; a bounding run-up (~0.27 m stride) pays.
-                                             # KNOB HISTORY (episode-return scale = rew_*×~10, max_ep_len_s≈10):
-                                             #  -20 (Jul13_15-11-53) OUTBID: 100% still ran up 0.18-0.29m, penalty only ~-1.5
-                                             #    return vs jump-contingent reward ~+29 -> policy happily ate it.
-                                             #  -150 (Jul13_19-46-39) COLLAPSED: the _takeoff_omega_on gate latches at succ
-                                             #    EMA>=0.80 as a STEP -> at iter316 it dumped ~-15 return at ONCE on a 100%-run-up
-                                             #    policy (jump-contingent reward then was only ~+7.6) -> value_loss spiked 0.53,
-                                             #    mean_reward +5->-12, policy FLED to "don't jump" (succ 0.83->0). Same cliff as
-                                             #    the hard termination, via penalty.
-                                             #  -60 (Jul13_20-32-42) PARTIAL: no collapse, run-up HALVED (stride 0.29->0.145)
-                                             #    but NOT killed (far-cmd runup>0.10 still ~100%, stride 0.14-0.17>threshold);
-                                             #    reach deflated 0.9->~0.7 (honest). -60 static was too weak to reach the 0.10 floor.
-                                             #  -150 + SLOW RAMP -20->-150 (2026-07-14, user): endpoint -150 but RAMPED from a
-                                             #    -20 floor at the gate (run_up_ramp_start_frac) up to -150 at ~iter2000
-                                             #    (run_up_ramp_steps=90000). Starts at the known-safe -20 (never collapsed) so
-                                             #    pressure exists from the gate but no step-shock; climbs SLOWLY past PD fade
-                                             #    (iter700 -59≈safe-60, iter1000 -81, iter1500 -115). Stride<=0.10 -> 0 cost for
-                                             #    ANY scale, so the strong endpoint just makes over-stride expensive.
-                                             # WATCH: rew_run_up_step (tensorboard ONLY -- rsl_rl console does NOT print it!) +
-                                             # succ/flight + value_loss, esp. LATE (~iter1500-2000) as the ramp nears full: a late
-                                             # collapse there => the stride has an irreducible floor -> lower the endpoint. Also
-                                             # eval_runup_reach 'runup(m)'. Paired with [0.5,1.5] cmd range (near-cmd clean anchor).
             launch_pitch_toward_vel = 0.0    # RE-DISABLED (2026-07-11, FALSIFIED = 6th dead lever). At weight 10 it DID
                                              # pitch the body nose-up (0%->100% nose-up, align 0.40->0.70) but the take-off
                                              # speed COLLAPSED 2.25->1.08 m/s and reach fell to ~0.35 m: a nose-up attitude
@@ -674,10 +624,7 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
             # 2026-07-11 LATERAL: default_hip_pos is now COMMAND-CONDITIONAL (see _reward_default_hip_pos override in the
             # landing env): full anti-slide hip lock for forward commands, relaxed toward 0 as |d_y| grows so a side jump can
             # abduct the hips. Its knob default_hip_pos_lat_ref lives in `class rewards` (NOT here in scales).
-            default_hip_pos = 2.0            # 4.0 -> 2.0 REVERT (2026-07-13): hip=4.0 证伪. 确定性 eval 铁证 4.0 虽把蹬地前髋叉开从
-                                             # +0.60 收到 +0.13(好看达成), 但把整条腿的蹬伸协调压垮: 距离跟踪没了(cmd0.5-1.2都跳固定0.80m,
-                                             # 只0.7中), 大腿募集 89%->62%, 够程 0.95->0.80m. 前髋叉开是"功能性"的(=前向速度来源), 硬锁髋直接跟
-                                             # takeoff_velocity_match 抢权重, PPO 退到"整洁固定小跳". 叉开接受为功能性, 不为好看牺牲够程. [1.0->2.0 史]:
+            default_hip_pos = 2.0            # 1.0 -> 2.0 (user 2026-07-05): 髋外展/内收 splay 差, 强锁髋(4个hip-abduction关节)到 default.
                                              # [0.3 -> 1.0 史]: the policy slid the front feet INWARD (hip adduction) to shuffle
                                              # forward momentum (the stutter/run-up morphed into a SLIDE once the re-plant
                                              # termination forbade stepping). default_hip_pos keeps the 4 hip-abduction joints
@@ -786,8 +733,8 @@ class GO2OmniJumpLandingTorqueCfgPPO(GO2OmniJumpCurriculumTorqueCfgPPO):
         load_run = -1
         checkpoint = -1
         resume_path = None
-        max_iterations = 5000    # 3000 -> 5000 (user 2026-07-13): longer consolidation window (best ckpt has been mid-run,
-                                 # ~1200-2100; 5000 gives room to see if far-command training keeps improving or plateaus).
+        max_iterations = 3000    # 10000 -> 3000 (user): PD fades early (~iter800), then plenty of room for the
+                                 # pure-torque policy to consolidate + dx_max to evolve (with the safety-revert).
         # entropy_coef ANNEALS 0.005 -> 0.001 at entropy_anneal_iter (HARD STEP, on_policy_runner.py:129-133).
         # MOVED 2800 -> 500 for the real-Go2 actuator. The 0.005 START is the ONLY force pushing action_std UP;
         # with the weak real calf the precise squat-jump can't survive high noise, so noise_std running away

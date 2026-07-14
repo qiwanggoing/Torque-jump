@@ -143,7 +143,6 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
         # penalizes the messy exploratory pushes before the robot can jump (that broke discovery before).
         self._succ_rate_ema = 0.0
         self._takeoff_omega_on = False
-        self._run_up_latch_step = -1   # common_step_counter at which _takeoff_omega_on latched (for run_up_step ramp)
         # HONEST far-band mastery: decaying accumulators for a TRUSTWORTHY smoothed far-band hit rate
         # (per-batch far_n ~0.1 -> landing_stable_hit_rate is pure noise). See _log_jump_episode_stats.
         self._farband_hit_acc = 0.0
@@ -294,8 +293,6 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
         if "successful_jump_rate" in self.extras.get("episode", {}):
             self._succ_rate_ema = 0.99 * self._succ_rate_ema + 0.01 * float(self.extras["episode"]["successful_jump_rate"])
             if self._succ_rate_ema >= float(getattr(self.cfg.rewards, "takeoff_omega_succ_gate", 0.80)):
-                if not self._takeoff_omega_on:
-                    self._run_up_latch_step = int(self.common_step_counter)   # anchor the run_up_step ramp here
                 self._takeoff_omega_on = True
         jump_den = torch.clamp(self.jump_starts[env_ids], min=1.0)
         self.extras["episode"]["landing_hit_rate"] = torch.mean(self.jump_target_hits[env_ids] / jump_den)
@@ -416,11 +413,27 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
     # slot (commands[:, :3] * commands_scale) is replaced by the yaw-frame
     # landing-point error  Ryaw^T (p* - p_base) = [fwd_err, lat_err, 0].
     # Only the yaw component of orientation is used so pitch/roll in flight do
-    # not scramble the target direction. 69-dim layout + mirror parity preserved.
+    # not scramble the target direction. 57-dim layout (fatigue removed) + mirror parity preserved.
     # ------------------------------------------------------------------ #
+    def _get_noise_scale_vec(self, cfg):
+        # Landing obs is 57-dim (fatigue dropped). Override the parent's 69-dim noise vector, whose
+        # hardcoded indices ([56:68]=fatigue, [68:69]=pd_alpha) would index out of range here.
+        # Layout: [0:3] lin_vel | [3:6] ang_vel | [6:9] gravity | [9:16] landing_err+cmd+height (0)
+        #         [16:28] dof_pos | [28:40] dof_vel | [40:44] foot_contact (0) | [44:56] torques (0)
+        #         [56:57] pd_alpha (0, deterministic curriculum scalar)
+        noise_vec = torch.zeros(self.cfg.env.num_observations, device=self.device)
+        self.add_noise = self.cfg.noise.add_noise
+        noise_scales = self.cfg.noise.noise_scales
+        noise_level = self.cfg.noise.noise_level
+        noise_vec[0:3] = noise_scales.lin_vel * noise_level * self.obs_scales.lin_vel
+        noise_vec[3:6] = noise_scales.ang_vel * noise_level * self.obs_scales.ang_vel
+        noise_vec[6:9] = noise_scales.gravity * noise_level
+        noise_vec[16:28] = noise_scales.dof_pos * noise_level * self.obs_scales.dof_pos
+        noise_vec[28:40] = noise_scales.dof_vel * noise_level * self.obs_scales.dof_vel
+        return noise_vec
+
     def compute_observations(self):
         foot_contact_obs = self._get_contact_state().float()
-        motor_fatigue = self.motor_fatigue.detach()
 
         err_world = self.landing_target[:, :2] - self.root_states[:, :2]
         _, _, yaw = get_euler_xyz(self.base_quat)
@@ -455,7 +468,6 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
                 self.dof_vel * self.obs_scales.dof_vel,
                 foot_contact_obs,
                 self.torques,
-                motor_fatigue,
                 self.pd_prior_alpha,
             ),
             dim=-1,
