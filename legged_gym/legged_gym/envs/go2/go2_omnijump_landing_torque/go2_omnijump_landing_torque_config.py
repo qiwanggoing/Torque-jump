@@ -556,7 +556,7 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
             stand_no_takeoff = 0.0           # DELETED (2026-07-11): jump-only config (jump_command_range=[1,1]) never
                                              # commands stand, so this never fires (contributed -0.002). Removed.
                                              # (was -5.0; only fired at cmd4<=0.5 which the jump-only config never samples.)
-            all_feet_airborne = 0.0          # 3 -> 0: DELETED/DISABLED (user 2026-07-14). Remove free air-time reward noise.
+            all_feet_airborne = 3.0          # RESTORED to baseline (2026-07-15): deleting it (Jul14_20-00-36) gave a stable but SHORT fixed jump (~0.6m flat, noise stuck at 0.074 = under-explored) -> it likely drives commit-to-far-jump exploration, not free points. Keep it; only orientation stays deleted.
                                              # so it can't be farmed by a tucked sprawl. The policy currently UNDERSHOOTS
                                              # the commanded apex (peak ~0.50 vs cmd ~0.55) -> this pushes it to the FULL
                                              # commanded height -> longer flight -> more reach when vx is calf-capped
