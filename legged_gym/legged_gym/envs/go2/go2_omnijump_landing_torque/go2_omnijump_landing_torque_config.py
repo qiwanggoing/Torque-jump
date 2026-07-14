@@ -492,13 +492,13 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
                                              # target per ON-GROUND leg, rear may dominate, front-first allowed) -> re-enable by
                                              # setting weight only AFTER re-verifying the "rear idle" premise with the FIXED
                                              # torque_diag (the old "rear thigh ~0.3" finding used the broken pd0/general_scale=1 eval).
-            projected_landing = 7.5          # 15 -> 7.5: HALVED (user 2026-07-14). Shave precision cluster so policy doesn't give up on far jumps.
+            projected_landing = 15.0         # REVERTED to baseline (2026-07-14): the B reweight didn't raise reach (peak ~1.0m = baseline) and made landing fragile -> collapse; keep only the A deletions.
                                              # rewards. After projected_peak 25->20, height earned ~0.60 (pp 0.38 + takeoff_vz 0.22) still
                                              # exceeded distance ~0.43 (landing_position + this), so raise the distance side above height.
                                              # The earlier 20->10 HALVING was to curb a "precise-but-topple" farm -- but stability is now SOLVED
                                              # (succ 0.90 via landing-focused pitch), so the topple risk is gone and boosting AIM is safe; it now
                                              # drives the forward launch toward the target. Discovery-safe (gated on a real jump peak>=0.40).
-            projected_peak = 10.0            # 20 -> 10: HALVED (user 2026-07-14). Reduce height farming / competition with jump distance.
+            projected_peak = 20.0            # REVERTED to baseline (2026-07-14): B reweight rolled back (no reach gain, added fragility).
                                              # rose 0.30->0.50 while landing accuracy collapsed to ~0 once far accuracy got hard) -- height is
                                              # the biggest reward AND paid regardless of landing, so the policy dumps accuracy for it. A mild 20%
                                              # cut eases that without gating. NOTE: an earlier 25->15 broke discovery, but that was BUNDLED with
@@ -508,7 +508,7 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
             successful_jump = 1000.0          # Jun23_01-23-30 baseline (reverted). Sparse so weight is big but earned
                                              # modest (~0.25; also graded by height_score). Coupled to landing accuracy
                                              # via _get_successful_jump_velocity_score (success_landing_min_score floor).
-            landing_position = 4.0           # 8 -> 4: HALVED (user 2026-07-14). Shave precision cluster together with projected_landing.
+            landing_position = 8.0           # REVERTED to baseline (2026-07-14): B reweight rolled back (no reach gain, added fragility).
                                              # (user principle). DENSE over the landing buffer (~150 steps, fixed touchdown xy). Target:
                                              # distance earned (landing_position + projected_landing ~0.67) > height (~0.60). Discovery-safe
                                              # (gated on a real jump peak>=0.40 -> can't be farmed by standing). VERIFY the earned balance in
@@ -528,7 +528,7 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
                                              # extra penalty. The real lever is the PD-fade slowdown (growth.x0), below.
             # ---- MERGED takeoff launch: velocity-VECTOR match (height + distance in one), replaces vertical-only ----
             takeoff_vertical_velocity = 0.0  # OFF: superseded by takeoff_velocity_match (which == it at dx=0)
-            takeoff_velocity_match = 30.0    # 15 -> 30: DOUBLED (user 2026-07-14). Core launch velocity driver alongside forward_reach.
+            takeoff_velocity_match = 15.0    # REVERTED to baseline (2026-07-14): 30 was too aggressive -> jumps too hard to land -> fragile to the noise hump (sj collapsed 0.98->0.34 mid-run). No reach gain either.
                                              # point + apex height). CAUSE-side "jump FAR and HIGH" driver — the
                                              # closeness rewards can't push reach (diminishing returns at undershoot).
                                              # = old takeoff_vz weight (15). At dx=0 it reduces to takeoff_vz (safe).
