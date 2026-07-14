@@ -710,6 +710,20 @@ class GO2OmniJumpLandingTorqueCfgPPO(GO2OmniJumpCurriculumTorqueCfgPPO):
         aux_head_dim = 12
 
     class algorithm(GO2OmniJumpCurriculumTorqueCfgPPO.algorithm):
+        # 57-dim obs mirror permutation (fatigue [56:68] removed from the observation).
+        # Same left-right structure as the parent's 69-dim table for blocks [0:56]
+        # (lin_vel, ang_vel, gravity, landing_err+cmd+height, dof_pos, dof_vel, foot_contact,
+        # torques -- all unchanged, they only reference indices < 56); the fatigue block is
+        # dropped and pd_alpha renumbered 68 -> 56. Must match num_observations=57 or the
+        # sym_loss matmul (obs_batch @ obs_perm_mat) shape-mismatches.
+        obs_permutation = [
+            0.0001, -1, 2, -3, 4, -5, -6, 7, 8, 9, -10, -11,
+            12, 13, 14, 15, -19, 20, 21, -16, 17, 18, -25, 26,
+            27, -22, 23, 24, -31, 32, 33, -28, 29, 30, -37, 38,
+            39, -34, 35, 36, 41, 40, 43, 42, -47, 48, 49, -44,
+            45, 46, -53, 54, 55, -50, 51, 52,
+            56,   # pd_alpha (scalar curriculum value, mirror-invariant; was 68)
+        ]
         sym_coef = 1.0   # was 0.5: match my_go2_jump — tighter LEFT-RIGHT mirror symmetry
                          # (front-rear is handled by the pushoff_leg_sync reward, not sym_loss)
         # Step H (final): τ_comp is OUT of the PPO action, so act_permutation stays 12-dim (inherited
