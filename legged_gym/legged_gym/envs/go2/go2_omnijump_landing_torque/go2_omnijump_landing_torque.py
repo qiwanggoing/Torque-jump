@@ -413,27 +413,11 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
     # slot (commands[:, :3] * commands_scale) is replaced by the yaw-frame
     # landing-point error  Ryaw^T (p* - p_base) = [fwd_err, lat_err, 0].
     # Only the yaw component of orientation is used so pitch/roll in flight do
-    # not scramble the target direction. 57-dim layout (fatigue removed) + mirror parity preserved.
+    # not scramble the target direction. 69-dim layout + mirror parity preserved.
     # ------------------------------------------------------------------ #
-    def _get_noise_scale_vec(self, cfg):
-        # Landing obs is 57-dim (fatigue dropped). Override the parent's 69-dim noise vector, whose
-        # hardcoded indices ([56:68]=fatigue, [68:69]=pd_alpha) would index out of range here.
-        # Layout: [0:3] lin_vel | [3:6] ang_vel | [6:9] gravity | [9:16] landing_err+cmd+height (0)
-        #         [16:28] dof_pos | [28:40] dof_vel | [40:44] foot_contact (0) | [44:56] torques (0)
-        #         [56:57] pd_alpha (0, deterministic curriculum scalar)
-        noise_vec = torch.zeros(self.cfg.env.num_observations, device=self.device)
-        self.add_noise = self.cfg.noise.add_noise
-        noise_scales = self.cfg.noise.noise_scales
-        noise_level = self.cfg.noise.noise_level
-        noise_vec[0:3] = noise_scales.lin_vel * noise_level * self.obs_scales.lin_vel
-        noise_vec[3:6] = noise_scales.ang_vel * noise_level * self.obs_scales.ang_vel
-        noise_vec[6:9] = noise_scales.gravity * noise_level
-        noise_vec[16:28] = noise_scales.dof_pos * noise_level * self.obs_scales.dof_pos
-        noise_vec[28:40] = noise_scales.dof_vel * noise_level * self.obs_scales.dof_vel
-        return noise_vec
-
     def compute_observations(self):
         foot_contact_obs = self._get_contact_state().float()
+        motor_fatigue = self.motor_fatigue.detach()
 
         err_world = self.landing_target[:, :2] - self.root_states[:, :2]
         _, _, yaw = get_euler_xyz(self.base_quat)
@@ -468,6 +452,7 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
                 self.dof_vel * self.obs_scales.dof_vel,
                 foot_contact_obs,
                 self.torques,
+                motor_fatigue,
                 self.pd_prior_alpha,
             ),
             dim=-1,
