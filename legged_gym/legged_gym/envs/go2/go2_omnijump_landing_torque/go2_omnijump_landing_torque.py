@@ -77,6 +77,14 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
     # ------------------------------------------------------------------ #
     def _init_buffers(self):
         super()._init_buffers()
+        # LATCH-GATED q_ground for the PD push-extension test. super() solved q_ground_target from
+        # ground_foot_height (the DEEP near-knee-limit pose, POST-latch). Discovery needs the BASELINE
+        # q_ground (the deep pose as the default jump pose blocks the squat), so keep both and swap on the
+        # success latch in _update_default_joint_pd_target.
+        self.q_ground_deep = self.q_ground_target.clone()
+        self.q_ground_predisc = self._solve_pose_from_foot_height(
+            float(getattr(self.cfg.rewards, "ground_foot_height_predisc", 0.30))
+        )
         # World-frame desired landing xy, set each reset from spawn + commanded
         # displacement. Initialised to spawn so step-0 obs is well-defined.
         self.landing_target = self.root_states[:, :2].clone()
@@ -403,6 +411,11 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
     # the residual PD prior AND the default_pos reward, which read self.default_joint_pd_target).
     # ------------------------------------------------------------------ #
     def _update_default_joint_pd_target(self):
+        # Gate the deep (near-knee-limit) q_ground to POST-latch: baseline pose during discovery, deep
+        # launch pose once the jump is discovered so the PD prior stops back-pulling the push extension.
+        self.q_ground_target = (
+            self.q_ground_deep if getattr(self, "_takeoff_omega_on", False) else self.q_ground_predisc
+        )
         super()._update_default_joint_pd_target()
         self.default_joint_pd_target[self.landing] = (
             self.default_dof_pos.expand(self.num_envs, -1)[self.landing]

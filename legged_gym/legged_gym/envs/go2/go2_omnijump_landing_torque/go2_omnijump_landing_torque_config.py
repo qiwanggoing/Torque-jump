@@ -226,6 +226,14 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
             ang_vel_yaw = [0.0, 0.0]
 
     class rewards(GO2OmniJumpCurriculumTorqueCfg.rewards):
+        # PD PUSH-EXTENSION TEST (2026-07-15, user): the PD prior pulls the push toward the MODERATE
+        # q_ground (foot 0.30), which RESISTS the maximal leg extension the launch needs. Deepen the
+        # POST-latch q_ground toward the knee limit so the PD instead pulls toward FULL extension during
+        # the push (no back-pull). Gated on the success latch (baseline 0.30 pre-latch) so the deep pose
+        # cannot re-break discovery. default_pos is UNCHANGED (baseline zeroing) to isolate this from the
+        # earlier default_pos/yaw confound.
+        ground_foot_height = 0.38            # POST-latch q_ground: near the ~-0.84 knee limit (max extension).
+        ground_foot_height_predisc = 0.30    # PRE-latch (discovery) q_ground = baseline.
         # Landing-reward kernel widths + real-jump gate for the sparse terminal term.
         sigma_pos_landing = 0.06            # Stage-2: TIGHTENED from 0.12. At 0.12 an in-place jump at cmd dx=0.40
                                             # (err=0.16) still earned exp(-1.33)=0.26, and at the avg cmd dx=0.20
