@@ -226,21 +226,6 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
             ang_vel_yaw = [0.0, 0.0]
 
     class rewards(GO2OmniJumpCurriculumTorqueCfg.rewards):
-        # DEEP-EXTENSION LAUNCH POSE (2026-07-15, user): make the extension-phase PD target q_ground a
-        # near-fully-extended straight-DOWN pose (NOT backward) so the PD prior AND default_pos (which
-        # tracks q_ground during push, un-zeroed in _reward_default_pos) reward extending INTO it instead
-        # of taxing extension BEYOND a bent pose. The backward-lean (foot_x -0.10) was REVERTED: it broke
-        # jump discovery (Jul15_14-23-15: peak stuck at 0.31, succ 0 -- the strong early PD prior pulled the
-        # legs back and killed the vertical push). foot_x stays under the hip; only the depth is raised.
-        #   ground_foot_x = 0.02 : foot under the hip (~straight-down push), same as nominal.
-        #   ground_foot_height = 0.37 : deeper than 0.30 -> straighter leg (calf ~-1.0, toward the -0.84 knee
-        #                               limit). Raise toward ~0.39 for calf nearer the limit if the push is
-        #                               still taxed. TUNABLE.
-        ground_foot_x = 0.02
-        ground_foot_height = 0.37            # POST-latch q_ground: deep straight-down extension (calf ~-1.0).
-        ground_foot_height_predisc = 0.30    # PRE-latch (discovery) q_ground = baseline. The deep pose from
-                                             # step 1 formed a "stand tall, don't squat" attractor (squat_qualified
-                                             # -> 0, no discovery). Gate the deep pose behind the succ latch.
         # Landing-reward kernel widths + real-jump gate for the sparse terminal term.
         sigma_pos_landing = 0.06            # Stage-2: TIGHTENED from 0.12. At 0.12 an in-place jump at cmd dx=0.40
                                             # (err=0.16) still earned exp(-1.33)=0.26, and at the avg cmd dx=0.20
@@ -507,13 +492,13 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
                                              # target per ON-GROUND leg, rear may dominate, front-first allowed) -> re-enable by
                                              # setting weight only AFTER re-verifying the "rear idle" premise with the FIXED
                                              # torque_diag (the old "rear thigh ~0.3" finding used the broken pd0/general_scale=1 eval).
-            projected_landing = 15.0         # REVERTED to baseline (2026-07-14): the B reweight didn't raise reach (peak ~1.0m = baseline) and made landing fragile -> collapse; keep only the A deletions.
+            projected_landing = 15.0         # 10 -> 15: BOOST. USER PRINCIPLE: jump-DISTANCE/accuracy rewards must OUTRANK jump-HEIGHT
                                              # rewards. After projected_peak 25->20, height earned ~0.60 (pp 0.38 + takeoff_vz 0.22) still
                                              # exceeded distance ~0.43 (landing_position + this), so raise the distance side above height.
                                              # The earlier 20->10 HALVING was to curb a "precise-but-topple" farm -- but stability is now SOLVED
                                              # (succ 0.90 via landing-focused pitch), so the topple risk is gone and boosting AIM is safe; it now
                                              # drives the forward launch toward the target. Discovery-safe (gated on a real jump peak>=0.40).
-            projected_peak = 20.0            # REVERTED to baseline (2026-07-14): B reweight rolled back (no reach gain, added fragility).
+            projected_peak = 20.0            # 25 -> 20: modest OVERALL height trim. Run trend showed the policy FARMS height (projected_peak
                                              # rose 0.30->0.50 while landing accuracy collapsed to ~0 once far accuracy got hard) -- height is
                                              # the biggest reward AND paid regardless of landing, so the policy dumps accuracy for it. A mild 20%
                                              # cut eases that without gating. NOTE: an earlier 25->15 broke discovery, but that was BUNDLED with
@@ -523,7 +508,7 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
             successful_jump = 1000.0          # Jun23_01-23-30 baseline (reverted). Sparse so weight is big but earned
                                              # modest (~0.25; also graded by height_score). Coupled to landing accuracy
                                              # via _get_successful_jump_velocity_score (success_landing_min_score floor).
-            landing_position = 8.0           # REVERTED to baseline (2026-07-14): B reweight rolled back (no reach gain, added fragility).
+            landing_position = 8.0           # 5 -> 8: BOOST (with projected_landing 15) so jump-DISTANCE/accuracy OUTRANKS height
                                              # (user principle). DENSE over the landing buffer (~150 steps, fixed touchdown xy). Target:
                                              # distance earned (landing_position + projected_landing ~0.67) > height (~0.60). Discovery-safe
                                              # (gated on a real jump peak>=0.40 -> can't be farmed by standing). VERIFY the earned balance in
@@ -543,7 +528,7 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
                                              # extra penalty. The real lever is the PD-fade slowdown (growth.x0), below.
             # ---- MERGED takeoff launch: velocity-VECTOR match (height + distance in one), replaces vertical-only ----
             takeoff_vertical_velocity = 0.0  # OFF: superseded by takeoff_velocity_match (which == it at dx=0)
-            takeoff_velocity_match = 15.0    # REVERTED to baseline (2026-07-14): 30 was too aggressive -> jumps too hard to land -> fragile to the noise hump (sj collapsed 0.98->0.34 mid-run). No reach gain either.
+            takeoff_velocity_match = 15.0    # reward takeoff velocity matching the ballistic launch to (landing
                                              # point + apex height). CAUSE-side "jump FAR and HIGH" driver — the
                                              # closeness rewards can't push reach (diminishing returns at undershoot).
                                              # = old takeoff_vz weight (15). At dx=0 it reduces to takeoff_vz (safe).
@@ -571,7 +556,7 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
             stand_no_takeoff = 0.0           # DELETED (2026-07-11): jump-only config (jump_command_range=[1,1]) never
                                              # commands stand, so this never fires (contributed -0.002). Removed.
                                              # (was -5.0; only fired at cmd4<=0.5 which the jump-only config never samples.)
-            all_feet_airborne = 3.0          # RESTORED to baseline (2026-07-15): deleting it (Jul14_20-00-36) gave a stable but SHORT fixed jump (~0.6m flat, noise stuck at 0.074 = under-explored) -> it likely drives commit-to-far-jump exploration, not free points. Keep it; only orientation stays deleted.
+            all_feet_airborne = 3.0          # 2.0 -> 3.0: more air-time pressure. Gated (squat_deep + height_progress)
                                              # so it can't be farmed by a tucked sprawl. The policy currently UNDERSHOOTS
                                              # the commanded apex (peak ~0.50 vs cmd ~0.55) -> this pushes it to the FULL
                                              # commanded height -> longer flight -> more reach when vx is calf-capped
@@ -638,7 +623,7 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
                                              # in the frontal plane (no inward collapse). Safe: a clean forward jump is sagittal
                                              # (thigh/calf) and never needs hip abduction. Tune up (1.5-2.0) if the slide persists;
                                              # if it persists even then it's pure ground-slip (not hip) -> add a foot_slip penalty.
-            orientation = -3.5               # RESTORED to c87a1c7 baseline (2026-07-15): the orientation-only run (Jul15) was a SHORT-jump seed (eval 0.62m flat, same as the no-airborne run) = the short reach is SEED VARIANCE, not the deletions. Back to pure baseline for the backward-push-pose experiment.
+            orientation = -3.5               # -3.0 -> -3.5 (DISCOVERY-SAFE: -4.5 + the strong default_pos made not-jumping
                                              # too comfortable from scratch, Jun09_11-29-05). Mild strengthen of the level-body
                                              # hold (late training showed g_xy^2 creeping 0.017->0.038 as the policy traded
                                              # attitude for jump magnitude). Vertical (Stage1) jump wants body level throughout.

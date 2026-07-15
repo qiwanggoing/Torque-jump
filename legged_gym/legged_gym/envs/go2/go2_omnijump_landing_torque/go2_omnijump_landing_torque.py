@@ -77,16 +77,6 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
     # ------------------------------------------------------------------ #
     def _init_buffers(self):
         super()._init_buffers()
-        # LATCH-GATED q_ground launch pose. super() solved q_ground_target from ground_foot_height (the
-        # DEEP extension pose, used POST-latch). Discovery needs the BASELINE q_ground: the tall deep pose
-        # is the PD target for the push/default jump phase and, applied from step 1, forms a "stand tall,
-        # don't squat" attractor that blocks the countermovement (squat_qualified -> 0). So keep both and
-        # swap on the success latch in _update_default_joint_pd_target.
-        self.q_ground_deep = self.q_ground_target.clone()
-        self.q_ground_predisc = self._solve_pose_from_foot_height(
-            float(getattr(self.cfg.rewards, "ground_foot_height_predisc", 0.30)),
-            foot_x=float(getattr(self.cfg.rewards, "ik_nominal_foot_x", 0.02)),
-        )
         # World-frame desired landing xy, set each reset from spawn + commanded
         # displacement. Initialised to spawn so step-0 obs is well-defined.
         self.landing_target = self.root_states[:, :2].clone()
@@ -413,11 +403,6 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
     # the residual PD prior AND the default_pos reward, which read self.default_joint_pd_target).
     # ------------------------------------------------------------------ #
     def _update_default_joint_pd_target(self):
-        # Gate the deep-extension q_ground to POST-latch: baseline pose during discovery, deep launch pose
-        # once the jump is discovered (succ EMA >= 0.80). super() reads self.q_ground_target for the push.
-        self.q_ground_target = (
-            self.q_ground_deep if getattr(self, "_takeoff_omega_on", False) else self.q_ground_predisc
-        )
         super()._update_default_joint_pd_target()
         self.default_joint_pd_target[self.landing] = (
             self.default_dof_pos.expand(self.num_envs, -1)[self.landing]
@@ -707,16 +692,7 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
         # make not-jumping comfortable). Still zeroed during the ground push-off extension (legs must extend beyond
         # q_ground to launch) and the squat-DOWN (mid-fold). NOTE: memory says -0.7 once caused noise runaway --
         # watch noise_std; raise back toward -0.7/-1.0 if the pose anchor gets too loose.
-        # DISCOVERY-SAFE PD/default_pos ALIGNMENT (2026-07-15, user): default_pos tracks the phase PD target
-        # q* (the same target the PD prior pulls toward), but the full (no-zeroing) alignment is GATED on the
-        # success latch -- applying it from step 1 collapsed jump discovery TWICE (peak stuck ~0.30, succ 0).
-        # BEFORE the latch: zeroed during the push-off extension and the squat-DOWN (the proven discovery-safe
-        # design; the jump legitimately deviates from q_squat/q_ground there). AFTER the latch (succ EMA >=
-        # 0.80 -> jump already discovered): full activation, so it also rewards holding the extended q_ground
-        # launch pose through the push.
         l1 = torch.sum(torch.abs(self.dof_pos - self.default_joint_pd_target), dim=1)
-        if getattr(self, "_takeoff_omega_on", False):
-            return l1
         pushoff = self.jumping_state & (~self.has_taken_off) & (self.root_states[:, 9] > 0.0)
         squat_down = self.jumping_state & (~self.has_taken_off) & (~self._squat_deep_enough())
         return torch.where(pushoff | squat_down, torch.zeros_like(l1), l1)
