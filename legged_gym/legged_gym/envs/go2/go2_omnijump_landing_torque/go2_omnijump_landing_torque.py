@@ -77,14 +77,11 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
     # ------------------------------------------------------------------ #
     def _init_buffers(self):
         super()._init_buffers()
-        # LATCH-GATED q_ground for the PD push-extension test. super() solved q_ground_target from
-        # ground_foot_height (the DEEP near-knee-limit pose, POST-latch). Discovery needs the BASELINE
-        # q_ground (the deep pose as the default jump pose blocks the squat), so keep both and swap on the
-        # success latch in _update_default_joint_pd_target.
-        self.q_ground_deep = self.q_ground_target.clone()
-        self.q_ground_predisc = self._solve_pose_from_foot_height(
-            float(getattr(self.cfg.rewards, "ground_foot_height_predisc", 0.30))
-        )
+        # Reliable-reach (dx limit) diagnostic: smoothed per-command-distance STABLE-hit rate, so training
+        # directly shows the FARTHEST commanded distance the policy still lands stably. LOGGING ONLY -- it
+        # writes to extras["episode"], never touches rewards/torques/state, so training == c87a1c7.
+        self._reach_bin_edges = torch.arange(0.5, 1.501, 0.1, device=self.device)
+        self._reach_bin_ema = torch.zeros(int(self._reach_bin_edges.numel()) - 1, device=self.device)
         # World-frame desired landing xy, set each reset from spawn + commanded
         # displacement. Initialised to spawn so step-0 obs is well-defined.
         self.landing_target = self.root_states[:, :2].clone()
@@ -336,6 +333,24 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
         # pd_alpha = 0.5*(1-general_scale). Watch this to SEE when PD actually fades (target: 1.0 by ~iter1200).
         self.extras["episode"]["curriculum_general_scale"] = torch.tensor(float(self.general_scale), device=self.device)
 
+        # --- RELIABLE REACH (dx limit): the farthest commanded distance the policy still lands STABLY
+        #     (hit + upright). Bin the finished jumps by commanded distance, keep a slow per-bin EMA of the
+        #     stable-hit rate, and report the largest bin center whose rate >= threshold. This is the "how
+        #     far can it reliably reach" number to WATCH during training (Episode/reliable_reach_dx). It is
+        #     over the noisy TRAINING distribution -> optimistic vs the deterministic eval, but tracks the
+        #     trend; scripts/eval_landing_sweep.py remains the ground truth. ---
+        dxc = self._last_jump_cmd_dx[env_ids]
+        bidx = torch.bucketize(dxc.contiguous(), self._reach_bin_edges) - 1
+        for b in range(int(self._reach_bin_ema.numel())):
+            m = bidx == b
+            if bool(m.any()):
+                self._reach_bin_ema[b] = 0.9 * self._reach_bin_ema[b] + 0.1 * stable_hit[m].float().mean()
+        thr = float(getattr(self.cfg.commands, "reliable_reach_hit_thr", 0.6))
+        centers = 0.5 * (self._reach_bin_edges[:-1] + self._reach_bin_edges[1:])
+        ok = self._reach_bin_ema >= thr
+        reliable = float(centers[ok].max().item()) if bool(ok.any()) else 0.0
+        self.extras["episode"]["reliable_reach_dx"] = torch.tensor(reliable, dtype=torch.float, device=self.device)
+
     def _update_dx_curriculum(self):
         # Advance the forward dx range ONLY once the policy has TRULY mastered the far end of the
         # current range -- i.e. a CUMULATIVE far-band stable-hit rate (same jump lands on target AND
@@ -411,11 +426,6 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
     # the residual PD prior AND the default_pos reward, which read self.default_joint_pd_target).
     # ------------------------------------------------------------------ #
     def _update_default_joint_pd_target(self):
-        # Gate the deep (near-knee-limit) q_ground to POST-latch: baseline pose during discovery, deep
-        # launch pose once the jump is discovered so the PD prior stops back-pulling the push extension.
-        self.q_ground_target = (
-            self.q_ground_deep if getattr(self, "_takeoff_omega_on", False) else self.q_ground_predisc
-        )
         super()._update_default_joint_pd_target()
         self.default_joint_pd_target[self.landing] = (
             self.default_dof_pos.expand(self.num_envs, -1)[self.landing]
