@@ -692,10 +692,11 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
         # make not-jumping comfortable). Still zeroed during the ground push-off extension (legs must extend beyond
         # q_ground to launch) and the squat-DOWN (mid-fold). NOTE: memory says -0.7 once caused noise runaway --
         # watch noise_std; raise back toward -0.7/-1.0 if the pose anchor gets too loose.
-        l1 = torch.sum(torch.abs(self.dof_pos - self.default_joint_pd_target), dim=1)
-        pushoff = self.jumping_state & (~self.has_taken_off) & (self.root_states[:, 9] > 0.0)
-        squat_down = self.jumping_state & (~self.has_taken_off) & (~self._squat_deep_enough())
-        return torch.where(pushoff | squat_down, torch.zeros_like(l1), l1)
+        # FULL PD / default_pos ALIGNMENT (2026-07-15, user): NO phase is zeroed. default_pos penalizes the
+        # L1 deviation from the phase-dependent PD target q* in EVERY phase, so it EXACTLY mirrors the pose
+        # the PD prior pulls toward (squat / push / air / preland / land / idle) -- one target for both the
+        # scaffold and the reward, including the rear-extended q_ground backward-push launch pose.
+        return torch.sum(torch.abs(self.dof_pos - self.default_joint_pd_target), dim=1)
 
     def _reward_grounded_jump(self):
         # MUST-LAUNCH penalty (landing override) -- CLOSE the "retreat to NOT jumping" escape. Diagnosis (Jun21

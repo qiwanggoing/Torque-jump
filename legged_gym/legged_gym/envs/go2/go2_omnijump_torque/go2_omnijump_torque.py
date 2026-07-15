@@ -114,7 +114,10 @@ class GO2OmniJumpTorque(GO2Torque):
         self.peak_height_sum = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
         self.jump_evaluations = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
 
-        self.q_ground_target = self._solve_pose_from_foot_height(self.cfg.rewards.ground_foot_height)
+        self.q_ground_target = self._solve_pose_from_foot_height(
+            self.cfg.rewards.ground_foot_height,
+            foot_x=float(getattr(self.cfg.rewards, "ground_foot_x", self.cfg.rewards.ik_nominal_foot_x)),
+        )
         self.q_air_target = self._solve_pose_from_foot_height(self.cfg.rewards.air_foot_height)
         self.q_pre_target = self._solve_pose_from_foot_height(self.cfg.rewards.prelanding_foot_height)
         self.q_squat_target = self._solve_pose_from_foot_height(
@@ -968,10 +971,13 @@ class GO2OmniJumpTorque(GO2Torque):
             post_jump_stand_steps = int(getattr(self.cfg.rewards, "post_jump_stand_steps", 80))
             self.reset_buf |= self.single_jump_command_done & (self.post_jump_step_counter >= post_jump_stand_steps)
 
-    def _solve_pose_from_foot_height(self, foot_height):
+    def _solve_pose_from_foot_height(self, foot_height, foot_x=None):
         l1 = self.cfg.rewards.ik_thigh_length
         l2 = self.cfg.rewards.ik_calf_length
-        x = self.cfg.rewards.ik_nominal_foot_x
+        # foot_x = forward (+) / backward (-) offset of the foot under the hip. Default = the nominal
+        # (~straight-down) stance; a NEGATIVE value places the foot BEHIND the hip -> a rear-extended
+        # "backward push" leg (used for the q_ground launch pose).
+        x = self.cfg.rewards.ik_nominal_foot_x if foot_x is None else foot_x
         z = -foot_height
         reach = np.clip(np.sqrt(x * x + z * z), 1e-4, l1 + l2 - 1e-4)
         cos_knee = np.clip((reach * reach - l1 * l1 - l2 * l2) / (2.0 * l1 * l2), -1.0, 1.0)

@@ -226,6 +226,14 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
             ang_vel_yaw = [0.0, 0.0]
 
     class rewards(GO2OmniJumpCurriculumTorqueCfg.rewards):
+        # BACKWARD-PUSH LAUNCH POSE (2026-07-15, user): make the extension-phase PD target q_ground a
+        # rear-extended pose so the PD prior AND default_pos (which tracks q_ground during push, now
+        # un-zeroed in _reward_default_pos) guide a backward-directed push -> forward reaction impulse.
+        #   ground_foot_x   = -0.10 : foot 10 cm BEHIND the hip (was +0.02 ~straight down) -> thigh pitched back.
+        #   ground_foot_height = 0.37 : deeper than 0.30 -> straighter leg (calf near the ~-0.84 knee limit),
+        #                               so thigh+calf+base approach a straight backward line. TUNABLE knobs.
+        ground_foot_x = -0.10
+        ground_foot_height = 0.37
         # Landing-reward kernel widths + real-jump gate for the sparse terminal term.
         sigma_pos_landing = 0.06            # Stage-2: TIGHTENED from 0.12. At 0.12 an in-place jump at cmd dx=0.40
                                             # (err=0.16) still earned exp(-1.33)=0.26, and at the avg cmd dx=0.20
@@ -623,7 +631,7 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
                                              # in the frontal plane (no inward collapse). Safe: a clean forward jump is sagittal
                                              # (thigh/calf) and never needs hip abduction. Tune up (1.5-2.0) if the slide persists;
                                              # if it persists even then it's pure ground-slip (not hip) -> add a foot_slip penalty.
-            orientation = 0.0                # -3.5 -> 0: DELETED/DISABLED (user 2026-07-14). Redundant with attitude/pitch penalties.
+            orientation = -3.5               # RESTORED to c87a1c7 baseline (2026-07-15): the orientation-only run (Jul15) was a SHORT-jump seed (eval 0.62m flat, same as the no-airborne run) = the short reach is SEED VARIANCE, not the deletions. Back to pure baseline for the backward-push-pose experiment.
                                              # too comfortable from scratch, Jun09_11-29-05). Mild strengthen of the level-body
                                              # hold (late training showed g_xy^2 creeping 0.017->0.038 as the policy traded
                                              # attitude for jump magnitude). Vertical (Stage1) jump wants body level throughout.
