@@ -226,13 +226,17 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
             ang_vel_yaw = [0.0, 0.0]
 
     class rewards(GO2OmniJumpCurriculumTorqueCfg.rewards):
-        # BACKWARD-PUSH LAUNCH POSE (2026-07-15, user): make the extension-phase PD target q_ground a
-        # rear-extended pose so the PD prior AND default_pos (which tracks q_ground during push, now
-        # un-zeroed in _reward_default_pos) guide a backward-directed push -> forward reaction impulse.
-        #   ground_foot_x   = -0.10 : foot 10 cm BEHIND the hip (was +0.02 ~straight down) -> thigh pitched back.
-        #   ground_foot_height = 0.37 : deeper than 0.30 -> straighter leg (calf near the ~-0.84 knee limit),
-        #                               so thigh+calf+base approach a straight backward line. TUNABLE knobs.
-        ground_foot_x = -0.10
+        # DEEP-EXTENSION LAUNCH POSE (2026-07-15, user): make the extension-phase PD target q_ground a
+        # near-fully-extended straight-DOWN pose (NOT backward) so the PD prior AND default_pos (which
+        # tracks q_ground during push, un-zeroed in _reward_default_pos) reward extending INTO it instead
+        # of taxing extension BEYOND a bent pose. The backward-lean (foot_x -0.10) was REVERTED: it broke
+        # jump discovery (Jul15_14-23-15: peak stuck at 0.31, succ 0 -- the strong early PD prior pulled the
+        # legs back and killed the vertical push). foot_x stays under the hip; only the depth is raised.
+        #   ground_foot_x = 0.02 : foot under the hip (~straight-down push), same as nominal.
+        #   ground_foot_height = 0.37 : deeper than 0.30 -> straighter leg (calf ~-1.0, toward the -0.84 knee
+        #                               limit). Raise toward ~0.39 for calf nearer the limit if the push is
+        #                               still taxed. TUNABLE.
+        ground_foot_x = 0.02
         ground_foot_height = 0.37
         # Landing-reward kernel widths + real-jump gate for the sparse terminal term.
         sigma_pos_landing = 0.06            # Stage-2: TIGHTENED from 0.12. At 0.12 an in-place jump at cmd dx=0.40
