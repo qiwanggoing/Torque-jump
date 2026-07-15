@@ -237,7 +237,10 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
         #                               limit). Raise toward ~0.39 for calf nearer the limit if the push is
         #                               still taxed. TUNABLE.
         ground_foot_x = 0.02
-        ground_foot_height = 0.37
+        ground_foot_height = 0.37            # POST-latch q_ground: deep straight-down extension (calf ~-1.0).
+        ground_foot_height_predisc = 0.30    # PRE-latch (discovery) q_ground = baseline. The deep pose from
+                                             # step 1 formed a "stand tall, don't squat" attractor (squat_qualified
+                                             # -> 0, no discovery). Gate the deep pose behind the succ latch.
         # Landing-reward kernel widths + real-jump gate for the sparse terminal term.
         sigma_pos_landing = 0.06            # Stage-2: TIGHTENED from 0.12. At 0.12 an in-place jump at cmd dx=0.40
                                             # (err=0.16) still earned exp(-1.33)=0.26, and at the avg cmd dx=0.20
