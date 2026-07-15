@@ -723,7 +723,7 @@ class GO2OmniJumpLandingTorqueCfgPPO(GO2OmniJumpCurriculumTorqueCfgPPO):
         load_run = -1
         checkpoint = -1
         resume_path = None
-        max_iterations = 3000    # 10000 -> 3000 (user): PD fades early (~iter800), then plenty of room for the
+        max_iterations = 5000    # 3000 -> 5000 (user 2026-07-16). PD fades early (~iter800), then plenty of room for the
                                  # pure-torque policy to consolidate + dx_max to evolve (with the safety-revert).
         # entropy_coef ANNEALS 0.005 -> 0.001 at entropy_anneal_iter (HARD STEP, on_policy_runner.py:129-133).
         # MOVED 2800 -> 500 for the real-Go2 actuator. The 0.005 START is the ONLY force pushing action_std UP;
