@@ -77,7 +77,7 @@ def train_step_count_at_iter(target_iter, W, X, sf, mf, dt, nspe):
 # Defaults are conservative for deterministic/no-noise play. Override without
 # editing this file, e.g.:
 #   PLAY_LANDING_DX=0.7 PLAY_LANDING_HEIGHT=0.7 python legged_gym/scripts/play_landing.py --task=go2_omnijump_landing_torque
-DX = _env_float("PLAY_LANDING_DX", 1.1)       # forward landing displacement (m). 新模型准确到 0.8; 0.9+ 够不到. 改数字试别的.
+DX = _env_float("PLAY_LANDING_DX", 1.2)       # forward landing displacement (m). 新模型准确到 0.8; 0.9+ 够不到. 改数字试别的.
 DY = _env_float("PLAY_LANDING_DY", 0.0)       # lateral landing displacement (m)
 HEIGHT = _env_float("PLAY_LANDING_HEIGHT", 0.5)  # jump-height command. ⚠️ 新模型训练范围 [0.4,0.6], 别超 0.6 (0.7=OOD假崩)
 ADDED_MASS = _env_float("PLAY_LANDING_ADDED_MASS", 0.0)  # kg added to BASE. 0.0 = URDF标称 = 真机 = 新模型([-1,+1])训练中心.

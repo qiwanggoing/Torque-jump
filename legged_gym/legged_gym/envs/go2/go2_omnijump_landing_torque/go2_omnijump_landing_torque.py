@@ -788,11 +788,15 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
         # pays nothing -> it does not bias toward shorter/lower jumps. yaw (w_z) is excluded because it
         # may be commanded in Stage 2.
         # ONE-SIDED pitch rate (user): roll stays symmetric (any roll is bad), but the PITCH rate is penalized
-        # only in the NOSE-DOWN direction (base_ang_vel[:,1] < 0 = nose-down spin). The nose-UP launch rotation
-        # (rear-hip-driven) is FREE -> unlocks the pitch-gated rear-hip potential without imparting a forward
-        # face-plant spin. (nose-down: projected_gravity[0]>0 AND base_ang_vel[1]<0, confirmed in torque_diag.)
+        # only in the NOSE-DOWN direction. The nose-UP launch rotation (rear-hip-driven, pulling the nose back
+        # up) is FREE -> unlocks the pitch-gated rear-hip potential without imparting a forward face-plant spin.
+        # SIGN FIX (2026-07-24): pitch_sign_check.py measured corr(base_ang_vel[1], d(pitch)/dt)=+0.997, i.e.
+        # base_ang_vel[1] > 0 = NOSE-DOWN rotation (pitch grows), base_ang_vel[1] < 0 = NOSE-UP recovery. The old
+        # code clamped(-base_ang_vel[1]) => it was penalizing NOSE-UP recovery and freeing the nose-down dive,
+        # the exact INVERSE of the intent -- and a direct cause of the +12/+21 deg nose-down takeoff. Corrected
+        # to clamp(+base_ang_vel[1], min=0): penalize the nose-down dive spin, leave the nose-up recovery free.
         roll_sq = torch.square(self.base_ang_vel[:, 0])
-        nose_down_rate = torch.square(torch.clamp(-self.base_ang_vel[:, 1], min=0.0))
+        nose_down_rate = torch.square(torch.clamp(self.base_ang_vel[:, 1], min=0.0))
         ang_vel_sq = roll_sq + nose_down_rate
         if getattr(self, "_takeoff_omega_on", False):
             # POST-DISCOVERY (succ_rate gate latched): ALSO penalize ω during the PUSH/extension (where the
