@@ -153,6 +153,27 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
         self._farband_hit_acc = 0.0
         self._farband_n_acc = 0.0
 
+        # OBSERVATION HISTORY (2026-07-27, OmniNet-style): ring of the last history_length single-frame
+        # observations. compute_observations rolls it every substep and feeds the flattened stack to the
+        # policy; _prime_history refills it with the current frame on reset (no zero-padding transient).
+        # All obs-component tensors (torques/motor_fatigue/pd_prior_alpha/dof/root_states) are already
+        # allocated by super()._init_buffers() above, so priming here is safe.
+        self.obs_history = torch.zeros(
+            self.num_envs, int(self.cfg.env.history_length), int(self.cfg.env.num_single_obs),
+            dtype=torch.float, device=self.device,
+        )
+        self.clean_single_obs_buf = torch.zeros(
+            self.num_envs, int(self.cfg.env.num_single_obs), dtype=torch.float, device=self.device,
+        )
+        # motor_fatigue / torques are allocated by go2_torque.__init__ AFTER super().__init__() (which runs
+        # this _init_buffers), so they don't exist yet at prime time -> allocate zeros defensively (go2_torque
+        # re-zeros them right after, so this is harmless and matches the "no torque applied yet" init state).
+        if not hasattr(self, "motor_fatigue"):
+            self.motor_fatigue = torch.zeros(self.num_envs, self.num_dofs, dtype=torch.float, device=self.device)
+        if not hasattr(self, "torques"):
+            self.torques = torch.zeros(self.num_envs, self.num_dofs, dtype=torch.float, device=self.device)
+        self._prime_history(torch.arange(self.num_envs, device=self.device))
+
     # ------------------------------------------------------------------ #
     # Reset — set landing target = spawn xy + commanded displacement.
     # The robot spawns facing +x (identity heading) so the displacement maps
@@ -167,6 +188,109 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
         self.landing_target[env_ids, 0] = self.env_origins[env_ids, 0] + init_x + self.commands[env_ids, 0]
         self.landing_target[env_ids, 1] = self.env_origins[env_ids, 1] + init_y + self.commands[env_ids, 1]
         self._update_dx_curriculum()
+        # OBS HISTORY: refill the just-reset envs' history with their fresh single-frame obs (commands +
+        # landing_target above are now the reset values), so stale pre-reset frames don't leak in.
+        if hasattr(self, "obs_history"):
+            self._prime_history(env_ids)
+
+    # ------------------------------------------------------------------ #
+    # Observation history (OmniNet-style stacking). These OVERRIDE the parent's single-frame obs path:
+    # build the 69-dim single frame, roll it into obs_history (once per fixed-dt substep), and feed the
+    # flattened history_length*69 stack to the policy. Critic gets the stacked obs + the privileged extras.
+    # ------------------------------------------------------------------ #
+    def _get_single_observation(self):
+        """The 69-dim single-frame observation (identical content to the landing task's OLD flat obs_buf):
+        slots 9:12 are the YAW-FRAME LANDING ERROR (err_fwd, err_lat, 0), NOT the raw command."""
+        foot_contact_obs = self._get_contact_state().float()
+        motor_fatigue = self.motor_fatigue.detach()
+        err_world = self.landing_target[:, :2] - self.root_states[:, :2]
+        _, _, yaw = get_euler_xyz(self.base_quat)
+        cos_y, sin_y = torch.cos(yaw), torch.sin(yaw)
+        err_fwd = cos_y * err_world[:, 0] + sin_y * err_world[:, 1]
+        err_lat = -sin_y * err_world[:, 0] + cos_y * err_world[:, 1]
+        landing_err_obs = torch.stack((err_fwd, err_lat, torch.zeros_like(err_fwd)), dim=-1)
+        height_obs = torch.cat(
+            (
+                self.root_states[:, 2:3] * 2.0,
+                (self.commands[:, 3:4] - self.root_states[:, 2:3]) * 2.0,
+            ),
+            dim=-1,
+        )
+        single = torch.cat(
+            (
+                self.base_lin_vel * self.obs_scales.lin_vel,
+                self.base_ang_vel * self.obs_scales.ang_vel,
+                self.projected_gravity,
+                landing_err_obs,
+                self.commands[:, 3:4] * 2.0,
+                self.commands[:, 4:5],
+                height_obs,
+                (self.dof_pos - self.default_dof_pos) * self.obs_scales.dof_pos,
+                self.dof_vel * self.obs_scales.dof_vel,
+                foot_contact_obs,
+                self.torques,
+                motor_fatigue,
+                self.pd_prior_alpha,
+            ),
+            dim=-1,
+        )
+        return torch.nan_to_num(single, nan=0.0, posinf=100.0, neginf=-100.0)
+
+    def _prime_history(self, env_ids):
+        """Fill the given envs' history with the current single frame (reset / init) -- no zero transient."""
+        if len(env_ids) == 0:
+            return
+        single = self._get_single_observation()
+        n = int(self.cfg.env.history_length)
+        self.obs_history[env_ids] = single[env_ids].unsqueeze(1).repeat(1, n, 1)
+        self.clean_single_obs_buf[env_ids] = single[env_ids]
+
+    def compute_observations(self):
+        clean_single = self._get_single_observation()
+        noisy_single = clean_single
+        if self.add_noise:
+            noisy_single = clean_single + (2 * torch.rand_like(clean_single) - 1) * self.single_obs_noise_scale_vec
+        self.clean_single_obs_buf = clean_single
+        self.obs_history = torch.roll(self.obs_history, shifts=-1, dims=1)   # oldest frame drops out
+        self.obs_history[:, -1, :] = noisy_single                            # newest frame in
+        self.obs_buf = self.obs_history.reshape(self.num_envs, -1)           # (N, history_length*69)
+
+        if self.num_privileged_obs is not None:
+            feet_pos = self.rigid_body_states[:, self.feet_indices, :3]
+            feet_pos_local = feet_pos - self.root_states[:, :3].unsqueeze(1)
+            feet_vel = self.rigid_body_states[:, self.feet_indices, 7:10]
+            feet_contact_forces = self.contact_forces[:, self.feet_indices, :]
+            self.privileged_obs_buf = torch.cat(
+                (
+                    self.obs_buf,                                  # full stacked history
+                    self.root_states[:, 2:3],
+                    self.base_lin_vel,
+                    feet_pos_local.reshape(self.num_envs, -1),
+                    feet_vel.reshape(self.num_envs, -1),
+                    feet_contact_forces.reshape(self.num_envs, -1),
+                ),
+                dim=-1,
+            )
+
+    def _get_noise_scale_vec(self, cfg):
+        # Per-FRAME (69-dim) noise, applied to the newest frame in compute_observations. Returned vector is
+        # repeated x history_length so the base class's noise_scale_vec length still equals num_observations.
+        single = torch.zeros(int(self.cfg.env.num_single_obs), device=self.device)
+        self.add_noise = self.cfg.noise.add_noise
+        noise_scales = self.cfg.noise.noise_scales
+        noise_level = self.cfg.noise.noise_level
+        single[0:3] = noise_scales.lin_vel * noise_level * self.obs_scales.lin_vel
+        single[3:6] = noise_scales.ang_vel * noise_level * self.obs_scales.ang_vel
+        single[6:9] = noise_scales.gravity * noise_level
+        single[9:16] = 0.0
+        single[16:28] = noise_scales.dof_pos * noise_level * self.obs_scales.dof_pos
+        single[28:40] = noise_scales.dof_vel * noise_level * self.obs_scales.dof_vel
+        single[40:44] = 0.0
+        single[44:56] = 0.0
+        single[56:68] = noise_scales.fatigue * noise_level / 10.0
+        single[68:69] = 0.0
+        self.single_obs_noise_scale_vec = single
+        return single.repeat(int(self.cfg.env.history_length))
 
     def _resample_commands(self, env_ids):
         # BIASED command sampling (Atanassov local-difficulty): after the parent draws dx uniformly from
@@ -438,7 +562,10 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
     # Only the yaw component of orientation is used so pitch/roll in flight do
     # not scramble the target direction. 69-dim layout + mirror parity preserved.
     # ------------------------------------------------------------------ #
-    def compute_observations(self):
+    def _compute_observations_flat_UNUSED(self):
+        # DEAD (2026-07-27): the ACTIVE compute_observations is the OBS-HISTORY version defined above
+        # (near _get_single_observation). This old single-frame builder is kept only as a reference for
+        # the exact 69-dim layout; it is never called (do not re-add a `compute_observations` name here).
         foot_contact_obs = self._get_contact_state().float()
         motor_fatigue = self.motor_fatigue.detach()
 
@@ -788,15 +915,11 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
         # pays nothing -> it does not bias toward shorter/lower jumps. yaw (w_z) is excluded because it
         # may be commanded in Stage 2.
         # ONE-SIDED pitch rate (user): roll stays symmetric (any roll is bad), but the PITCH rate is penalized
-        # only in the NOSE-DOWN direction. The nose-UP launch rotation (rear-hip-driven, pulling the nose back
-        # up) is FREE -> unlocks the pitch-gated rear-hip potential without imparting a forward face-plant spin.
-        # SIGN FIX (2026-07-24): pitch_sign_check.py measured corr(base_ang_vel[1], d(pitch)/dt)=+0.997, i.e.
-        # base_ang_vel[1] > 0 = NOSE-DOWN rotation (pitch grows), base_ang_vel[1] < 0 = NOSE-UP recovery. The old
-        # code clamped(-base_ang_vel[1]) => it was penalizing NOSE-UP recovery and freeing the nose-down dive,
-        # the exact INVERSE of the intent -- and a direct cause of the +12/+21 deg nose-down takeoff. Corrected
-        # to clamp(+base_ang_vel[1], min=0): penalize the nose-down dive spin, leave the nose-up recovery free.
+        # only in the direction the ORIGINAL 4600 config used. REVERTED the 2026-07-24 sign fix (2026-07-27,
+        # user): the observation-history experiment starts from the PURE 4600 baseline (the farther jump), so
+        # base_ang_vel_xy goes back to clamp(-base_ang_vel[1]) exactly as model_4600 was trained with.
         roll_sq = torch.square(self.base_ang_vel[:, 0])
-        nose_down_rate = torch.square(torch.clamp(self.base_ang_vel[:, 1], min=0.0))
+        nose_down_rate = torch.square(torch.clamp(-self.base_ang_vel[:, 1], min=0.0))
         ang_vel_sq = roll_sq + nose_down_rate
         if getattr(self, "_takeoff_omega_on", False):
             # POST-DISCOVERY (succ_rate gate latched): ALSO penalize ω during the PUSH/extension (where the

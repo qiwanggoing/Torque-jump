@@ -49,6 +49,18 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
     # proven ~0.30 default stance (inherited). Revisit launch depth later via a milder crouch +
     # stronger default_hip_pos if pursuing more height.
 
+    class env(GO2OmniJumpCurriculumTorqueCfg.env):
+        # OBSERVATION HISTORY STACKING (2026-07-27, OmniNet-style, ported from go2_omninet_torque):
+        # feed the policy the last `history_length` single-frame observations (concatenated) instead of
+        # just the current frame -> free temporal context (velocity / contact / phase trends). The history
+        # rolls once per PHYSICS SUBSTEP (compute_observations runs inside step()'s fixed-dt substep loop),
+        # so the window = history_length * dt is CONSTANT regardless of the control-frequency ramp
+        # (start_freq->max_freq). At max_freq (deploy) that's 20 * 0.005 = 0.10 s.
+        num_single_obs = 69                                        # per-frame obs (== the old flat num_observations)
+        history_length = 20
+        num_observations = history_length * num_single_obs          # 1380 (actor input, stacked)
+        num_privileged_obs = history_length * num_single_obs + 40   # 1420 = stacked obs + 40 privileged extras
+
     class control(GO2OmniJumpCurriculumTorqueCfg.control):
         # Step H: turn ON the dual-head aux-stabiliser torque path in _compute_torques.
         # (Default False in the parent -> all other tasks with num_actions=12 are untouched.)
@@ -707,6 +719,9 @@ class GO2OmniJumpLandingTorqueCfgPPO(GO2OmniJumpCurriculumTorqueCfgPPO):
     class algorithm(GO2OmniJumpCurriculumTorqueCfgPPO.algorithm):
         sym_coef = 1.0   # was 0.5: match my_go2_jump — tighter LEFT-RIGHT mirror symmetry
                          # (front-rear is handled by the pushoff_leg_sync reward, not sym_loss)
+        frame_stack = 20  # OBS HISTORY (2026-07-27): match env.history_length so rsl_rl builds the mirror
+                          # permutation PER-FRAME (obs_perm_mat = 20*69 x 20*69). Each stacked frame is
+                          # mirrored by the single-frame obs_permutation offset by i*69 -> sym_loss stays valid.
         # Step H (final): τ_comp is OUT of the PPO action, so act_permutation stays 12-dim (inherited
         # = single-head). BC loss weight for the deterministic comp_head:
         bc_coef = 1.0
