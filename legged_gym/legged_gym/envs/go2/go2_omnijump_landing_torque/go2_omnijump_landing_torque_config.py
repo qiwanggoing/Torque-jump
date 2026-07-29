@@ -712,19 +712,31 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
 
 class GO2OmniJumpLandingTorqueCfgPPO(GO2OmniJumpCurriculumTorqueCfgPPO):
     class policy(GO2OmniJumpCurriculumTorqueCfgPPO.policy):
-        # Step H (final): τ_comp is a DETERMINISTIC independent head (12 outputs), NOT part of the PPO
-        # action (num_actions stays 12 = τ_jump). BC hits only comp_head; PPO over τ_jump = single-head.
-        aux_head_dim = 12
+        # OBS-HISTORY via ActorCriticOmniNet (2026-07-29): the history is NOT fed raw to the policy MLP
+        # (that flat-1380 input killed squat discovery -- Jul29 run: squatQ=0 for 700 iters). Instead the
+        # full stacked history -> a supervised `estimator` MLP -> estimator_target_dim latents; the ACTOR
+        # only sees {current single frame (single_obs_dim) + those latents}. Estimator is trained by an
+        # auxiliary regression loss toward critic_obs[:, :estimator_target_dim] (= base_lin_vel, placed
+        # first in the env's privileged_obs_buf). This restores the small, clean policy input so discovery
+        # works, while still distilling the temporal info OmniNet-style. (Step-H comp_head dropped here.)
+        single_obs_dim = 69
+        history_length = 20
+        estimator_target_dim = 3           # base_lin_vel(3): canonical history-estimable target
+        estimator_hidden_dims = [258, 128]
+        estimator_activation = "relu"
+        estimator_loss_coef = 0.5
 
     class algorithm(GO2OmniJumpCurriculumTorqueCfgPPO.algorithm):
-        sym_coef = 1.0   # was 0.5: match my_go2_jump — tighter LEFT-RIGHT mirror symmetry
-                         # (front-rear is handled by the pushoff_leg_sync reward, not sym_loss)
-        frame_stack = 20  # OBS HISTORY (2026-07-27): match env.history_length so rsl_rl builds the mirror
-                          # permutation PER-FRAME (obs_perm_mat = 20*69 x 20*69). Each stacked frame is
-                          # mirrored by the single-frame obs_permutation offset by i*69 -> sym_loss stays valid.
-        # Step H (final): τ_comp is OUT of the PPO action, so act_permutation stays 12-dim (inherited
-        # = single-head). BC loss weight for the deterministic comp_head:
-        bc_coef = 1.0
+        # OmniNet net (2026-07-29): symmetry loss OFF. The sym path does actor_forward(mirror_obs) on the
+        # full 1380-dim stacked obs, but the OmniNet actor expects {single_obs + latent} (=72-dim), so a
+        # 1380-dim mirror would crash. OmniNet itself sets sym_loss=False. (Left-right symmetry is no longer
+        # regularised; revisit only if the gait shows a persistent lateral bias.)
+        sym_loss = False
+        sym_coef = 0.0
+        frame_stack = 1
+        # Step-H BC dropped with the comp_head (ActorCriticOmniNet has no comp_head): the OmniNet estimator
+        # replaces it. bc_coef=0 so the runner's comp_forward path stays inert.
+        bc_coef = 0.0
         entropy_coef = 0.003   # 0.001 -> 0.003: MORE exploration. At 0.001 noise_std collapsed to ~0.04 -> the
                                # policy got too CONSERVATIVE (peak ~0.50, undershoots far) and plateaued; the old
                                # high+far run had noise ~0.39. 0.003 settles noise ~0.32 (memory) = that exploration
@@ -737,6 +749,8 @@ class GO2OmniJumpLandingTorqueCfgPPO(GO2OmniJumpCurriculumTorqueCfgPPO):
                                # (anneal = consolidate + kill the noise runaway). See entropy_coef_final.
 
     class runner(GO2OmniJumpCurriculumTorqueCfgPPO.runner):
+        policy_class_name = "ActorCriticOmniNet"   # OBS-HISTORY (2026-07-29): history->estimator->latent,
+                                                   # actor sees {current frame + latent}. NOT the raw MLP.
         experiment_name = "go2_omnijump_landing_torque"
         run_name = "stage1_landing"
         resume = False

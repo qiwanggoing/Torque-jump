@@ -260,11 +260,15 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
             feet_pos_local = feet_pos - self.root_states[:, :3].unsqueeze(1)
             feet_vel = self.rigid_body_states[:, self.feet_indices, 7:10]
             feet_contact_forces = self.contact_forces[:, self.feet_indices, :]
+            # OmniNet estimator target FIRST (ActorCriticOmniNet.compute_auxiliary_loss reads
+            # critic_obs[:, :estimator_target_dim] as the regression target). base_lin_vel(3) is the
+            # canonical history-estimable quantity (velocity estimation). Keep estimator_target_dim=3
+            # in the policy cfg consistent with these leading 3 dims. Total stays 1420.
             self.privileged_obs_buf = torch.cat(
                 (
+                    self.base_lin_vel,                             # [:, :3] = estimator target (must be first)
                     self.obs_buf,                                  # full stacked history
                     self.root_states[:, 2:3],
-                    self.base_lin_vel,
                     feet_pos_local.reshape(self.num_envs, -1),
                     feet_vel.reshape(self.num_envs, -1),
                     feet_contact_forces.reshape(self.num_envs, -1),

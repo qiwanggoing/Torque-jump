@@ -82,6 +82,11 @@ class ActorCriticOmniNet(ActorCritic):
 
         self.std = nn.Parameter(init_noise_std * torch.ones(num_actions))
         self.distribution = None
+        # Step-H comp_head is not part of the OmniNet architecture. Set it to None so the base
+        # ActorCritic.comp_forward() (called unconditionally by on_policy_runner each rollout step)
+        # returns None instead of raising AttributeError. __init__ here uses nn.Module.__init__, so
+        # this attribute would otherwise never be created.
+        self.comp_head = None
         Normal.set_default_validate_args = False
 
     def reset(self, dones=None):
