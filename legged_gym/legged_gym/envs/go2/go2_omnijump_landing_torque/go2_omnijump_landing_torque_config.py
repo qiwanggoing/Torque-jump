@@ -50,16 +50,17 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
     # stronger default_hip_pos if pursuing more height.
 
     class env(GO2OmniJumpCurriculumTorqueCfg.env):
-        # OBSERVATION HISTORY STACKING (2026-07-27, OmniNet-style, ported from go2_omninet_torque):
-        # feed the policy the last `history_length` single-frame observations (concatenated) instead of
-        # just the current frame -> free temporal context (velocity / contact / phase trends). The history
-        # rolls once per PHYSICS SUBSTEP (compute_observations runs inside step()'s fixed-dt substep loop),
-        # so the window = history_length * dt is CONSTANT regardless of the control-frequency ramp
-        # (start_freq->max_freq). At max_freq (deploy) that's 20 * 0.005 = 0.10 s.
-        num_single_obs = 69                                        # per-frame obs (== the old flat num_observations)
+        # ATANASSOV-STYLE OBSERVATION (2026-07-30). obs_buf = [ stacked_frame(49) x history_length | extras(32) ].
+        # STACKED (x20, kinematic state + PREVIOUS ACTION): lin_vel3 + ang_vel3 + grav3 + dofpos12 + dofvel12 +
+        #   foot4 + prev_action12 = 49  -> lets the policy reason about its own dynamics over ~0.10s (20 substeps).
+        # SINGLE extras (current-only, NOT stacked): command(landing_err3 + cmd_h1 + cmd4_1 + height2) +
+        #   torques12 + motor_fatigue12 + pd_prior1 = 32. Atanassov keeps the command single (no 20x redundancy),
+        #   and we keep the self-generated raw torques single (stacking 240 dims of them diluted discovery before).
+        num_stacked_frame = 49
+        num_single_extras = 32
         history_length = 20
-        num_observations = history_length * num_single_obs          # 1380 (actor input, stacked)
-        num_privileged_obs = history_length * num_single_obs + 40   # 1420 = stacked obs + 40 privileged extras
+        num_observations = history_length * num_stacked_frame + num_single_extras   # 49*20 + 32 = 1012
+        num_privileged_obs = num_observations + 40                                  # 1052 = obs + 40 priv extras
 
     class control(GO2OmniJumpCurriculumTorqueCfg.control):
         # Step H: turn ON the dual-head aux-stabiliser torque path in _compute_torques.
@@ -712,31 +713,21 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
 
 class GO2OmniJumpLandingTorqueCfgPPO(GO2OmniJumpCurriculumTorqueCfgPPO):
     class policy(GO2OmniJumpCurriculumTorqueCfgPPO.policy):
-        # OBS-HISTORY via ActorCriticOmniNet (2026-07-29): the history is NOT fed raw to the policy MLP
-        # (that flat-1380 input killed squat discovery -- Jul29 run: squatQ=0 for 700 iters). Instead the
-        # full stacked history -> a supervised `estimator` MLP -> estimator_target_dim latents; the ACTOR
-        # only sees {current single frame (single_obs_dim) + those latents}. Estimator is trained by an
-        # auxiliary regression loss toward critic_obs[:, :estimator_target_dim] (= base_lin_vel, placed
-        # first in the env's privileged_obs_buf). This restores the small, clean policy input so discovery
-        # works, while still distilling the temporal info OmniNet-style. (Step-H comp_head dropped here.)
-        single_obs_dim = 69
-        history_length = 20
-        estimator_target_dim = 3           # base_lin_vel(3): canonical history-estimable target
-        estimator_hidden_dims = [258, 128]
-        estimator_activation = "relu"
-        estimator_loss_coef = 0.5
+        # Step H (final): τ_comp is a DETERMINISTIC independent head (12 outputs), NOT part of the PPO
+        # action (num_actions stays 12 = τ_jump). BC hits only comp_head; PPO over τ_jump = single-head.
+        aux_head_dim = 12
 
     class algorithm(GO2OmniJumpCurriculumTorqueCfgPPO.algorithm):
-        # OmniNet net (2026-07-29): symmetry loss OFF. The sym path does actor_forward(mirror_obs) on the
-        # full 1380-dim stacked obs, but the OmniNet actor expects {single_obs + latent} (=72-dim), so a
-        # 1380-dim mirror would crash. OmniNet itself sets sym_loss=False. (Left-right symmetry is no longer
-        # regularised; revisit only if the gait shows a persistent lateral bias.)
+        # ATANASSOV OBS (2026-07-30): symmetry loss OFF. The obs is now [stacked_frame(49)x20 | extras(32)] --
+        # NOT a uniform stack of the 69-dim obs_permutation, so the per-frame mirror (frame_stack) no longer maps
+        # the layout and would corrupt the mirror. Atanassov itself uses no symmetry loss. (Revisit with a custom
+        # obs_permutation for the 49-frame + 32-extras layout only if a persistent lateral bias shows up.)
         sym_loss = False
         sym_coef = 0.0
         frame_stack = 1
-        # Step-H BC dropped with the comp_head (ActorCriticOmniNet has no comp_head): the OmniNet estimator
-        # replaces it. bc_coef=0 so the runner's comp_forward path stays inert.
-        bc_coef = 0.0
+        # Step H (final): τ_comp is OUT of the PPO action, so act_permutation stays 12-dim (inherited
+        # = single-head). BC loss weight for the deterministic comp_head:
+        bc_coef = 1.0
         entropy_coef = 0.003   # 0.001 -> 0.003: MORE exploration. At 0.001 noise_std collapsed to ~0.04 -> the
                                # policy got too CONSERVATIVE (peak ~0.50, undershoots far) and plateaued; the old
                                # high+far run had noise ~0.39. 0.003 settles noise ~0.32 (memory) = that exploration
@@ -749,8 +740,6 @@ class GO2OmniJumpLandingTorqueCfgPPO(GO2OmniJumpCurriculumTorqueCfgPPO):
                                # (anneal = consolidate + kill the noise runaway). See entropy_coef_final.
 
     class runner(GO2OmniJumpCurriculumTorqueCfgPPO.runner):
-        policy_class_name = "ActorCriticOmniNet"   # OBS-HISTORY (2026-07-29): history->estimator->latent,
-                                                   # actor sees {current frame + latent}. NOT the raw MLP.
         experiment_name = "go2_omnijump_landing_torque"
         run_name = "stage1_landing"
         resume = False
