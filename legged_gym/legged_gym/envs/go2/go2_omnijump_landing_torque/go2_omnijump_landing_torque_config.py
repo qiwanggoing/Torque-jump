@@ -58,8 +58,13 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
         #   and we keep the self-generated raw torques single (stacking 240 dims of them diluted discovery before).
         num_stacked_frame = 49
         num_single_extras = 32
-        history_length = 20
-        num_observations = history_length * num_stacked_frame + num_single_extras   # 49*20 + 32 = 1012
+        history_length = 10              # 20 -> 10 (2026-08-01): the asymmetric-critic discovery was MARGINAL
+                                         # (Jul31 discovered late ~iter800, n=1; Aug01's tiny run_up op-order
+                                         # perturbation flipped it to a no-discovery basin via Isaac-Gym
+                                         # nondeterminism). my_go2_jump (reliable torque+PD+stacking discovery)
+                                         # uses frame_stack=10 -> halve the ACTOR input (1012->522) so discovery
+                                         # is easier + ROBUST. critic (c_frame_stack=3) and run_up unchanged.
+        num_observations = history_length * num_stacked_frame + num_single_extras   # 49*10 + 32 = 522
         # ASYMMETRIC CRITIC (2026-07-30, per working my_go2_jump + RL literature: a critic fed the FULL stack
         # overfits -> value_loss->0 -> bad advantages -> discovery dies). The critic instead sees a SHORT stack
         # of PRIVILEGED frames: single_priv = stacked_frame(49) + extras(32) + priv_extra(40) = 121 per frame.
