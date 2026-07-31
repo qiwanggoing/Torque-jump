@@ -44,6 +44,8 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
                              # weight -> more total impulse -> farther. Discovery-gated in _reward_four_leg_push.
         "clean_takeoff_bonus",  # SOFT clean-takeoff: extra reward for a no-re-plant takeoff (clean pays MORE,
                                 # messy still allowed) -- replaces the hard clean_takeoff_terminate that killed discovery.
+        "run_up",               # CONTACT-BASED clean-takeoff PENALTY (neg scale): penalize a re-planted (stutter/
+                                # run-up) jump per airborne step. Gated post-discovery in _reward_run_up.
         "stand_no_takeoff",     # HARD penalty: cmd4=0 (STAND) but all feet leave the ground (a hop) -> punish ->
                                 # cmd4 becomes the real stand/jump switch. Gated post-discovery + grace (skips spawn drop).
     }   # clean_landing REMOVED (detector never armed -> ~0). Post-landing slide handled by landing_stability
@@ -59,6 +61,7 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
         "forward_reach": 1,
         "four_leg_push": 1,
         "clean_takeoff_bonus": 0,   # active from step 1 (soft positive bonus = discovery-safe)
+        "run_up": 0,                # stage 0; real gate is _takeoff_omega_on inside the reward (post-discovery)
         "stand_no_takeoff": 0,      # stage 0; real gate is _takeoff_omega_on inside the reward (post-discovery)
         "foot_contact_sync": 0,
         "stance_squat": 0,
@@ -886,6 +889,22 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
         pushoff = self.jumping_state & (~self.has_taken_off) & (self.root_states[:, 9] > 0.0)
         squat_down = self.jumping_state & (~self.has_taken_off) & (~self._squat_deep_enough())
         return torch.where(pushoff | squat_down, torch.zeros_like(l1), l1)
+
+    def _reward_run_up(self):
+        # CONTACT-BASED CLEAN-TAKEOFF penalty (user, 2026-08-01). A clean jump leaves the ground ONCE: once a
+        # foot has LIFTED during the load (jump_min_contact < 4 -> takeoff started), NO foot may re-contact
+        # before landing. self.jump_replant latches True on any such re-plant (stutter-step / run-up to build
+        # forward momentum). Penalize per AIRBORNE step of an UNCLEAN (re-planted) jump so a run-up jump earns
+        # LESS than a clean one -> the policy converges to a single clean push and the reach honestly
+        # self-limits at the clean-jump range (no artificial dx cap). Returns positive; the config scale is
+        # NEGATIVE. SOFT (no termination) + GATED POST-DISCOVERY (_takeoff_omega_on, same latch as
+        # grounded_jump / clean_landing) so it NEVER blocks the from-scratch messy jumping the robot must
+        # discover first. NOTE: catches STEPPING run-up (foot lift + re-plant); a pure ground-SLIDE (feet never
+        # lift, body creeps) evades the contact test -> add a takeoff-displacement guard if a slide appears.
+        if not getattr(self, "_takeoff_omega_on", False):
+            return torch.zeros(self.num_envs, device=self.device)
+        active = self.airborne & self._squat_deep_enough() & self.jump_replant
+        return active.float()
 
     def _reward_grounded_jump(self):
         # MUST-LAUNCH penalty (landing override) -- CLOSE the "retreat to NOT jumping" escape. Diagnosis (Jun21

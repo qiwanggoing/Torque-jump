@@ -576,6 +576,18 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
             # ---- air-time + stay-planted boosts (user) ----
             clean_takeoff_bonus = 0.0        # DELETED (2026-07-11): reward-distribution audit showed it was INERT
                                              # (contributed 0.0001 = 0.0% -> never actually firing). Removed.
+            run_up = -3.0                    # CONTACT-BASED clean-takeoff PENALTY (user, 2026-08-01): per airborne
+                                             # step of a RE-PLANTED (stutter/run-up) jump. CALIBRATED to the Jul31
+                                             # reward-share: forward_reach (the top far-jump driver) ~0.99/episode;
+                                             # at -3.0 an unclean jump loses ~-0.66/episode (~2/3 of forward_reach)
+                                             # -> the run-up's EXTRA reach stops paying, but the distance drivers
+                                             # (forward_reach 22.6% + projected_landing 20.7% + landing_position
+                                             # 11.9%) still dominate so the CLEAN jump is pushed as FAR as physically
+                                             # possible (goal = jump far). Gated post-discovery (_takeoff_omega_on).
+                                             # TUNE: watch reliable_reach_dx settle at the clean ceiling (~0.7-0.8)
+                                             # while forward_reach share STAYS high + squatQ/succ stay up; run-up
+                                             # persists -> raise (-5/-8) or add takeoff-displacement guard; far
+                                             # CLEAN reach drops / succ collapses -> lower (-2/-1.5).
             stand_no_takeoff = 0.0           # DELETED (2026-07-11): jump-only config (jump_command_range=[1,1]) never
                                              # commands stand, so this never fires (contributed -0.002). Removed.
                                              # (was -5.0; only fired at cmd4<=0.5 which the jump-only config never samples.)
