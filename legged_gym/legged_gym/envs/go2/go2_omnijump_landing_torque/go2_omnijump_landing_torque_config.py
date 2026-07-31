@@ -60,7 +60,12 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
         num_single_extras = 32
         history_length = 20
         num_observations = history_length * num_stacked_frame + num_single_extras   # 49*20 + 32 = 1012
-        num_privileged_obs = num_observations + 40                                  # 1052 = obs + 40 priv extras
+        # ASYMMETRIC CRITIC (2026-07-30, per working my_go2_jump + RL literature: a critic fed the FULL stack
+        # overfits -> value_loss->0 -> bad advantages -> discovery dies). The critic instead sees a SHORT stack
+        # of PRIVILEGED frames: single_priv = stacked_frame(49) + extras(32) + priv_extra(40) = 121 per frame.
+        c_frame_stack = 3
+        single_num_privileged_obs = num_stacked_frame + num_single_extras + 40      # 49+32+40 = 121
+        num_privileged_obs = c_frame_stack * single_num_privileged_obs              # 3*121 = 363
 
     class control(GO2OmniJumpCurriculumTorqueCfg.control):
         # Step H: turn ON the dual-head aux-stabiliser torque path in _compute_torques.

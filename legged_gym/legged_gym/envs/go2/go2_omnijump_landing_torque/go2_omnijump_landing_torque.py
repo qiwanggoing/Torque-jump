@@ -162,6 +162,13 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
             self.num_envs, int(self.cfg.env.history_length), int(self.cfg.env.num_stacked_frame),
             dtype=torch.float, device=self.device,
         )
+        # ASYMMETRIC CRITIC (2026-07-30): the critic sees a SHORT stack (c_frame_stack) of PRIVILEGED frames,
+        # NOT the full history_length actor stack -> avoids the full-stack value overfitting that killed the
+        # earlier runs' advantages/discovery. (Mirrors my_go2_jump's c_frame_stack=3.)
+        self.critic_history = torch.zeros(
+            self.num_envs, int(self.cfg.env.c_frame_stack), int(self.cfg.env.single_num_privileged_obs),
+            dtype=torch.float, device=self.device,
+        )
         # motor_fatigue / torques are allocated by go2_torque.__init__ AFTER super().__init__() (which runs
         # this _init_buffers), so they don't exist yet at prime time -> allocate zeros defensively (go2_torque
         # re-zeros them right after, so this is harmless and matches the "no torque applied yet" init state).
@@ -248,13 +255,41 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
         )
         return torch.nan_to_num(extras, nan=0.0, posinf=100.0, neginf=-100.0)
 
+    def _get_privileged_frame(self):
+        """Per-frame PRIVILEGED obs (single_num_privileged_obs): current-frame proprioception (stacked_frame
+        content) + current extras + PRIVILEGED info the actor never sees (root height, base lin vel, feet
+        local pos/vel/contact-forces). The critic stacks only c_frame_stack of THESE (short) -- NOT the full
+        history_length actor stack. A full-stack critic overfits (value_loss->0; the whole-stack-as-state
+        overfitting the RL literature warns about), which kills the advantages that reinforce the discovered
+        squat. my_go2_jump (working torque+PD+stacking jump) uses c_frame_stack=3 for exactly this reason."""
+        feet_pos = self.rigid_body_states[:, self.feet_indices, :3]
+        feet_pos_local = feet_pos - self.root_states[:, :3].unsqueeze(1)
+        feet_vel = self.rigid_body_states[:, self.feet_indices, 7:10]
+        feet_contact_forces = self.contact_forces[:, self.feet_indices, :]
+        priv_extra = torch.cat(
+            (
+                self.root_states[:, 2:3],
+                self.base_lin_vel,
+                feet_pos_local.reshape(self.num_envs, -1),
+                feet_vel.reshape(self.num_envs, -1),
+                feet_contact_forces.reshape(self.num_envs, -1),
+            ),
+            dim=-1,
+        )                                                              # 40
+        frame = torch.cat((self._get_stacked_frame(), self._get_single_extras(), priv_extra), dim=-1)  # 49+32+40=121
+        return torch.nan_to_num(frame, nan=0.0, posinf=100.0, neginf=-100.0)
+
     def _prime_history(self, env_ids):
-        """Fill the given envs' history with the current stacked frame (reset / init) -- no zero transient."""
+        """Fill the given envs' actor + critic history with the current frame (reset / init) -- no zero transient."""
         if len(env_ids) == 0:
             return
         frame = self._get_stacked_frame()
         n = int(self.cfg.env.history_length)
         self.obs_history[env_ids] = frame[env_ids].unsqueeze(1).repeat(1, n, 1)
+        if hasattr(self, "critic_history"):
+            pframe = self._get_privileged_frame()
+            c = int(self.cfg.env.c_frame_stack)
+            self.critic_history[env_ids] = pframe[env_ids].unsqueeze(1).repeat(1, c, 1)
 
     def compute_observations(self):
         frame = self._get_stacked_frame()
@@ -270,21 +305,12 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
         self.obs_buf = torch.cat((stacked, extras), dim=-1)                 # (N, history_length*49 + 32)
 
         if self.num_privileged_obs is not None:
-            feet_pos = self.rigid_body_states[:, self.feet_indices, :3]
-            feet_pos_local = feet_pos - self.root_states[:, :3].unsqueeze(1)
-            feet_vel = self.rigid_body_states[:, self.feet_indices, 7:10]
-            feet_contact_forces = self.contact_forces[:, self.feet_indices, :]
-            self.privileged_obs_buf = torch.cat(
-                (
-                    self.obs_buf,                                  # stacked history + single extras
-                    self.root_states[:, 2:3],
-                    self.base_lin_vel,
-                    feet_pos_local.reshape(self.num_envs, -1),
-                    feet_vel.reshape(self.num_envs, -1),
-                    feet_contact_forces.reshape(self.num_envs, -1),
-                ),
-                dim=-1,
-            )
+            # ASYMMETRIC CRITIC: roll a SHORT (c_frame_stack) ring of PRIVILEGED frames -> the critic input is
+            # small (c_frame_stack * single_num_privileged_obs), NOT the full history_length actor stack.
+            pframe = self._get_privileged_frame()                              # (N, single_num_privileged_obs)
+            self.critic_history = torch.roll(self.critic_history, shifts=-1, dims=1)
+            self.critic_history[:, -1, :] = pframe
+            self.privileged_obs_buf = self.critic_history.reshape(self.num_envs, -1)   # (N, c_frame_stack*single_priv)
 
     def _get_noise_scale_vec(self, cfg):
         # Noise for the [ stacked_frame(49) x history_length | single_extras(32) ] layout. Stored split so
