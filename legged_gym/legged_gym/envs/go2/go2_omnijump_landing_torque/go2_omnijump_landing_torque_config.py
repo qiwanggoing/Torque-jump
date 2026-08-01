@@ -58,13 +58,16 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
         #   and we keep the self-generated raw torques single (stacking 240 dims of them diluted discovery before).
         num_stacked_frame = 49
         num_single_extras = 32
-        history_length = 10              # 20 -> 10 (2026-08-01): the asymmetric-critic discovery was MARGINAL
-                                         # (Jul31 discovered late ~iter800, n=1; Aug01's tiny run_up op-order
-                                         # perturbation flipped it to a no-discovery basin via Isaac-Gym
-                                         # nondeterminism). my_go2_jump (reliable torque+PD+stacking discovery)
-                                         # uses frame_stack=10 -> halve the ACTOR input (1012->522) so discovery
-                                         # is easier + ROBUST. critic (c_frame_stack=3) and run_up unchanged.
-        num_observations = history_length * num_stacked_frame + num_single_extras   # 49*10 + 32 = 522
+        history_length = 20              # back to 20 (2026-08-01): RESUME from the Jul31 checkpoint (the run whose
+                                         # reward successfully guided history-obs discovery) instead of re-rolling
+                                         # from-scratch discovery. Jul31 was trained at history_length=20, so the
+                                         # actor net must be 1012-in to load its weights. Then run_up (gated on the
+                                         # succ-EMA latch, which RESETS on resume and re-arms only after ~178 iters
+                                         # once the jump is re-confirmed) refines the resumed policy toward clean
+                                         # takeoff. (The 20->10 experiment did NOT fix discovery reliability -> the
+                                         # marginality is in our reward/task path, not the actor size; sidestep it
+                                         # by resuming the working checkpoint.)
+        num_observations = history_length * num_stacked_frame + num_single_extras   # 49*20 + 32 = 1012
         # ASYMMETRIC CRITIC (2026-07-30, per working my_go2_jump + RL literature: a critic fed the FULL stack
         # overfits -> value_loss->0 -> bad advantages -> discovery dies). The critic instead sees a SHORT stack
         # of PRIVILEGED frames: single_priv = stacked_frame(49) + extras(32) + priv_extra(40) = 121 per frame.
@@ -471,6 +474,11 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
         # lifting is penalized per-step by _reward_clean_landing (weight `clean_landing` in scales). PENALTY,
         # not termination (keeps the successful_jump bonus). Gated post-discovery (succ-latch _takeoff_omega_on).
         clean_landing_plant_hold = 15       # consecutive all-4-contact steps (~0.075s) to latch "settled" before watching for re-lift
+        run_up_ramp_steps = 9600            # GRADUALLY OPEN the run_up (clean-takeoff) penalty: after the succ-latch
+                                            # opens (discovery confirmed), ramp the penalty 0 -> full over this many
+                                            # step_count substeps (~200 iters at the post-discovery ~48 step/iter) so
+                                            # the requirement comes in smoothly, not as an abrupt cliff. Raise for a
+                                            # gentler intro; 0 -> full immediately (not recommended).
         landing_pitch_extra = 5.0           # EXTRA pitch-leveling multiplier on prelanding+landing (see _reward_pitch_level):
                                             # the whole-cycle pitch term is diluted by the long level cruise + the fast post-tumble
                                             # termination, so it barely presses the touchdown. At 5.0 the descent/touchdown pitch is
