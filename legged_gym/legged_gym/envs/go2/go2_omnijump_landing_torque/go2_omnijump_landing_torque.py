@@ -721,7 +721,15 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
         # the dense in-place landing control (Stage 1, target=spawn) is preserved.
         pz = self.root_states[:, 2]
         min_h = float(getattr(self.cfg.rewards, "projected_landing_min_height", 0.40))
-        active = (self.airborne & (pz > min_h) & self._jump_commanded() & self._squat_deep_enough()).float()
+        # RAMP the height gate instead of a HARD cliff (2026-08-01): below `low` (~rest height) -> 0 (farm-proof:
+        # a stander/sprawl earns nothing), FULL at min_h (0.40, unchanged for real jumps), LINEAR in between. WHY:
+        # the failed runs squat fine (squatQ=1.0) but stall at a WEAK hop (peak ~0.35 < 0.40) where this reward was
+        # exactly 0 -> no gradient to jump higher -> stuck below the cliff (the ~1/3 discovery trap). The ramp gives
+        # a 0.35 hop ~50% reward + a gradient to push the peak up over 0.40, turning "cross the cliff by luck" into
+        # "walk up the slope" -> reliable discovery. Above 0.40 the reward is identical to before (clamped to 1).
+        low = float(getattr(self.cfg.rewards, "projected_landing_ramp_low", 0.30))
+        ramp = torch.clamp((pz - low) / max(min_h - low, 1e-3), 0.0, 1.0)
+        active = (self.airborne & self._jump_commanded() & self._squat_deep_enough()).float() * ramp
         g = 9.81
         vz = self.root_states[:, 9]
         h_land = self.env_origins[:, 2] + float(self.cfg.rewards.base_height_target)
@@ -809,7 +817,15 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
         # projected_landing (farm-proof: a legs-tucked sprawl can't clear the height gate).
         pz = self.root_states[:, 2]
         min_h = float(getattr(self.cfg.rewards, "projected_landing_min_height", 0.40))
-        active = (self.airborne & (pz > min_h) & self._jump_commanded() & self._squat_deep_enough()).float()
+        # RAMP the height gate instead of a HARD cliff (2026-08-01): below `low` (~rest height) -> 0 (farm-proof:
+        # a stander/sprawl earns nothing), FULL at min_h (0.40, unchanged for real jumps), LINEAR in between. WHY:
+        # the failed runs squat fine (squatQ=1.0) but stall at a WEAK hop (peak ~0.35 < 0.40) where this reward was
+        # exactly 0 -> no gradient to jump higher -> stuck below the cliff (the ~1/3 discovery trap). The ramp gives
+        # a 0.35 hop ~50% reward + a gradient to push the peak up over 0.40, turning "cross the cliff by luck" into
+        # "walk up the slope" -> reliable discovery. Above 0.40 the reward is identical to before (clamped to 1).
+        low = float(getattr(self.cfg.rewards, "projected_landing_ramp_low", 0.30))
+        ramp = torch.clamp((pz - low) / max(min_h - low, 1e-3), 0.0, 1.0)
+        active = (self.airborne & self._jump_commanded() & self._squat_deep_enough()).float() * ramp
         g = 9.81
         vz = self.root_states[:, 9]
         h_land = self.env_origins[:, 2] + float(self.cfg.rewards.base_height_target)

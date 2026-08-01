@@ -343,6 +343,12 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
         projected_landing_min_height = 0.40 # instantaneous height gate for the DENSE projected_landing:
                                             # blocks the legs-tucked sprawl farm (body ~0.13, feet off ground)
                                             # while keeping dense in-place landing control during real apex.
+        projected_landing_ramp_low = 0.30   # RAMP low bound (2026-08-01): projected_landing/forward_reach now
+                                            # ramp 0->1 over [ramp_low, min_height] instead of a hard cliff at 0.40.
+                                            # 0.30 ~= rest base height -> stander earns 0 (farm-proof), a shallow
+                                            # discovering hop (peak ~0.35) earns partial + a gradient to jump over
+                                            # 0.40. TUNE: raise toward 0.34 if a low bob farms it; lower if a real
+                                            # discovering jump still gets too little sub-0.40 gradient.
         # pose_guidance_sigma for joint_angle_aerial/prelanding/landing: kept inherited 5.0
         # (sharpening to 2.0 backfired — sharp exp saturates at the large air-pose error; the
         # fix for weak pose rewards is WEIGHT 1.5, not sigma). NOTE: the old joint-based
