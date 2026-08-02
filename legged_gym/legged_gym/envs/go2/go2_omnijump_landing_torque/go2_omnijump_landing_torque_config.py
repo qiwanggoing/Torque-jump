@@ -58,15 +58,7 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
         #   and we keep the self-generated raw torques single (stacking 240 dims of them diluted discovery before).
         num_stacked_frame = 49
         num_single_extras = 32
-        history_length = 20              # back to 20 (2026-08-01): RESUME from the Jul31 checkpoint (the run whose
-                                         # reward successfully guided history-obs discovery) instead of re-rolling
-                                         # from-scratch discovery. Jul31 was trained at history_length=20, so the
-                                         # actor net must be 1012-in to load its weights. Then run_up (gated on the
-                                         # succ-EMA latch, which RESETS on resume and re-arms only after ~178 iters
-                                         # once the jump is re-confirmed) refines the resumed policy toward clean
-                                         # takeoff. (The 20->10 experiment did NOT fix discovery reliability -> the
-                                         # marginality is in our reward/task path, not the actor size; sidestep it
-                                         # by resuming the working checkpoint.)
+        history_length = 20
         num_observations = history_length * num_stacked_frame + num_single_extras   # 49*20 + 32 = 1012
         # ASYMMETRIC CRITIC (2026-07-30, per working my_go2_jump + RL literature: a critic fed the FULL stack
         # overfits -> value_loss->0 -> bad advantages -> discovery dies). The critic instead sees a SHORT stack
@@ -343,12 +335,6 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
         projected_landing_min_height = 0.40 # instantaneous height gate for the DENSE projected_landing:
                                             # blocks the legs-tucked sprawl farm (body ~0.13, feet off ground)
                                             # while keeping dense in-place landing control during real apex.
-        projected_landing_ramp_low = 0.30   # RAMP low bound (2026-08-01): projected_landing/forward_reach now
-                                            # ramp 0->1 over [ramp_low, min_height] instead of a hard cliff at 0.40.
-                                            # 0.30 ~= rest base height -> stander earns 0 (farm-proof), a shallow
-                                            # discovering hop (peak ~0.35) earns partial + a gradient to jump over
-                                            # 0.40. TUNE: raise toward 0.34 if a low bob farms it; lower if a real
-                                            # discovering jump still gets too little sub-0.40 gradient.
         # pose_guidance_sigma for joint_angle_aerial/prelanding/landing: kept inherited 5.0
         # (sharpening to 2.0 backfired — sharp exp saturates at the large air-pose error; the
         # fix for weak pose rewards is WEIGHT 1.5, not sigma). NOTE: the old joint-based
@@ -480,11 +466,6 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
         # lifting is penalized per-step by _reward_clean_landing (weight `clean_landing` in scales). PENALTY,
         # not termination (keeps the successful_jump bonus). Gated post-discovery (succ-latch _takeoff_omega_on).
         clean_landing_plant_hold = 15       # consecutive all-4-contact steps (~0.075s) to latch "settled" before watching for re-lift
-        run_up_ramp_steps = 9600            # GRADUALLY OPEN the run_up (clean-takeoff) penalty: after the succ-latch
-                                            # opens (discovery confirmed), ramp the penalty 0 -> full over this many
-                                            # step_count substeps (~200 iters at the post-discovery ~48 step/iter) so
-                                            # the requirement comes in smoothly, not as an abrupt cliff. Raise for a
-                                            # gentler intro; 0 -> full immediately (not recommended).
         landing_pitch_extra = 5.0           # EXTRA pitch-leveling multiplier on prelanding+landing (see _reward_pitch_level):
                                             # the whole-cycle pitch term is diluted by the long level cruise + the fast post-tumble
                                             # termination, so it barely presses the touchdown. At 5.0 the descent/touchdown pitch is
@@ -595,18 +576,6 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
             # ---- air-time + stay-planted boosts (user) ----
             clean_takeoff_bonus = 0.0        # DELETED (2026-07-11): reward-distribution audit showed it was INERT
                                              # (contributed 0.0001 = 0.0% -> never actually firing). Removed.
-            run_up = -3.0                    # CONTACT-BASED clean-takeoff PENALTY (user, 2026-08-01): per airborne
-                                             # step of a RE-PLANTED (stutter/run-up) jump. CALIBRATED to the Jul31
-                                             # reward-share: forward_reach (the top far-jump driver) ~0.99/episode;
-                                             # at -3.0 an unclean jump loses ~-0.66/episode (~2/3 of forward_reach)
-                                             # -> the run-up's EXTRA reach stops paying, but the distance drivers
-                                             # (forward_reach 22.6% + projected_landing 20.7% + landing_position
-                                             # 11.9%) still dominate so the CLEAN jump is pushed as FAR as physically
-                                             # possible (goal = jump far). Gated post-discovery (_takeoff_omega_on).
-                                             # TUNE: watch reliable_reach_dx settle at the clean ceiling (~0.7-0.8)
-                                             # while forward_reach share STAYS high + squatQ/succ stay up; run-up
-                                             # persists -> raise (-5/-8) or add takeoff-displacement guard; far
-                                             # CLEAN reach drops / succ collapses -> lower (-2/-1.5).
             stand_no_takeoff = 0.0           # DELETED (2026-07-11): jump-only config (jump_command_range=[1,1]) never
                                              # commands stand, so this never fires (contributed -0.002). Removed.
                                              # (was -5.0; only fired at cmd4<=0.5 which the jump-only config never samples.)

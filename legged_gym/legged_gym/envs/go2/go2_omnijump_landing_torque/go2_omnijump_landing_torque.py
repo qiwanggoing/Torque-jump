@@ -44,8 +44,6 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
                              # weight -> more total impulse -> farther. Discovery-gated in _reward_four_leg_push.
         "clean_takeoff_bonus",  # SOFT clean-takeoff: extra reward for a no-re-plant takeoff (clean pays MORE,
                                 # messy still allowed) -- replaces the hard clean_takeoff_terminate that killed discovery.
-        "run_up",               # CONTACT-BASED clean-takeoff PENALTY (neg scale): penalize a re-planted (stutter/
-                                # run-up) jump per airborne step. Gated post-discovery in _reward_run_up.
         "stand_no_takeoff",     # HARD penalty: cmd4=0 (STAND) but all feet leave the ground (a hop) -> punish ->
                                 # cmd4 becomes the real stand/jump switch. Gated post-discovery + grace (skips spawn drop).
     }   # clean_landing REMOVED (detector never armed -> ~0). Post-landing slide handled by landing_stability
@@ -61,7 +59,6 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
         "forward_reach": 1,
         "four_leg_push": 1,
         "clean_takeoff_bonus": 0,   # active from step 1 (soft positive bonus = discovery-safe)
-        "run_up": 0,                # stage 0; real gate is _takeoff_omega_on inside the reward (post-discovery)
         "stand_no_takeoff": 0,      # stage 0; real gate is _takeoff_omega_on inside the reward (post-discovery)
         "foot_contact_sync": 0,
         "stance_squat": 0,
@@ -151,7 +148,6 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
         # penalizes the messy exploratory pushes before the robot can jump (that broke discovery before).
         self._succ_rate_ema = 0.0
         self._takeoff_omega_on = False
-        self._takeoff_omega_latch_step = None   # step_count when the succ-latch first opened (for the run_up ramp)
         # HONEST far-band mastery: decaying accumulators for a TRUSTWORTHY smoothed far-band hit rate
         # (per-batch far_n ~0.1 -> landing_stable_hit_rate is pure noise). See _log_jump_episode_stats.
         self._farband_hit_acc = 0.0
@@ -466,8 +462,6 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
         if "successful_jump_rate" in self.extras.get("episode", {}):
             self._succ_rate_ema = 0.99 * self._succ_rate_ema + 0.01 * float(self.extras["episode"]["successful_jump_rate"])
             if self._succ_rate_ema >= float(getattr(self.cfg.rewards, "takeoff_omega_succ_gate", 0.80)):
-                if not self._takeoff_omega_on:
-                    self._takeoff_omega_latch_step = int(self.step_count)   # mark the open step for the run_up ramp
                 self._takeoff_omega_on = True
         jump_den = torch.clamp(self.jump_starts[env_ids], min=1.0)
         self.extras["episode"]["landing_hit_rate"] = torch.mean(self.jump_target_hits[env_ids] / jump_den)
@@ -721,15 +715,7 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
         # the dense in-place landing control (Stage 1, target=spawn) is preserved.
         pz = self.root_states[:, 2]
         min_h = float(getattr(self.cfg.rewards, "projected_landing_min_height", 0.40))
-        # RAMP the height gate instead of a HARD cliff (2026-08-01): below `low` (~rest height) -> 0 (farm-proof:
-        # a stander/sprawl earns nothing), FULL at min_h (0.40, unchanged for real jumps), LINEAR in between. WHY:
-        # the failed runs squat fine (squatQ=1.0) but stall at a WEAK hop (peak ~0.35 < 0.40) where this reward was
-        # exactly 0 -> no gradient to jump higher -> stuck below the cliff (the ~1/3 discovery trap). The ramp gives
-        # a 0.35 hop ~50% reward + a gradient to push the peak up over 0.40, turning "cross the cliff by luck" into
-        # "walk up the slope" -> reliable discovery. Above 0.40 the reward is identical to before (clamped to 1).
-        low = float(getattr(self.cfg.rewards, "projected_landing_ramp_low", 0.30))
-        ramp = torch.clamp((pz - low) / max(min_h - low, 1e-3), 0.0, 1.0)
-        active = (self.airborne & self._jump_commanded() & self._squat_deep_enough()).float() * ramp
+        active = (self.airborne & (pz > min_h) & self._jump_commanded() & self._squat_deep_enough()).float()
         g = 9.81
         vz = self.root_states[:, 9]
         h_land = self.env_origins[:, 2] + float(self.cfg.rewards.base_height_target)
@@ -817,15 +803,7 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
         # projected_landing (farm-proof: a legs-tucked sprawl can't clear the height gate).
         pz = self.root_states[:, 2]
         min_h = float(getattr(self.cfg.rewards, "projected_landing_min_height", 0.40))
-        # RAMP the height gate instead of a HARD cliff (2026-08-01): below `low` (~rest height) -> 0 (farm-proof:
-        # a stander/sprawl earns nothing), FULL at min_h (0.40, unchanged for real jumps), LINEAR in between. WHY:
-        # the failed runs squat fine (squatQ=1.0) but stall at a WEAK hop (peak ~0.35 < 0.40) where this reward was
-        # exactly 0 -> no gradient to jump higher -> stuck below the cliff (the ~1/3 discovery trap). The ramp gives
-        # a 0.35 hop ~50% reward + a gradient to push the peak up over 0.40, turning "cross the cliff by luck" into
-        # "walk up the slope" -> reliable discovery. Above 0.40 the reward is identical to before (clamped to 1).
-        low = float(getattr(self.cfg.rewards, "projected_landing_ramp_low", 0.30))
-        ramp = torch.clamp((pz - low) / max(min_h - low, 1e-3), 0.0, 1.0)
-        active = (self.airborne & self._jump_commanded() & self._squat_deep_enough()).float() * ramp
+        active = (self.airborne & (pz > min_h) & self._jump_commanded() & self._squat_deep_enough()).float()
         g = 9.81
         vz = self.root_states[:, 9]
         h_land = self.env_origins[:, 2] + float(self.cfg.rewards.base_height_target)
@@ -908,29 +886,6 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
         pushoff = self.jumping_state & (~self.has_taken_off) & (self.root_states[:, 9] > 0.0)
         squat_down = self.jumping_state & (~self.has_taken_off) & (~self._squat_deep_enough())
         return torch.where(pushoff | squat_down, torch.zeros_like(l1), l1)
-
-    def _reward_run_up(self):
-        # CONTACT-BASED CLEAN-TAKEOFF penalty (user, 2026-08-01). A clean jump leaves the ground ONCE: once a
-        # foot has LIFTED during the load (jump_min_contact < 4 -> takeoff started), NO foot may re-contact
-        # before landing. self.jump_replant latches True on any such re-plant (stutter-step / run-up to build
-        # forward momentum). Penalize per AIRBORNE step of an UNCLEAN (re-planted) jump so a run-up jump earns
-        # LESS than a clean one -> the policy converges to a single clean push and the reach honestly
-        # self-limits at the clean-jump range (no artificial dx cap). Returns positive; the config scale is
-        # NEGATIVE. SOFT (no termination) + GATED POST-DISCOVERY (_takeoff_omega_on, same latch as
-        # grounded_jump / clean_landing) so it NEVER blocks the from-scratch messy jumping the robot must
-        # discover first. NOTE: catches STEPPING run-up (foot lift + re-plant); a pure ground-SLIDE (feet never
-        # lift, body creeps) evades the contact test -> add a takeoff-displacement guard if a slide appears.
-        if not getattr(self, "_takeoff_omega_on", False):
-            return torch.zeros(self.num_envs, device=self.device)
-        # GRADUALLY OPEN (user, 2026-08-01): after the succ-latch opens (discovery confirmed), RAMP the penalty
-        # 0 -> 1 over run_up_ramp_steps so the clean-takeoff requirement comes in SMOOTHLY -- the just-confirmed
-        # jump is not slammed by the full penalty the instant the gate opens (which could disrupt the fresh
-        # discovery). ramp = clamp((step_count - latch_step) / ramp_steps, 0, 1).
-        ramp_steps = float(getattr(self.cfg.rewards, "run_up_ramp_steps", 19200.0))
-        latch = self._takeoff_omega_latch_step if self._takeoff_omega_latch_step is not None else int(self.step_count)
-        ramp = min(1.0, max(0.0, (float(self.step_count) - float(latch)) / max(ramp_steps, 1.0)))
-        active = self.airborne & self._squat_deep_enough() & self.jump_replant
-        return active.float() * ramp
 
     def _reward_grounded_jump(self):
         # MUST-LAUNCH penalty (landing override) -- CLOSE the "retreat to NOT jumping" escape. Diagnosis (Jun21
