@@ -153,33 +153,6 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
         self._farband_hit_acc = 0.0
         self._farband_n_acc = 0.0
 
-        # ATANASSOV OBS HISTORY (2026-07-30): ring of the last history_length STACKED frames (kinematic state +
-        # previous action, 49 dims each). compute_observations rolls it every substep and concatenates the
-        # flattened stack with the current-only single extras; _prime_history refills it with the current frame
-        # on reset (no zero-padding transient). All obs-component tensors are already allocated by
-        # super()._init_buffers() above (except motor_fatigue/torques -- see below), so priming here is safe.
-        self.obs_history = torch.zeros(
-            self.num_envs, int(self.cfg.env.history_length), int(self.cfg.env.num_stacked_frame),
-            dtype=torch.float, device=self.device,
-        )
-        # ASYMMETRIC CRITIC (2026-07-30): the critic sees a SHORT stack (c_frame_stack) of PRIVILEGED frames,
-        # NOT the full history_length actor stack -> avoids the full-stack value overfitting that killed the
-        # earlier runs' advantages/discovery. (Mirrors my_go2_jump's c_frame_stack=3.)
-        self.critic_history = torch.zeros(
-            self.num_envs, int(self.cfg.env.c_frame_stack), int(self.cfg.env.single_num_privileged_obs),
-            dtype=torch.float, device=self.device,
-        )
-        # motor_fatigue / torques are allocated by go2_torque.__init__ AFTER super().__init__() (which runs
-        # this _init_buffers), so they don't exist yet at prime time -> allocate zeros defensively (go2_torque
-        # re-zeros them right after, so this is harmless and matches the "no torque applied yet" init state).
-        # (Note: torques/fatigue are in the CURRENT-only extras now, not the stacked frame, but _get_stacked_frame
-        # reads self.actions which the base already zero-allocated, so priming is safe either way.)
-        if not hasattr(self, "motor_fatigue"):
-            self.motor_fatigue = torch.zeros(self.num_envs, self.num_dofs, dtype=torch.float, device=self.device)
-        if not hasattr(self, "torques"):
-            self.torques = torch.zeros(self.num_envs, self.num_dofs, dtype=torch.float, device=self.device)
-        self._prime_history(torch.arange(self.num_envs, device=self.device))
-
     # ------------------------------------------------------------------ #
     # Reset — set landing target = spawn xy + commanded displacement.
     # The robot spawns facing +x (identity heading) so the displacement maps
@@ -194,143 +167,6 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
         self.landing_target[env_ids, 0] = self.env_origins[env_ids, 0] + init_x + self.commands[env_ids, 0]
         self.landing_target[env_ids, 1] = self.env_origins[env_ids, 1] + init_y + self.commands[env_ids, 1]
         self._update_dx_curriculum()
-        # OBS HISTORY: refill the just-reset envs' history with their fresh single-frame obs (commands +
-        # landing_target above are now the reset values), so stale pre-reset frames don't leak in.
-        if hasattr(self, "obs_history"):
-            self._prime_history(env_ids)
-
-    # ------------------------------------------------------------------ #
-    # ATANASSOV-STYLE OBSERVATION (2026-07-30). Faithful to Atanassov et al. 2025 "OBSERVATION SPACE":
-    #   * a STACKED history (x history_length) of the KINEMATIC STATE + PREVIOUS ACTION -> lets the policy
-    #     "implicitly reason about its own dynamics" (the whole point of the history);
-    #   * the COMMAND and the torque-control specifics are CURRENT-ONLY (Atanassov keeps the command g single,
-    #     NOT stacked). We do NOT stack the command 20x (pure redundancy) nor 20x of the self-generated raw
-    #     torques (240 dims of noise that diluted discovery in the earlier all-stacked version).
-    # obs_buf = [ stacked_frame(49) x history_length | single_extras(32) ].
-    # ------------------------------------------------------------------ #
-    def _get_stacked_frame(self):
-        """Per-frame STACKED obs (49): kinematic state + PREVIOUS ACTION. This is what rolls in obs_history."""
-        foot_contact_obs = self._get_contact_state().float()
-        frame = torch.cat(
-            (
-                self.base_lin_vel * self.obs_scales.lin_vel,                       # 3
-                self.base_ang_vel * self.obs_scales.ang_vel,                       # 3
-                self.projected_gravity,                                            # 3
-                (self.dof_pos - self.default_dof_pos) * self.obs_scales.dof_pos,   # 12
-                self.dof_vel * self.obs_scales.dof_vel,                            # 12
-                foot_contact_obs,                                                  # 4
-                self.actions,                                                      # 12 previous action (Atanassov)
-            ),
-            dim=-1,
-        )
-        return torch.nan_to_num(frame, nan=0.0, posinf=100.0, neginf=-100.0)
-
-    def _get_single_extras(self):
-        """CURRENT-only (NOT stacked) extras (32): command (Atanassov keeps g single) + torque-control specifics
-        (raw torques / motor fatigue / PD blend) that don't belong in the kinematic history."""
-        err_world = self.landing_target[:, :2] - self.root_states[:, :2]
-        _, _, yaw = get_euler_xyz(self.base_quat)
-        cos_y, sin_y = torch.cos(yaw), torch.sin(yaw)
-        err_fwd = cos_y * err_world[:, 0] + sin_y * err_world[:, 1]
-        err_lat = -sin_y * err_world[:, 0] + cos_y * err_world[:, 1]
-        landing_err_obs = torch.stack((err_fwd, err_lat, torch.zeros_like(err_fwd)), dim=-1)   # 3
-        height_obs = torch.cat(
-            (
-                self.root_states[:, 2:3] * 2.0,
-                (self.commands[:, 3:4] - self.root_states[:, 2:3]) * 2.0,
-            ),
-            dim=-1,
-        )                                                                                       # 2
-        extras = torch.cat(
-            (
-                landing_err_obs,                # 3  command: yaw-frame target error
-                self.commands[:, 3:4] * 2.0,    # 1  command: desired height
-                self.commands[:, 4:5],          # 1  command: jump toggle (cmd4)
-                height_obs,                     # 2  root height + height-to-go
-                self.torques,                   # 12 torque-control specific
-                self.motor_fatigue.detach(),    # 12 torque-control specific
-                self.pd_prior_alpha,            # 1  PD blend
-            ),
-            dim=-1,
-        )
-        return torch.nan_to_num(extras, nan=0.0, posinf=100.0, neginf=-100.0)
-
-    def _get_privileged_frame(self):
-        """Per-frame PRIVILEGED obs (single_num_privileged_obs): current-frame proprioception (stacked_frame
-        content) + current extras + PRIVILEGED info the actor never sees (root height, base lin vel, feet
-        local pos/vel/contact-forces). The critic stacks only c_frame_stack of THESE (short) -- NOT the full
-        history_length actor stack. A full-stack critic overfits (value_loss->0; the whole-stack-as-state
-        overfitting the RL literature warns about), which kills the advantages that reinforce the discovered
-        squat. my_go2_jump (working torque+PD+stacking jump) uses c_frame_stack=3 for exactly this reason."""
-        feet_pos = self.rigid_body_states[:, self.feet_indices, :3]
-        feet_pos_local = feet_pos - self.root_states[:, :3].unsqueeze(1)
-        feet_vel = self.rigid_body_states[:, self.feet_indices, 7:10]
-        feet_contact_forces = self.contact_forces[:, self.feet_indices, :]
-        priv_extra = torch.cat(
-            (
-                self.root_states[:, 2:3],
-                self.base_lin_vel,
-                feet_pos_local.reshape(self.num_envs, -1),
-                feet_vel.reshape(self.num_envs, -1),
-                feet_contact_forces.reshape(self.num_envs, -1),
-            ),
-            dim=-1,
-        )                                                              # 40
-        frame = torch.cat((self._get_stacked_frame(), self._get_single_extras(), priv_extra), dim=-1)  # 49+32+40=121
-        return torch.nan_to_num(frame, nan=0.0, posinf=100.0, neginf=-100.0)
-
-    def _prime_history(self, env_ids):
-        """Fill the given envs' actor + critic history with the current frame (reset / init) -- no zero transient."""
-        if len(env_ids) == 0:
-            return
-        frame = self._get_stacked_frame()
-        n = int(self.cfg.env.history_length)
-        self.obs_history[env_ids] = frame[env_ids].unsqueeze(1).repeat(1, n, 1)
-        if hasattr(self, "critic_history"):
-            pframe = self._get_privileged_frame()
-            c = int(self.cfg.env.c_frame_stack)
-            self.critic_history[env_ids] = pframe[env_ids].unsqueeze(1).repeat(1, c, 1)
-
-    def compute_observations(self):
-        frame = self._get_stacked_frame()
-        if self.add_noise:
-            frame = frame + (2 * torch.rand_like(frame) - 1) * self.frame_noise_scale_vec
-        self.obs_history = torch.roll(self.obs_history, shifts=-1, dims=1)   # oldest frame drops out
-        self.obs_history[:, -1, :] = frame                                  # newest frame in
-        stacked = self.obs_history.reshape(self.num_envs, -1)               # (N, history_length*49)
-
-        extras = self._get_single_extras()
-        if self.add_noise:
-            extras = extras + (2 * torch.rand_like(extras) - 1) * self.extras_noise_scale_vec
-        self.obs_buf = torch.cat((stacked, extras), dim=-1)                 # (N, history_length*49 + 32)
-
-        if self.num_privileged_obs is not None:
-            # ASYMMETRIC CRITIC: roll a SHORT (c_frame_stack) ring of PRIVILEGED frames -> the critic input is
-            # small (c_frame_stack * single_num_privileged_obs), NOT the full history_length actor stack.
-            pframe = self._get_privileged_frame()                              # (N, single_num_privileged_obs)
-            self.critic_history = torch.roll(self.critic_history, shifts=-1, dims=1)
-            self.critic_history[:, -1, :] = pframe
-            self.privileged_obs_buf = self.critic_history.reshape(self.num_envs, -1)   # (N, c_frame_stack*single_priv)
-
-    def _get_noise_scale_vec(self, cfg):
-        # Noise for the [ stacked_frame(49) x history_length | single_extras(32) ] layout. Stored split so
-        # compute_observations can noise the newest frame and the extras separately.
-        self.add_noise = self.cfg.noise.add_noise
-        noise_scales = self.cfg.noise.noise_scales
-        noise_level = self.cfg.noise.noise_level
-        # per-STACKED-FRAME (49): lin_vel3 ang_vel3 grav3 dofpos12 dofvel12 foot4 prevact12
-        frame = torch.zeros(int(self.cfg.env.num_stacked_frame), device=self.device)
-        frame[0:3] = noise_scales.lin_vel * noise_level * self.obs_scales.lin_vel
-        frame[3:6] = noise_scales.ang_vel * noise_level * self.obs_scales.ang_vel
-        frame[6:9] = noise_scales.gravity * noise_level
-        frame[9:21] = noise_scales.dof_pos * noise_level * self.obs_scales.dof_pos
-        frame[21:33] = noise_scales.dof_vel * noise_level * self.obs_scales.dof_vel
-        frame[33:37] = 0.0    # foot contact
-        frame[37:49] = 0.0    # previous action (exact, no noise)
-        self.frame_noise_scale_vec = frame
-        # single EXTRAS (32): command + torque specifics -> observed as-is (no noise)
-        self.extras_noise_scale_vec = torch.zeros(int(self.cfg.env.num_single_extras), device=self.device)
-        return torch.cat((frame.repeat(int(self.cfg.env.history_length)), self.extras_noise_scale_vec))
 
     def _resample_commands(self, env_ids):
         # BIASED command sampling (Atanassov local-difficulty): after the parent draws dx uniformly from
@@ -602,10 +438,7 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
     # Only the yaw component of orientation is used so pitch/roll in flight do
     # not scramble the target direction. 69-dim layout + mirror parity preserved.
     # ------------------------------------------------------------------ #
-    def _compute_observations_flat_UNUSED(self):
-        # DEAD (2026-07-27): the ACTIVE compute_observations is the OBS-HISTORY version defined above
-        # (near _get_single_observation). This old single-frame builder is kept only as a reference for
-        # the exact 69-dim layout; it is never called (do not re-add a `compute_observations` name here).
+    def compute_observations(self):
         foot_contact_obs = self._get_contact_state().float()
         motor_fatigue = self.motor_fatigue.detach()
 
@@ -955,9 +788,9 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
         # pays nothing -> it does not bias toward shorter/lower jumps. yaw (w_z) is excluded because it
         # may be commanded in Stage 2.
         # ONE-SIDED pitch rate (user): roll stays symmetric (any roll is bad), but the PITCH rate is penalized
-        # only in the direction the ORIGINAL 4600 config used. REVERTED the 2026-07-24 sign fix (2026-07-27,
-        # user): the observation-history experiment starts from the PURE 4600 baseline (the farther jump), so
-        # base_ang_vel_xy goes back to clamp(-base_ang_vel[1]) exactly as model_4600 was trained with.
+        # only in the NOSE-DOWN direction (base_ang_vel[:,1] < 0 = nose-down spin). The nose-UP launch rotation
+        # (rear-hip-driven) is FREE -> unlocks the pitch-gated rear-hip potential without imparting a forward
+        # face-plant spin. (nose-down: projected_gravity[0]>0 AND base_ang_vel[1]<0, confirmed in torque_diag.)
         roll_sq = torch.square(self.base_ang_vel[:, 0])
         nose_down_rate = torch.square(torch.clamp(-self.base_ang_vel[:, 1], min=0.0))
         ang_vel_sq = roll_sq + nose_down_rate

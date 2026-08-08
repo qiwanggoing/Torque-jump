@@ -49,24 +49,6 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
     # proven ~0.30 default stance (inherited). Revisit launch depth later via a milder crouch +
     # stronger default_hip_pos if pursuing more height.
 
-    class env(GO2OmniJumpCurriculumTorqueCfg.env):
-        # ATANASSOV-STYLE OBSERVATION (2026-07-30). obs_buf = [ stacked_frame(49) x history_length | extras(32) ].
-        # STACKED (x20, kinematic state + PREVIOUS ACTION): lin_vel3 + ang_vel3 + grav3 + dofpos12 + dofvel12 +
-        #   foot4 + prev_action12 = 49  -> lets the policy reason about its own dynamics over ~0.10s (20 substeps).
-        # SINGLE extras (current-only, NOT stacked): command(landing_err3 + cmd_h1 + cmd4_1 + height2) +
-        #   torques12 + motor_fatigue12 + pd_prior1 = 32. Atanassov keeps the command single (no 20x redundancy),
-        #   and we keep the self-generated raw torques single (stacking 240 dims of them diluted discovery before).
-        num_stacked_frame = 49
-        num_single_extras = 32
-        history_length = 20
-        num_observations = history_length * num_stacked_frame + num_single_extras   # 49*20 + 32 = 1012
-        # ASYMMETRIC CRITIC (2026-07-30, per working my_go2_jump + RL literature: a critic fed the FULL stack
-        # overfits -> value_loss->0 -> bad advantages -> discovery dies). The critic instead sees a SHORT stack
-        # of PRIVILEGED frames: single_priv = stacked_frame(49) + extras(32) + priv_extra(40) = 121 per frame.
-        c_frame_stack = 3
-        single_num_privileged_obs = num_stacked_frame + num_single_extras + 40      # 49+32+40 = 121
-        num_privileged_obs = c_frame_stack * single_num_privileged_obs              # 3*121 = 363
-
     class control(GO2OmniJumpCurriculumTorqueCfg.control):
         # Step H: turn ON the dual-head aux-stabiliser torque path in _compute_torques.
         # (Default False in the parent -> all other tasks with num_actions=12 are untouched.)
@@ -492,12 +474,7 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
                                              # so the error term = wz^2 = damp spin during flight -> fixes the heading
                                              # drift. Kept WELL below the main jump rewards (peak25/vz15/landing20); it's
                                              # a stabilizer. Stage2: open commands[2] -> same term becomes turn-tracking.
-            forward_reach = 60.0             # REVERTED 40->60 (2026-07-24): the fr=40 experiment (run Jul18) proved fr buys the
-                                             # nose-down takeoff dive (takeoff pitch +21->+12) but cost 0.15m air reach and did NOT
-                                             # kill flight leg-swing. Root cause found instead = a SIGN BUG in _reward_base_ang_vel_xy
-                                             # (it penalized nose-UP recovery, freed the nose-down dive). Fixing that bug is the real
-                                             # lever, so fr goes back to 60 to isolate the bug fix as the single variable.
-                                             # 保留强的(user, 2026-07-04): option-1 eval欠程的真凶是 PROBE(喂不可能命令)不是
+            forward_reach = 60.0             # 保留强的(user, 2026-07-04): option-1 eval欠程的真凶是 PROBE(喂不可能命令)不是
                                              # forward_reach. probe关了+漏算失败修了(dx_env诚实=命令都够得到)后, forward_reach强是好事:
                                              # 推策略把够得到的命令跳准跳足, 精度奖励(projected_landing/landing_position)防过冲, 平衡在正好落点.
                                              # DOMINANT driver so the policy pushes HARD to reach far. WATCH: if it trades
@@ -723,13 +700,8 @@ class GO2OmniJumpLandingTorqueCfgPPO(GO2OmniJumpCurriculumTorqueCfgPPO):
         aux_head_dim = 12
 
     class algorithm(GO2OmniJumpCurriculumTorqueCfgPPO.algorithm):
-        # ATANASSOV OBS (2026-07-30): symmetry loss OFF. The obs is now [stacked_frame(49)x20 | extras(32)] --
-        # NOT a uniform stack of the 69-dim obs_permutation, so the per-frame mirror (frame_stack) no longer maps
-        # the layout and would corrupt the mirror. Atanassov itself uses no symmetry loss. (Revisit with a custom
-        # obs_permutation for the 49-frame + 32-extras layout only if a persistent lateral bias shows up.)
-        sym_loss = False
-        sym_coef = 0.0
-        frame_stack = 1
+        sym_coef = 1.0   # was 0.5: match my_go2_jump — tighter LEFT-RIGHT mirror symmetry
+                         # (front-rear is handled by the pushoff_leg_sync reward, not sym_loss)
         # Step H (final): τ_comp is OUT of the PPO action, so act_permutation stays 12-dim (inherited
         # = single-head). BC loss weight for the deterministic comp_head:
         bc_coef = 1.0
