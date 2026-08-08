@@ -40,6 +40,45 @@ def update_inertia(I_box, mass_box, com_box, mass_point, point_pos):
 class GO2Torque(LeggedRobot):
     cfg: GO2TorqueCfg
 
+    # ===== JOINT POSITION LIMITS = the REAL Go2 range (2026-08-07) =========================
+    # The SATA URDF TRUNCATES the thigh to [0, 1.5] (front) / [0, 2.0] (rear); the official
+    # unitree range is [-1.5708, 3.4907] / [-0.5236, 4.5379]. hip and calf already match.
+    # Consequence measured on model_4600 (one deploy jump, Isaac): FL_thigh sits at EXACTLY
+    # 1.500 and RL_thigh at -0.006 through the whole jump -- the policy learns to LEAN ON a
+    # mechanical stop that gives free reaction force. That stop does not exist in MuJoCo or on
+    # hardware (same policy there swings the thigh to -0.64 / 1.61), so it is also one of the
+    # biggest sim2sim gaps we have. Torque/velocity limits are already overridden below for the
+    # same reason (wrong URDF, correct code); position limits were the one that got missed.
+    # Enabled per-task via cfg.asset.official_dof_pos_limits (default False -> other tasks
+    # untouched). CHANGES THE PHYSICS -> policies must be retrained.
+    OFFICIAL_DOF_POS_LIMITS = {
+        "hip":         (-1.0472, 1.0472),
+        "thigh_front": (-1.5708, 3.4907),
+        "thigh_rear":  (-0.5236, 4.5379),
+        "calf":        (-2.7227, -0.83776),
+    }
+    # EXPLICIT soft band = where the `dof_pos_limits` reward starts pushing back. The inherited
+    # scheme was a FRACTION of the range (soft_dof_pos_limit=0.9), which silently stops
+    # constraining anything once the range is widened (0.9 x a huge range = never reached).
+    # hip/calf keep exactly the old band (their hard limits were already right, and the calf one
+    # is what stopped the over-deep squat from jamming the knee). The thigh band is opened well
+    # past what the policy actually wants (free-range MuJoCo rollout: thigh in [-0.64, 1.61])
+    # while still guarding against folding the leg into the body.
+    SOFT_DOF_POS_BAND = {
+        "hip":         (-0.9425, 0.9425),
+        "thigh_front": (-1.20, 2.40),
+        "thigh_rear":  (-0.40, 2.60),
+        "calf":        (-2.6285, -0.9320),
+    }
+
+    @staticmethod
+    def _dof_limit_key(name):
+        if "hip" in name:
+            return "hip"
+        if "calf" in name:
+            return "calf"
+        return "thigh_rear" if name.startswith(("RL", "RR")) else "thigh_front"
+
     def __init__(self, cfg: GO2TorqueCfg, sim_params, physics_engine, sim_device, headless):
         self.max_torque_scale = cfg.growth.max_torque_scale
         self.start_torque_scale = cfg.growth.start_torque_scale
@@ -71,6 +110,16 @@ class GO2Torque(LeggedRobot):
         Returns:
             [numpy.array]: Modified DOF properties
         """
+        # Rewrite the asset's limits BEFORE anything reads them: the returned props go straight to
+        # gym.set_actor_dof_properties, so this is what the SOLVER enforces (not just our tensors).
+        # Must run for every env_id, not only 0.
+        use_official = getattr(self.cfg.asset, "official_dof_pos_limits", False)
+        if use_official:
+            for i, name in enumerate(self.dof_names):
+                lo, hi = self.OFFICIAL_DOF_POS_LIMITS[self._dof_limit_key(name)]
+                props["lower"][i] = lo
+                props["upper"][i] = hi
+
         if env_id == 0:
             self.dof_pos_limits = torch.zeros(self.num_dof, 2, dtype=torch.float, device=self.device,
                                               requires_grad=False)
@@ -94,6 +143,20 @@ class GO2Torque(LeggedRobot):
                 r = self.dof_pos_limits[i, 1] - self.dof_pos_limits[i, 0]
                 self.soft_dof_pos_limits[i, 0] = m - 0.5 * r * self.cfg.rewards.soft_dof_pos_limit
                 self.soft_dof_pos_limits[i, 1] = m + 0.5 * r * self.cfg.rewards.soft_dof_pos_limit
+
+            if use_official:
+                # Replace the fraction-of-range soft limits with the explicit band (see the class
+                # constant): a fraction of the now-correct wide thigh range would never be reached.
+                for i, name in enumerate(self.dof_names):
+                    lo, hi = self.SOFT_DOF_POS_BAND[self._dof_limit_key(name)]
+                    self.soft_dof_pos_limits[i, 0] = lo
+                    self.soft_dof_pos_limits[i, 1] = hi
+                print("[dof-limits] OFFICIAL Go2 joint ranges in use (SATA URDF thigh truncation "
+                      "overridden). hard/soft per joint type:")
+                for key in ("hip", "thigh_front", "thigh_rear", "calf"):
+                    (hl, hh), (sl, sh) = self.OFFICIAL_DOF_POS_LIMITS[key], self.SOFT_DOF_POS_BAND[key]
+                    print(f"    {key:12s} hard [{hl:+.4f}, {hh:+.4f}]  soft [{sl:+.4f}, {sh:+.4f}]  "
+                          f"terminate outside [{hl - 0.05:+.4f}, {hh + 0.05:+.4f}]")
         return props
 
     def check_termination(self):

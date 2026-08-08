@@ -62,6 +62,10 @@ class GO2TorqueCfg(GO2RoughCfg):
         self_collisions = 0
         terminate_after_contacts_on = ["Head"]
         penalize_contacts_on = ["thigh", "calf"]
+        # Override the URDF's TRUNCATED thigh range with the official Go2 one (see
+        # GO2Torque.OFFICIAL_DOF_POS_LIMITS). Default OFF so every other task keeps its trained
+        # physics; the landing task turns it on. Changing it requires a retrain.
+        official_dof_pos_limits = False
 
     class terrain:
         mesh_type = 'trimesh'  # "heightfield" # none, plane, heightfield or trimesh
