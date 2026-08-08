@@ -49,6 +49,8 @@ from .go2.go2_omnijump_curriculum_torque.go2_omnijump_curriculum_torque import G
 from .go2.go2_omnijump_landing_torque.go2_omnijump_landing_torque_config import (
     GO2OmniJumpLandingTorqueCfg,
     GO2OmniJumpLandingTorqueCfgPPO,
+    GO2OmniJumpLandingTorqueStage1Cfg,
+    GO2OmniJumpLandingTorqueStage1CfgPPO,
 )
 from .go2.go2_omnijump_landing_torque.go2_omnijump_landing_torque import GO2OmniJumpLandingTorque
 from .go2.go2_omnijump_far_torque.go2_omnijump_far_torque_config import (
@@ -90,6 +92,13 @@ task_registry.register(
     GO2OmniJumpLandingTorque,
     GO2OmniJumpLandingTorqueCfg(),
     GO2OmniJumpLandingTorqueCfgPPO(),
+)
+# STAGE 1 (in-place jump) -- same env/obs/actions as above so its policy warm-starts stage 2.
+task_registry.register(
+    "go2_landing_stage1",
+    GO2OmniJumpLandingTorque,
+    GO2OmniJumpLandingTorqueStage1Cfg(),
+    GO2OmniJumpLandingTorqueStage1CfgPPO(),
 )
 task_registry.register(
     "go2_omnijump_far_torque",

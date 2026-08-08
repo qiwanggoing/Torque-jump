@@ -54,6 +54,15 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
         # (Default False in the parent -> all other tasks with num_actions=12 are untouched.)
         aux_stabilizer_head = True
 
+    class asset(GO2OmniJumpCurriculumTorqueCfg.asset):
+        # 2026-08-07: use the REAL Go2 joint ranges instead of the SATA URDF's truncated thigh
+        # ([0,1.5]/[0,2.0] vs official [-1.5708,3.4907]/[-0.5236,4.5379]). model_4600 was measured
+        # sitting on those fake stops for the whole jump (FL_thigh pinned at 1.500, RL_thigh at
+        # -0.006), which is both a learned crutch and a major sim2sim gap -- MuJoCo/hardware have
+        # the real, much wider range. See GO2Torque.OFFICIAL_DOF_POS_LIMITS / SOFT_DOF_POS_BAND.
+        # REQUIRES A RETRAIN: old checkpoints were trained against the walls.
+        official_dof_pos_limits = True
+
     class domain_rand(GO2OmniJumpCurriculumTorqueCfg.domain_rand):
         # RE-CENTER base-mass DR on the URDF-nominal robot (2026-07-05). The inherited range
         # [-1, +5] (mean +2kg) was HEAVY-BIASED: the mass-BLIND policy (mass not in obs) tunes ONE
@@ -105,6 +114,11 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
         # Set landing_stage = 2 to open the ranges below; the env widens
         # command_ranges["lin_vel_x"/"lin_vel_y"] accordingly at init.
         landing_stage = 2                      # STAGE 2 ON: env widens lin_vel_x/y ranges to the disp ranges below.
+        # Anchor for the landing target locked at takeoff. False = squat bottom (the anti-cheat anchor:
+        # stops the creep from ADDING distance, but the target walks forward WITH the creep so creeping
+        # stays free). True = the xy the jump was commanded from -> every metre crept is a metre of
+        # landing error. Only meaningful at dx=0 (see the note in _update_jump_state) -> stage 1 sets it.
+        landing_anchor_jump_start = False
         landing_disp_x_stage2 = [0.5, 1.5]    # FIXED forward range (2026-07-11, user): no curriculum-from-0 -> command
                                               # 0.5-1.5 m directly from the start. Goal = FARTHER: every command is far, so
                                               # forward_reach (capped-at-command) always pays for jumping as far as possible,
@@ -410,6 +424,16 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
         # the jump chain until it actually folds-then-jumps, so stance_squat becomes the dominant
         # early reward (the squat is the only thing that scores) -- the intended guidance.
         rsi_prob = 0.0                    # was 0.2 (inherited). See note above. static_frac etc. now inert.
+        # --- Olsen-2025 style RSI (stage 1 turns these on; defaults keep the old behaviour) ---
+        rsi_stand_sweep = False           # True = init AT REST at a randomized standing height, deep-squat
+                                          # biased early and BROADENING to the nominal stance as succ rises
+                                          # (_rsi_stand_sweep_pose). Fixes the 2026-06-05 failure: the old RSI
+                                          # was a FIXED teleport into q_squat WITH launch velocity, so it only
+                                          # ever demoed the push and never the fold -> popping.
+        rsi_gate_exempt = True            # False = RSI envs must earn the squat gate like everyone else.
+        rsi_sweep_foot_height_lo = 0.10   # deepest init (== squat_foot_height)
+        rsi_sweep_foot_height_hi = 0.30   # tallest init (== nominal stance)
+        rsi_sweep_levels = 5
         rsi_static_frac = 0.5              # of the rsi_prob envs, half = static deep-squat, half = launch
         rsi_static_vel_z_min = -0.1       # near-rest vz at the squat bottom (slight down/up)
         rsi_static_vel_z_max = 0.3
@@ -734,3 +758,75 @@ class GO2OmniJumpLandingTorqueCfgPPO(GO2OmniJumpCurriculumTorqueCfgPPO):
         # it crosses ~0.55 and collapses the jump. (Raise to 600-800 if a fresh run discovers slower; data = iter100.)
         entropy_anneal_iter = 500
         entropy_coef_final = 0.001
+
+
+# ============================================================================================
+# STAGE 1 -- IN-PLACE JUMP (Atanassov 2025 pi_1)
+# ============================================================================================
+# WHY a separate task rather than "just set the command to 0" inside the stage-2 config:
+#   The behaviour we want is ONE COHERENT PUSH. In an in-place jump that is the UNIQUE solution --
+#   you cannot shuffle your way into the air -- so stage 1 needs no anti-stutter penalty, no gate
+#   and no termination: the target behaviour is the only behaviour that scores. That is structurally
+#   different from bolting a run-up penalty onto a task that also pays for creeping, which is what
+#   every previous attempt did (clean_takeoff_terminate / run_up gate / run_up penalty -- all three
+#   collapsed discovery, because they were applied while discovery was still fragile).
+#
+# Three changes, nothing else (the 25 reward weights are untouched -- they DEGENERATE correctly at
+# dx=0: forward_reach is capped at cmd_dist -> ~0 and inert, projected_landing / landing_position /
+# takeoff_velocity_match become "launch vertically and land where you left", the height terms are
+# already what stage 1 wants):
+#   1. dx = dy = 0
+#   2. landing_anchor_jump_start -- without it the target is anchored at the SQUAT BOTTOM, which is
+#      downstream of the creep, so the creep would be merely NEUTRAL instead of strictly negative.
+#   3. RSI on, Olsen-style (at rest, height sweep, no gate exemption). Atanassov's ablation: "the RSI
+#      is required for learning the jumping-in-place task. Without it, the agent converges to a local
+#      optimum and fails to complete the task."
+#
+# Stage 2 = the normal go2_omnijump_landing_torque task, warm-started from this policy (same env,
+# same obs/action dims). Atanassov's other ablation is the reason the warm start matters: "directly
+# training the long-distance jump [even with RSI] also results in an early convergence to a standing
+# behavior, which highlights the need for our curriculum strategy."
+class GO2OmniJumpLandingTorqueStage1Cfg(GO2OmniJumpLandingTorqueCfg):
+    class commands(GO2OmniJumpLandingTorqueCfg.commands):
+        landing_disp_x_stage2 = [0.0, 0.0]     # in place: no forward component
+        landing_disp_y_stage2 = [0.0, 0.0]     # in place: no lateral component
+        landing_anchor_jump_start = True       # creep == landing error (only strictly negative at dx=0)
+        landing_dx_curriculum = False          # no distance curriculum in stage 1
+        # ---- AUTOMATIC STAGE-1 -> STAGE-2 HANDOVER (user 2026-08-07: one run, no checkpoint juggling) ----
+        # Latched ONE-WAY on MEASURED stage-1 mastery: jumps reliably (succ EMA) AND takes off cleanly
+        # (creep EMA). The clean takeoff is the whole point of stage 1, so it GATES the handover instead
+        # of merely being logged. Both EMAs use the 0.99 smoothing already used for the omega latch.
+        stage2_auto = True
+        stage2_succ_gate = 0.85          # successful_jump_rate EMA
+        stage2_creep_max = 0.05          # run_up_creep EMA [m] -- "one coherent push", no shuffling
+        stage2_min_steps = 20000         # floor on common_step_counter before any handover (a fluke early
+                                         # EMA is not mastery). NOTE common_step_counter counts PHYSICS
+                                         # SUBSTEPS (post_physics_step runs per substep in go2_torque), so
+                                         # it is ~96/iter during warmup and ~48/iter at pure torque:
+                                         # 20000 ~ iter 200-400. Deliberately a rough floor, not a schedule.
+        # ranges the handover opens (== the stage-2 task's ranges)
+        landing_disp_x_stage2_after = [0.5, 1.5]
+        landing_disp_y_stage2_after = [-0.30, 0.30]
+
+    class rewards(GO2OmniJumpLandingTorqueCfg.rewards):
+        rsi_prob = 0.3
+        rsi_stand_sweep = True
+        rsi_gate_exempt = False
+
+        # NOTE forward_reach keeps its weight 60 here on purpose. A zero scale is POPPED in
+        # _prepare_reward_function, so the term would never be registered and could not be switched on
+        # at the stage-2 handover. Instead `_reward_forward_reach` RETURNS ZERO while the stage-1 anchor
+        # is active -- it has to, because it pays ABSOLUTE metres capped at cmd_dist =
+        # |landing_target - takeoff_xy|, which under the jump-start anchor equals |creep|: "shuffle 0.5 m
+        # forward, then fly 0.5 m BACK" would farm 0.5 x 60 while a clean in-place jump earns 0. Flipping
+        # landing_anchor_jump_start at the handover therefore revives it automatically -- one flag.
+        # (Every other distance term degenerates safely at dx=0: projected_landing / landing_position
+        # score the ERROR from the anchor so creeping only hurts; takeoff_velocity_match is a bounded
+        # [0,1] match, so a creep only changes which launch velocity is correct -- it cannot be farmed.)
+
+
+
+class GO2OmniJumpLandingTorqueStage1CfgPPO(GO2OmniJumpLandingTorqueCfgPPO):
+    class runner(GO2OmniJumpLandingTorqueCfgPPO.runner):
+        experiment_name = "go2_landing_stage1_inplace"
+        run_name = "stage1_inplace"

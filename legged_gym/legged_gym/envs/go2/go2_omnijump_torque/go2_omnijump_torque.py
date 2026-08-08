@@ -214,10 +214,48 @@ class GO2OmniJumpTorque(GO2Torque):
         self.peak_height_sum[env_ids] = 0.0
         self.jump_evaluations[env_ids] = 0.0
 
+    def _rsi_stand_sweep_pose(self, n):
+        """Olsen-2025 style RSI: start AT REST at a randomized standing height, biased deep-squat early
+        and BROADENING toward the nominal stance as the policy succeeds.
+
+        Why not the old squat air-drop: that one teleported into q_squat with a launch velocity AND was
+        exempt from the squat gate, so it demonstrated only the PUSH half and never the FOLD half
+        (stand -> squat) -- the policy learned to pop, which is why rsi_prob was zeroed on 2026-06-05.
+        The fix in the literature is not "no RSI" but a CURRICULUM OVER THE INIT DISTRIBUTION: deep
+        squat while the jump is still being discovered, normal standing once it works, so the
+        countermovement has to be learned as the distribution widens. Returns (base_height, dof_pose).
+        """
+        lo = float(getattr(self.cfg.rewards, "rsi_sweep_foot_height_lo", 0.10))   # deep squat
+        hi = float(getattr(self.cfg.rewards, "rsi_sweep_foot_height_hi", 0.30))   # nominal stance
+        n_levels = int(getattr(self.cfg.rewards, "rsi_sweep_levels", 5))
+        if not hasattr(self, "_rsi_sweep_poses"):
+            # precompute the K IK poses once (the IK helper is scalar/numpy)
+            self._rsi_sweep_heights = [lo + (hi - lo) * i / max(n_levels - 1, 1) for i in range(n_levels)]
+            self._rsi_sweep_poses = torch.stack(
+                [self._solve_pose_from_foot_height(h) for h in self._rsi_sweep_heights], dim=0)
+        # broaden with measured success: 0 -> only the deepest level, 1 -> the whole range
+        gate = float(getattr(self.cfg.rewards, "takeoff_omega_succ_gate", 0.80))
+        prog = min(max(float(getattr(self, "_succ_rate_ema", 0.0)) / max(gate, 1e-3), 0.0), 1.0)
+        top = 1 + int(round(prog * (n_levels - 1)))                      # levels currently allowed
+        idx = torch.randint(0, top, (n,), device=self.device)
+        heights = torch.tensor(self._rsi_sweep_heights, dtype=torch.float, device=self.device)[idx]
+        return heights, self._rsi_sweep_poses[idx]
+
     def _reset_root_states(self, env_ids):
         super()._reset_root_states(env_ids)
         self.rsi_episode_mask[env_ids] = False
         rsi_prob = float(getattr(self.cfg.rewards, "rsi_prob", 0.0))
+        if rsi_prob > 0.0 and getattr(self.cfg.rewards, "rsi_stand_sweep", False) and len(env_ids) > 0:
+            rsi_mask = torch.rand(len(env_ids), device=self.device) < rsi_prob
+            rsi_ids = env_ids[rsi_mask]
+            if len(rsi_ids) > 0:
+                heights, poses = self._rsi_stand_sweep_pose(len(rsi_ids))
+                self.root_states[rsi_ids, 2] = heights + self.env_origins[rsi_ids, 2]
+                self.root_states[rsi_ids, 7:13] = 0.0                    # at rest: no launch demo
+                self.dof_pos[rsi_ids] = poses
+                self.dof_vel[rsi_ids] = 0.0
+                self.rsi_episode_mask[rsi_ids] = True
+            return
         if rsi_prob > 0.0 and len(env_ids) > 0:
             rsi_mask = torch.rand(len(env_ids), device=self.device) < rsi_prob
             rsi_ids = env_ids[rsi_mask]
@@ -1054,7 +1092,14 @@ class GO2OmniJumpTorque(GO2Torque):
         if thr <= 0.0:
             gate = torch.ones_like(self.jumping_state)
         else:
-            gate = self.rsi_episode_mask | self.squat_qualified
+            # rsi_gate_exempt=False (stage 1): an RSI env must EARN the gate like any other -- it starts
+            # in the squat pose so the hold accumulates honestly, but it no longer gets the whole jump
+            # reward chain handed to it for free. The blanket exemption is what let RSI envs grab the
+            # biggest rewards for a bare push and pulled the shared policy toward popping (2026-06-05).
+            if getattr(self.cfg.rewards, "rsi_gate_exempt", True):
+                gate = self.rsi_episode_mask | self.squat_qualified
+            else:
+                gate = self.squat_qualified
         # EXPERIMENT (user): RE-COUPLE all squat-gated jump rewards (projected_peak/projected_landing/
         # forward_reach/takeoff_velocity_match/all_feet_airborne, plus successful_jump via the squat gate) to
         # the clean-takeoff rule -- a stutter-step / re-plant (jump_replant) withholds the WHOLE jump-reward

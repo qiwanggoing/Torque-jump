@@ -93,6 +93,16 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
         # is locked to squat_root_xy + dx at takeoff. Reset to current xy at each _start_jump.
         self.squat_root_xy = self.root_states[:, :2].clone()
 
+        # RUN-UP ACCOUNTING (2026-08-07). squat_root_xy is recorded AFTER any ground creep, so nothing
+        # in the reward or the logs could see the stutter-step run-up -- measured post-hoc at ~40% of the
+        # total reach. Record the xy at the moment the jump is COMMANDED and report, per episode:
+        #   run_up_creep = |takeoff_xy - jump_start_xy|   ground distance shuffled before leaving the ground
+        #   clean_reach  = |land_xy  - takeoff_xy|        the reach that is actually FLIGHT
+        # Pure logging (extras["episode"]) -- no reward, no gate, no state change reads these.
+        self.jump_start_root_xy = self.root_states[:, :2].clone()
+        self.run_up_creep_sum = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
+        self.clean_reach_sum = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
+
         # Stage 2: widen the displacement ranges that the parent's
         # _resample_commands draws commands[0:2] from. Stage 1 leaves them [0,0]
         # (land in place -> behaviour identical to the proven vertical jumper).
@@ -213,6 +223,10 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
     # ------------------------------------------------------------------ #
     def _reset_jump_buffers(self, env_ids):
         super()._reset_jump_buffers(env_ids)
+        if hasattr(self, "run_up_creep_sum"):
+            self.run_up_creep_sum[env_ids] = 0.0
+            self.clean_reach_sum[env_ids] = 0.0
+            self.jump_start_root_xy[env_ids] = self.root_states[env_ids, :2]
         if hasattr(self, "jump_target_hits"):
             self.jump_target_hits[env_ids] = 0.0
         if hasattr(self, "_ep_counted_far"):
@@ -224,6 +238,9 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
         super()._start_jump(env_ids)
         if len(env_ids) > 0:
             self.squat_root_xy[env_ids] = self.root_states[env_ids, :2]
+            # Same xy, but NEVER moved afterwards -> the run-up anchor (squat_root_xy walks forward
+            # with the creep during the load, which is exactly what hides the run-up).
+            self.jump_start_root_xy[env_ids] = self.root_states[env_ids, :2]
 
     def _update_jump_state(self):
         # SQUAT-BOTTOM capture (BEFORE super updates jump_min_base_z): while loading, whenever the base
@@ -239,11 +256,28 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
         # normal push-off travel (squat -> liftoff) still counts as part of the jump. Locked ONCE ->
         # a fixed world point through flight+landing. squat_root_xy holds this jump's deepest-load xy.
         if torch.any(self.just_took_off):
+            # STAGE-1 ANCHOR (landing_anchor_jump_start): anchor at the xy the jump was COMMANDED from
+            # instead of the squat bottom. Only this makes a ground creep strictly NEGATIVE, and only at
+            # dx=0: with an in-place command every metre shuffled forward is a metre of landing error.
+            # (At dx>0 no anchor helps -- creeping simply substitutes for flight distance and lands on
+            # target either way, which is why a forward stage always needs a curriculum/termination.)
+            anchor = (self.jump_start_root_xy
+                      if getattr(self.cfg.commands, "landing_anchor_jump_start", False)
+                      else self.squat_root_xy)
             self.landing_target[self.just_took_off, 0] = (
-                self.squat_root_xy[self.just_took_off, 0] + self.commands[self.just_took_off, 0]
+                anchor[self.just_took_off, 0] + self.commands[self.just_took_off, 0]
             )
             self.landing_target[self.just_took_off, 1] = (
-                self.squat_root_xy[self.just_took_off, 1] + self.commands[self.just_took_off, 1]
+                anchor[self.just_took_off, 1] + self.commands[self.just_took_off, 1]
+            )
+            # log-only: ground distance shuffled between "jump commanded" and "left the ground"
+            self.run_up_creep_sum[self.just_took_off] += torch.norm(
+                self.takeoff_root_xy[self.just_took_off] - self.jump_start_root_xy[self.just_took_off], dim=1
+            )
+        if torch.any(self.just_landed):
+            # log-only: the reach that is actually FLIGHT (takeoff -> touchdown)
+            self.clean_reach_sum[self.just_landed] += torch.norm(
+                self.landing_root_xy[self.just_landed] - self.takeoff_root_xy[self.just_landed], dim=1
             )
             # PER-ENV 课程: 起跳时锁"这一跳是否被计入的挑战跳"(命令 >= far_frac×自己上界 且 非 probe). episode 末
             # (_log_jump_episode_stats) 按 jump_target_hits 评估升降 → 摔/跳废/落短(hits=0)都算 down, 修漏算失败偏差.
@@ -268,8 +302,64 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
             # (PER-ENV 升降已移到 episode 末 _log_jump_episode_stats: 那里能把"摔/跳废/落短"都算 down, 不像这里
             #  的 just_landed 只看"落了地的跳"→漏算失败→dx_env 虚涨. jump_target_hits 上面已累积供末尾评估.)
 
+    def _maybe_hand_over_to_stage2(self):
+        """AUTOMATIC stage-1 -> stage-2 handover, inside one run (user 2026-08-07).
+
+        Stage 1 (in-place) exists because its UNIQUE solution is one coherent push -- shuffling cannot
+        put you in the air. Once that push is mastered we want the forward task, warm-started from it,
+        without stopping to move checkpoints around. Latched ONE-WAY on MEASURED mastery, never on a
+        step count alone: the policy must jump reliably (succ EMA) AND take off cleanly (creep EMA) --
+        the clean takeoff IS the thing stage 1 is for, so it gates the handover instead of just being
+        logged. Flipping `landing_anchor_jump_start` does double duty: the landing target goes back to
+        the squat-bottom anti-cheat anchor AND `_reward_forward_reach` (registered but returning zero
+        in stage 1) comes alive.
+
+        HONEST CAVEAT: this is a discontinuous task change mid-run -- the value function was fitted on
+        in-place returns and will be wrong for a moment, so expect a transient dip after the switch.
+        Atanassov gets around it by restarting PPO for stage 2 with a fresh optimiser; if the dip turns
+        into a collapse, that (train stage 1, then `--resume` the stage-2 task) is the fallback.
+        """
+        if getattr(self, "_stage2_on", False) or not getattr(self.cfg.commands, "stage2_auto", False):
+            return
+        if not getattr(self.cfg.commands, "landing_anchor_jump_start", False):
+            return                                   # already a stage-2 style task
+        ep = self.extras.get("episode", {})
+        if "run_up_creep" in ep:
+            self._creep_ema = 0.99 * getattr(self, "_creep_ema", 1.0) + 0.01 * float(ep["run_up_creep"])
+        if self.common_step_counter < float(getattr(self.cfg.commands, "stage2_min_steps", 20000)):
+            return
+        succ_ok = self._succ_rate_ema >= float(getattr(self.cfg.commands, "stage2_succ_gate", 0.85))
+        creep_ok = getattr(self, "_creep_ema", 1.0) <= float(getattr(self.cfg.commands, "stage2_creep_max", 0.05))
+        if not (succ_ok and creep_ok):
+            return
+        self._stage2_on = True
+        self._stage2_step = int(self.common_step_counter)
+        self.cfg.commands.landing_anchor_jump_start = False     # squat-bottom anchor + forward_reach ON
+        self.command_ranges["lin_vel_x"] = list(self.cfg.commands.landing_disp_x_stage2_after)
+        self.command_ranges["lin_vel_y"] = list(self.cfg.commands.landing_disp_y_stage2_after)
+        print(f"\n[stage2] HANDOVER at step {self.common_step_counter}: succ_ema={self._succ_rate_ema:.3f} "
+              f"creep_ema={self._creep_ema:.3f}m -> commands dx"
+              f"{self.command_ranges['lin_vel_x']} dy{self.command_ranges['lin_vel_y']}, "
+              f"anchor back to squat-bottom, forward_reach live\n", flush=True)
+
     def _log_jump_episode_stats(self, env_ids):
         super()._log_jump_episode_stats(env_ids)
+        # RUN-UP ACCOUNTING (log only). reach_total = creep + clean, so run_up_share says how much of the
+        # headline distance is shuffled on the ground rather than flown. Post-hoc play measured ~40% on
+        # model_4600; without this metric every "reach" number in training is that fraction of a lie.
+        if hasattr(self, "run_up_creep_sum"):
+            fly_den = torch.clamp(self.jump_flights[env_ids], min=1.0)
+            land_den = torch.clamp(self.jump_landings[env_ids], min=1.0)
+            creep = self.run_up_creep_sum[env_ids] / fly_den
+            clean = self.clean_reach_sum[env_ids] / land_den
+            self.extras["episode"]["run_up_creep"] = torch.mean(creep)
+            self.extras["episode"]["clean_reach"] = torch.mean(clean)
+            self.extras["episode"]["run_up_share"] = torch.mean(creep / torch.clamp(creep + clean, min=1e-3))
+            # stage state, so the handover is visible in the training log
+            self.extras["episode"]["stage2_on"] = torch.tensor(
+                1.0 if getattr(self, "_stage2_on", False) else 0.0, dtype=torch.float, device=self.device)
+            self.extras["episode"]["run_up_creep_ema"] = torch.tensor(
+                float(getattr(self, "_creep_ema", 0.0)), dtype=torch.float, device=self.device)
         # PER-ENV 双向课程升降 (2026-07-04, episode 末评估, 修漏算失败): 对本集"被计入的挑战跳"(_ep_counted_far,
         # 起跳时锁的 far&非probe), 按 jump_target_hits(本集命中数, >=1=命中)升降 — 命中→+step_up, 否则(落短/摔/
         # 跳废, hits=0)→−step_down. 之前在 just_landed 评估会漏掉"没干净落地的失败"(摔了不进 just_landed)→dx_env 虚涨;
@@ -299,6 +389,7 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
             self._succ_rate_ema = 0.99 * self._succ_rate_ema + 0.01 * float(self.extras["episode"]["successful_jump_rate"])
             if self._succ_rate_ema >= float(getattr(self.cfg.rewards, "takeoff_omega_succ_gate", 0.80)):
                 self._takeoff_omega_on = True
+        self._maybe_hand_over_to_stage2()
         jump_den = torch.clamp(self.jump_starts[env_ids], min=1.0)
         self.extras["episode"]["landing_hit_rate"] = torch.mean(self.jump_target_hits[env_ids] / jump_den)
         # COMBINED curriculum gate metric: a jump counts ONLY if the SAME jump BOTH landed on target
@@ -634,6 +725,13 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
         # the policy is ALWAYS rewarded for trying its best / reaching farther, even when it can't hit precisely,
         # so it never gives up. Precise landing stays a separate BONUS. Same in-flight ballistics + height gate as
         # projected_landing (farm-proof: a legs-tucked sprawl can't clear the height gate).
+        #
+        # STAGE 1 (in-place): OFF. This term pays ABSOLUTE metres capped at cmd_dist, and under the
+        # stage-1 jump-start anchor cmd_dist == |run-up creep| -> creep forward, fly back, collect.
+        # Kept REGISTERED (a 0 scale would be popped in _prepare_reward_function and could never be
+        # switched on later), so the stage-2 handover only has to flip the anchor flag to revive it.
+        if getattr(self.cfg.commands, "landing_anchor_jump_start", False):
+            return torch.zeros(self.num_envs, device=self.device)
         pz = self.root_states[:, 2]
         min_h = float(getattr(self.cfg.rewards, "projected_landing_min_height", 0.40))
         active = (self.airborne & (pz > min_h) & self._jump_commanded() & self._squat_deep_enough()).float()
