@@ -383,6 +383,15 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
         # countermovement is the only way to score. The time-window failed because gating rewards
         # for N steps didn't stop the policy from physically insta-popping; a depth gate ties the
         # reward to the dip itself. RSI air-drops exempt. (stance_window_steps removed.)
+        # LAUNCH-ANGLE FIX (2026-08-12). forward_reach is paid every airborne step, so its integral is
+        # (reach x hang time) and hang time is bought with vertical velocity -> the reward optimum sits
+        # at ~51 deg instead of the ballistic 45 deg. Measured on model_4000: the launch SPEED is
+        # identical to the old 4600 (2.68 m/s both) but the ANGLE is 62 deg vs 53 deg, and that alone
+        # accounts for the whole 0.53 m vs 0.74 m clean-flight gap. Capping the paid window stops extra
+        # hang time from paying. Swept: 0.45s->51 deg, 0.36->49, 0.34->47, 0.32->45 (ballistic optimum,
+        # 88% of the term's magnitude retained), <0.30 only shrinks the driver. See _reward_forward_reach.
+        forward_reach_window_s = 0.32
+
         soft_dof_pos_limit = 0.9            # was 1.0 (no margin = penalty only AT the hard limit = useless).
                                             # 0.9 -> dof_pos_limits starts penalizing in the last 10% before the
                                             # hard URDF limit, so the over-deep squat stops before jamming the "wall".

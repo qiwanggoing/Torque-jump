@@ -735,6 +735,20 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
         pz = self.root_states[:, 2]
         min_h = float(getattr(self.cfg.rewards, "projected_landing_min_height", 0.40))
         active = (self.airborne & (pz > min_h) & self._jump_commanded() & self._squat_deep_enough()).float()
+        # PAYMENT-WINDOW CAP (2026-08-12). This term is paid EVERY airborne step, so what the policy
+        # actually maximises is (reach x time in the window), and window time is bought with VERTICAL
+        # velocity -- the integral is maximised at ~55 deg, not at the ballistic 45 deg. Measured on
+        # model_4000: launch |v| = 2.68 m/s, IDENTICAL to the old 4600's, but at 62 deg instead of
+        # 53 deg, which is the entire 0.53 m vs 0.74 m reach difference (same energy, wrong direction).
+        # Capping the paid window makes extra hang time stop paying, so the optimum returns to the
+        # ballistic one. Swept against the fixed-|v| model: 0.45s -> 51 deg, 0.36 -> 49, 0.34 -> 47,
+        # 0.32 -> 45 (ballistic optimum) while keeping 88% of the term's magnitude; below 0.30 it just
+        # shrinks the distance driver without moving the optimum further. Gates are untouched (a dense
+        # task reward still needs its hard gate -- this only bounds the DURATION, not the conditions).
+        # 0 = uncapped (previous behaviour).
+        win = float(getattr(self.cfg.rewards, "forward_reach_window_s", 0.0))
+        if win > 0.0:
+            active = active * (self.airborne_time <= win).float()
         g = 9.81
         vz = self.root_states[:, 9]
         h_land = self.env_origins[:, 2] + float(self.cfg.rewards.base_height_target)
