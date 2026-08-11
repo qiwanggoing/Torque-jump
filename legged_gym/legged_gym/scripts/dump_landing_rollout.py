@@ -97,6 +97,12 @@ def main():
     env_cfg.rewards.rsi_prob = 0.0
     env_cfg.rewards.landing_tilt_terminate = 0.0
     train_cfg.runner.resume = True
+    # A checkpoint must be evaluated under the joint limits it was TRAINED with -- the official-range
+    # override changes the physics, so scoring a pre-override policy with it (or vice versa) is not an
+    # A/B, it is a different robot. DUMP_OFFICIAL_LIMITS=0/1 forces it; unset keeps the task default.
+    _ol = os.environ.get("DUMP_OFFICIAL_LIMITS")
+    if _ol is not None:
+        env_cfg.asset.official_dof_pos_limits = _ol.strip() in ("1", "true", "yes", "on")
 
     log_root = os.path.join(LEGGED_GYM_ROOT_DIR, 'logs', train_cfg.runner.experiment_name)
     _load_run = args.load_run if args.load_run is not None else train_cfg.runner.load_run
@@ -165,17 +171,24 @@ def main():
     env.compute_observations()
 
     # ---- PD stand ----------------------------------------------------------
-    settled = False
-    for st in range(STAND_MAX):
-        env.commands[:, 4] = 0.0
-        if pd_hold_step(STAND_PD_WEIGHT):
-            print("[dump] FELL while standing -- aborting", flush=True)
-            return
-        if int(env.stand_step_counter[0]) >= STAND_HOLD:
-            settled = True
-            break
-    print(f"[dump] stand: {'settled' if settled else 'NOT settled'} after {st + 1} steps, "
-          f"h={float(env.root_states[0, 2]):.3f}m", flush=True)
+    # DUMP_PD_STAND=0 skips it: reset -> command the jump straight away, i.e. the condition the policy
+    # was actually TRAINED in (episodes reset and the jump fires at first_jump_delay_steps). Use it to
+    # tell "the policy cannot jump" apart from "the PD-stand handover is out of distribution for it".
+    settled, st = False, -1
+    if os.environ.get("DUMP_PD_STAND", "1").strip() in ("0", "false", "no", "off"):
+        print("[dump] PD stand SKIPPED -- jumping straight from reset (training-like condition)", flush=True)
+        settled = True
+    else:
+        for st in range(STAND_MAX):
+            env.commands[:, 4] = 0.0
+            if pd_hold_step(STAND_PD_WEIGHT):
+                print("[dump] FELL while standing -- aborting", flush=True)
+                return
+            if int(env.stand_step_counter[0]) >= STAND_HOLD:
+                settled = True
+                break
+        print(f"[dump] stand: {'settled' if settled else 'NOT settled'} after {st + 1} steps, "
+              f"h={float(env.root_states[0, 2]):.3f}m", flush=True)
 
     # ---- hand to RL and jump ----------------------------------------------
     env.commands[:, 0] = DX
@@ -186,19 +199,38 @@ def main():
     env.compute_observations()
 
     took_off = landed = False
+    creep = flight = float("nan")
     post = 0
     for jt in range(JUMP_MAX):
         if act_step():
             print("[dump] episode terminated (fell)", flush=True)
             break
-        if bool(env.has_taken_off[0]):
+        # Capture AT THE EVENT. Reading these anchors after the loop is wrong: a termination inside
+        # env.step() resets the jump buffers, so a fallen/timed-out episode reports creep=flight=0.
+        if not took_off and bool(env.has_taken_off[0]):
             took_off = True
+            creep = float(torch.norm(env.takeoff_root_xy[0] - env.jump_start_root_xy[0]))
         if took_off and not landed and bool(env.has_landed[0]):
             landed = True
+            flight = float(torch.norm(env.landing_root_xy[0] - env.takeoff_root_xy[0]))
+            peak_at_land = float(env.peak_base_height[0])
         if landed:
             post += 1
             if post >= 60:
                 break
+
+    # Same-protocol run-up accounting, read straight off the env's own anchors, so two checkpoints can
+    # be compared apples-to-apples (the TRAINING numbers are averages over the whole command range with
+    # noise/DR and failed attempts -- not comparable to a deterministic dx=1.0 deploy jump).
+    if took_off:
+        total = creep + (flight if flight == flight else 0.0)
+        print(f"[dump] official_dof_pos_limits={env.cfg.asset.official_dof_pos_limits} | "
+              f"peak={peak_at_land if landed else float('nan'):.3f}m  run_up_creep={creep:.3f}m  "
+              f"clean_flight={flight:.3f}m  total={total:.3f}m  "
+              f"run_up_share={100.0 * creep / max(total, 1e-3):.0f}%", flush=True)
+    else:
+        print(f"[dump] official_dof_pos_limits={env.cfg.asset.official_dof_pos_limits} | "
+              f"NEVER LEFT THE GROUND in {JUMP_MAX} steps", flush=True)
 
     n = len(rec["obs"])
     np.savez(OUT, **{k: np.stack(v).astype(np.float32) for k, v in rec.items()})
