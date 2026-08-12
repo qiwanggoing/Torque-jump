@@ -819,6 +819,19 @@ class GO2OmniJumpLandingTorqueCfgPPO(GO2OmniJumpCurriculumTorqueCfgPPO):
 # same obs/action dims). Atanassov's other ablation is the reason the warm start matters: "directly
 # training the long-distance jump [even with RSI] also results in an early convergence to a standing
 # behavior, which highlights the need for our curriculum strategy."
+# TWO-RUN RECIPE (2026-08-12, replaces the in-run hand-off -- see stage2_auto for why):
+#   1) stage 1, in place, to convergence:
+#        python legged_gym/scripts/train.py --task=go2_landing_stage1 --headless
+#      -> logs/go2_landing_stage1_inplace/<run>/model_5000.pt
+#   2) stage 2, the normal forward task, warm-started from it with a FRESH PPO optimizer:
+#        RESUME_FRESH_OPTIMIZER=1 python legged_gym/scripts/train.py \
+#            --task=go2_omnijump_landing_torque --headless --resume \
+#            --load_run=/ABSOLUTE/path/to/logs/go2_landing_stage1_inplace/<run> --checkpoint=5000
+#      An ABSOLUTE --load_run works across experiment folders because get_load_path does
+#      os.path.join(log_root, load_run), which discards log_root when load_run is absolute.
+#   Known difference from the in-run hand-off: stage 2 starts a NEW env, so step_count restarts and
+#   the PD scaffold fades in again from 0.5. That is left as-is -- it makes stage 2 comparable to the
+#   from-scratch baseline, which also trains through the fade.
 class GO2OmniJumpLandingTorqueStage1Cfg(GO2OmniJumpLandingTorqueCfg):
     class commands(GO2OmniJumpLandingTorqueCfg.commands):
         landing_disp_x_stage2 = [0.0, 0.0]     # in place: no forward component
@@ -829,7 +842,23 @@ class GO2OmniJumpLandingTorqueStage1Cfg(GO2OmniJumpLandingTorqueCfg):
         # Latched ONE-WAY on MEASURED stage-1 mastery: jumps reliably (succ EMA) AND takes off cleanly
         # (creep EMA). The clean takeoff is the whole point of stage 1, so it GATES the handover instead
         # of merely being logged. Both EMAs use the 0.99 smoothing already used for the omega latch.
-        stage2_auto = True
+        # ⚠️ OFF since 2026-08-12. The in-run hand-off was TRIED (run Aug12_04-16-44) and the result was
+        # not "handed over too early", it was "the warm start is harmful here": value_loss spiked to
+        # 0.558 at the switch but was back to 0.031 within 40 iters -- fully recovered -- and yet
+        # clean_reach stayed at HALF the from-scratch run for the remaining 4800 iterations
+        # (0.24/0.25/0.36 at iter 500/1000/4999 vs 0.50/0.57/0.52). The in-place policy is a strong
+        # attractor: unlearning "push straight up" costs more than learning forward from scratch.
+        # The one thing it did win: run_up_creep 0.085 vs 0.336, so the in-place task really does
+        # suppress the shuffle -- at the cost of the forward skill.
+        # Also note the gate itself was mis-designed: creep <= 0.05 is satisfied from the START of
+        # stage 1 (the policy has not learned to shuffle yet, creep GROWS with training), so "low
+        # creep" was never evidence of mastery, and succ >= 0.85 lands at ~iter 200 because jumping in
+        # place is easy -- which is the whole point of stage 1. Only the step floor bound, and it
+        # happened to also be ~iter 208. If this is revisited, gate on peak_height_error (0.19 -> 0.03
+        # is a real skill signal) and hold it, and keep creep as a VETO, not a trigger.
+        # Now the two stages are run SEPARATELY (Atanassov-faithful: own run, own reward set, fresh
+        # PPO via RESUME_FRESH_OPTIMIZER=1); see the recipe in the class docstring below.
+        stage2_auto = False
         stage2_succ_gate = 0.85          # successful_jump_rate EMA
         stage2_creep_max = 0.05          # run_up_creep EMA [m] -- "one coherent push", no shuffling
         stage2_min_steps = 20000         # floor on common_step_counter before any handover (a fluke early

@@ -101,6 +101,12 @@ def parse_sim_params(args, cfg):
     return sim_params
 
 def get_load_path(root, load_run=-1, checkpoint=-1):
+    # An ABSOLUTE load_run addresses a run in a DIFFERENT experiment folder -- used for a stage
+    # hand-off (train the in-place stage, then warm-start the forward task from its checkpoint).
+    # Short-circuit before touching `root`: the code below lists it to resolve "latest run", which
+    # raises when the target experiment has no runs yet, even though an absolute path never needs it.
+    if isinstance(load_run, str) and os.path.isabs(load_run):
+        return _pick_checkpoint(load_run, checkpoint)
     try:
         runs = os.listdir(root)
         # sort by mtime, NOT alphabetically: "Jul02" < "Jun24" would wrongly pick Jun as the latest run
@@ -114,12 +120,16 @@ def get_load_path(root, load_run=-1, checkpoint=-1):
     else:
         load_run = os.path.join(root, load_run)
 
+    return _pick_checkpoint(load_run, checkpoint)
+
+
+def _pick_checkpoint(load_run, checkpoint):
     if checkpoint==-1:
         models = [file for file in os.listdir(load_run) if 'model' in file]
         models.sort(key=lambda m: '{0:0>15}'.format(m))
         model = models[-1]
     else:
-        model = "model_{}.pt".format(checkpoint) 
+        model = "model_{}.pt".format(checkpoint)
 
     load_path = os.path.join(load_run, model)
     return load_path

@@ -155,7 +155,16 @@ class TaskRegistry():
             resume_path = get_load_path(log_root, load_run=train_cfg.runner.load_run,
                                         checkpoint=train_cfg.runner.checkpoint)
             print(f"Loading model from: {resume_path}")
-            runner.load(resume_path)
+            # RESUME_FRESH_OPTIMIZER=1 loads the weights but NOT the PPO optimizer state. Needed for a
+            # STAGE HAND-OFF (train stage 1, then start stage 2 from its policy): the two stages are
+            # different tasks with different returns, so carrying Adam's moments -- fitted on stage 1's
+            # value scale -- across the switch is not what "restart PPO on the next task" means, and it
+            # is how Atanassov 2025 runs its curriculum. Plain --resume (continuing the SAME task)
+            # should keep the optimizer, so this is opt-in.
+            _fresh = os.environ.get("RESUME_FRESH_OPTIMIZER", "0").strip() in ("1", "true", "yes", "on")
+            if _fresh:
+                print("[resume] FRESH PPO optimizer (weights only) -- stage hand-off mode")
+            runner.load(resume_path, load_optimizer=not _fresh)
         return runner, train_cfg
 
 
