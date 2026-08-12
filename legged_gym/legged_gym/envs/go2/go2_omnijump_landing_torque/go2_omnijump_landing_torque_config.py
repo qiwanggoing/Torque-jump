@@ -119,7 +119,20 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
         # stays free). True = the xy the jump was commanded from -> every metre crept is a metre of
         # landing error. Only meaningful at dx=0 (see the note in _update_jump_state) -> stage 1 sets it.
         landing_anchor_jump_start = False
-        landing_disp_x_stage2 = [0.5, 1.5]    # FIXED forward range (2026-07-11, user): no curriculum-from-0 -> command
+        # 2026-08-12: [0.5, 1.5] -> [0.4, 1.2]. The old range asked for MORE THAN THE ROBOT CAN FLY, and
+        # that is what forces the run-up: the landing target is anchored at the squat bottom, so hitting
+        # a 1.2 m command when the clean flight tops out at 0.6-0.75 m REQUIRES shuffling the remaining
+        # 0.4 m on the ground. Accuracy and a clean single push were literally asking for opposite
+        # things, and no weight can settle that (anchoring at the jump command instead does not help
+        # either -- creep 0.4 + fly 0.8 still lands on target). Measured at dx=1.2: target 0.95 m ahead,
+        # flight 0.59 m, creep 0.40 m, 17 foot-contact flips before takeoff.
+        # Upper bound kept at 1.2 (user) rather than dropped to the current ~0.9 capability, to keep
+        # pressure to reach further; 0.75-1.2 therefore REMAINS a conflict zone where creeping is still
+        # the only way to be accurate. Watch which command bin run_up_creep comes back in.
+        # Also see [[project_curriculum_overshoot_collapse]]: commanding past the real reach drives
+        # value_loss up and eventually gets punched over by the exploration-noise hump -- the window run
+        # already sat at noise_std 0.159 vs 0.081, which is that signature.
+        landing_disp_x_stage2 = [0.4, 1.2]    # FIXED forward range (2026-07-11, user): no curriculum-from-0 -> command
                                               # 0.5-1.5 m directly from the start. Goal = FARTHER: every command is far, so
                                               # forward_reach (capped-at-command) always pays for jumping as far as possible,
                                               # pushing toward the physical reach instead of the conservative curriculum's
@@ -507,7 +520,18 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
                                              # so the error term = wz^2 = damp spin during flight -> fixes the heading
                                              # drift. Kept WELL below the main jump rewards (peak25/vz15/landing20); it's
                                              # a stabilizer. Stage2: open commands[2] -> same term becomes turn-tracking.
-            forward_reach = 60.0             # 保留强的(user, 2026-07-04): option-1 eval欠程的真凶是 PROBE(喂不可能命令)不是
+            # 2026-08-12: 60 -> 88, to UNDO the side effect of forward_reach_window_s, not to add new
+            # pressure. Capping the paid window cut this term's earned value by 31% (0.913 -> 0.633) and
+            # its share of positive reward from 35.8% to 30.1% -- an unintended weakening of the only
+            # distance term a ground shuffle CANNOT satisfy (it measures reach from the TAKEOFF point,
+            # whereas projected_landing + landing_position score distance from the squat-bottom anchor,
+            # which creeping does substitute for; those two were left at 25.2%, nearly level with it).
+            # 88 restores 0.633 x 88/60 = 0.93 ~ the pre-cap 0.913, i.e. share back to ~38%.
+            # Safe w.r.t. the launch-angle fix: the angle bias came from the reward's FORM (integral
+            # proportional to hang time), which the window already removed; scaling it does not move the
+            # optimum. WATCH value_function loss and noise_std -- this is above the >30 single-weight
+            # caution line (it already was at 60), and the window run was at noise_std 0.159.
+            forward_reach = 88.0             # 保留强的(user, 2026-07-04): option-1 eval欠程的真凶是 PROBE(喂不可能命令)不是
                                              # forward_reach. probe关了+漏算失败修了(dx_env诚实=命令都够得到)后, forward_reach强是好事:
                                              # 推策略把够得到的命令跳准跳足, 精度奖励(projected_landing/landing_position)防过冲, 平衡在正好落点.
                                              # DOMINANT driver so the policy pushes HARD to reach far. WATCH: if it trades
@@ -814,7 +838,7 @@ class GO2OmniJumpLandingTorqueStage1Cfg(GO2OmniJumpLandingTorqueCfg):
                                          # it is ~96/iter during warmup and ~48/iter at pure torque:
                                          # 20000 ~ iter 200-400. Deliberately a rough floor, not a schedule.
         # ranges the handover opens (== the stage-2 task's ranges)
-        landing_disp_x_stage2_after = [0.5, 1.5]
+        landing_disp_x_stage2_after = [0.4, 1.2]
         landing_disp_y_stage2_after = [-0.30, 0.30]
 
     class rewards(GO2OmniJumpLandingTorqueCfg.rewards):
