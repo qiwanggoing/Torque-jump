@@ -520,18 +520,21 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
                                              # so the error term = wz^2 = damp spin during flight -> fixes the heading
                                              # drift. Kept WELL below the main jump rewards (peak25/vz15/landing20); it's
                                              # a stabilizer. Stage2: open commands[2] -> same term becomes turn-tracking.
-            # 2026-08-12: 60 -> 88, to UNDO the side effect of forward_reach_window_s, not to add new
-            # pressure. Capping the paid window cut this term's earned value by 31% (0.913 -> 0.633) and
-            # its share of positive reward from 35.8% to 30.1% -- an unintended weakening of the only
-            # distance term a ground shuffle CANNOT satisfy (it measures reach from the TAKEOFF point,
-            # whereas projected_landing + landing_position score distance from the squat-bottom anchor,
-            # which creeping does substitute for; those two were left at 25.2%, nearly level with it).
-            # 88 restores 0.633 x 88/60 = 0.93 ~ the pre-cap 0.913, i.e. share back to ~38%.
-            # Safe w.r.t. the launch-angle fix: the angle bias came from the reward's FORM (integral
-            # proportional to hang time), which the window already removed; scaling it does not move the
-            # optimum. WATCH value_function loss and noise_std -- this is above the >30 single-weight
-            # caution line (it already was at 60), and the window run was at noise_std 0.159.
-            forward_reach = 88.0             # 保留强的(user, 2026-07-04): option-1 eval欠程的真凶是 PROBE(喂不可能命令)不是
+            # ⚠️ REVERTED 88 -> 60 (2026-08-12, run Aug12_17-36-58). 88 peaked HIGHER than anything before
+            # it -- at iter 800: clean_reach 0.505, reliable_reach_dx 0.729, creep 0.171 (vs 0.336 on the
+            # window run) -- and then COLLAPSED at iter ~1600 and never recovered: value_function loss
+            # 0.130 -> 0.278 (4x the 0.068 of the joint-fix run), squat_qualified 0.94 -> 0.68,
+            # successful_jump 0.93 -> 0.55, reliable_reach_dx 0.62 -> 0.24, then 3400 iterations of
+            # thrashing. That is the value-variance failure the ">30 single weight" rule warns about,
+            # and the caution comment below called it in advance. The other half of that change (command
+            # range 0.5-1.5 -> 0.4-1.2) is KEPT: it is what brought creep down from 0.336 to 0.13-0.17
+            # and noise_std from 0.159 to 0.10, and at iter 800 it was strictly better than the window
+            # run on every axis. So keep the command fix, drop the weight bump.
+            # The original 60 -> 88 rationale, for the record: capping the payment window cut this
+            # term's earned value 31% (0.913 -> 0.633) and its share 35.8% -> 30.1%, weakening the one
+            # distance term a ground shuffle cannot satisfy. That side effect is real but is NOT worth
+            # paying for with a collapse -- revisit via the term's SHAPE, not its scale.
+            forward_reach = 60.0             # 保留强的(user, 2026-07-04): option-1 eval欠程的真凶是 PROBE(喂不可能命令)不是
                                              # forward_reach. probe关了+漏算失败修了(dx_env诚实=命令都够得到)后, forward_reach强是好事:
                                              # 推策略把够得到的命令跳准跳足, 精度奖励(projected_landing/landing_position)防过冲, 平衡在正好落点.
                                              # DOMINANT driver so the policy pushes HARD to reach far. WATCH: if it trades
