@@ -105,6 +105,14 @@ def get_load_path(root, load_run=-1, checkpoint=-1):
     # hand-off (train the in-place stage, then warm-start the forward task from its checkpoint).
     # Short-circuit before touching `root`: the code below lists it to resolve "latest run", which
     # raises when the target experiment has no runs yet, even though an absolute path never needs it.
+    # An EMPTY load_run means a shell substitution produced nothing (e.g. --load_run=$(ls ...) where
+    # the glob matched no run, typically a path from another machine). Without this it silently
+    # os.path.joins to `root` itself and reports a missing model file inside the experiment folder,
+    # which points at the wrong problem.
+    if isinstance(load_run, str) and load_run.strip() == "":
+        raise ValueError(
+            "load_run is EMPTY -- a --load_run=$(...) substitution produced nothing. "
+            "Check that the run directory exists on THIS machine.")
     if isinstance(load_run, str) and os.path.isabs(load_run):
         return _pick_checkpoint(load_run, checkpoint)
     try:
