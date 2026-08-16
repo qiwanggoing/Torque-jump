@@ -164,6 +164,11 @@ class GO2TorqueCfg(GO2RoughCfg):
         loss_rate = 0.1
 
     class growth:
+        # Start step_count past x0 so general_scale = 1 immediately: no PD prior, full torque, max freq.
+        # For warm-starting a policy that was already trained to the pure-torque endpoint into a NEW env
+        # (a stage hand-off) -- otherwise the fade replays from 0.5 and the loaded policy, which has no
+        # exploration noise left, cannot operate at 30% torque. Also settable per-run via SKIP_PD_FADE=1.
+        skip_fade = False
         max_torque_scale = 1.0
         start_torque_scale = 0.3
         max_rear_torque_scale = 1.0

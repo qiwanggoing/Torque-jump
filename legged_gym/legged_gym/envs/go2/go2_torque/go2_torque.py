@@ -4,6 +4,7 @@ from legged_gym.utils.math import wrap_to_pi
 from isaacgym.torch_utils import *
 from isaacgym import gymtorch
 from isaacgym import gymapi
+import os
 import torch
 
 
@@ -86,7 +87,28 @@ class GO2Torque(LeggedRobot):
         self.start_rear_torque_scale = cfg.growth.start_rear_torque_scale
         self.max_freq = cfg.growth.max_freq
         self.start_freq = cfg.growth.start_freq
+        # SKIP_PD_FADE=1 (or cfg.growth.skip_fade) starts step_count PAST x0, so general_scale = 1 from
+        # the very first step: no PD prior, full torque limit, 200Hz.
+        # For a WARM-STARTED stage: a new env restarts step_count at 0, which re-runs the whole PD fade.
+        # On the landing task that means pd_alpha 0.5 and freq 100Hz -- the torque LIMIT is unchanged
+        # (start_torque_scale is 1.0 there, unlike the 0.3 the base config uses). Two things bite: the
+        # policy's own residual is scaled by rl_alpha = 1 - pd_alpha = 0.5, i.e. HALF the authority it
+        # trained with, while a PD spring pulls toward default_joint_pd_target; and one action now spans
+        # two physics substeps, which is different timing for an explosive motion tuned at 200Hz.
+        # This killed run Aug15_19-09-47: at the instant of the warm start it was still trying to jump
+        # (jump_flight_rate 0.98) but could not reach the squat pose, so squat_qualified stayed 0.0000
+        # for all 5000 iterations,
+        # which locks the ENTIRE jump-reward chain (projected_peak / projected_landing / forward_reach /
+        # takeoff_velocity_match / successful_jump all gated on it). With only penalties left, reward went
+        # to -4 and PPO correctly learned to stop moving (flight 0.98 -> 0.014), while the inherited
+        # action noise 0.088 -> 0.04 removed any exploration that might have found a way back. A
+        # from-scratch run survives the same scaffold only because it starts at noise 0.5.
         self.step_count = 0
+        _skip = str(os.environ.get("SKIP_PD_FADE", "")).strip().lower() in ("1", "true", "yes", "on")
+        if _skip or getattr(cfg.growth, "skip_fade", False):
+            self.step_count = int(cfg.growth.x0) + 1
+            print(f"[growth] SKIP_PD_FADE: step_count starts at {self.step_count} (> x0={cfg.growth.x0}) "
+                  f"-> general_scale=1, pd_alpha=0, full torque, {cfg.growth.max_freq}Hz from step 0")
         self.current_dt = 0
         self.current_freq = self.start_freq
         self.low_torque = 0
