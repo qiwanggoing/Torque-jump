@@ -132,7 +132,13 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
         # Also see [[project_curriculum_overshoot_collapse]]: commanding past the real reach drives
         # value_loss up and eventually gets punched over by the exploration-noise hump -- the window run
         # already sat at noise_std 0.159 vs 0.081, which is that signature.
-        landing_disp_x_stage2 = [0.4, 1.2]    # FIXED forward range (2026-07-11, user): no curriculum-from-0 -> command
+        # ⚠️ 2026-08-18 REVERTED [0.4,1.2] -> [0.5,1.5] (user): the new baseline for the step-by-step
+        # plan is "model_4600 + the joint-limit fix and NOTHING ELSE", so that every later step has ONE
+        # variable. That base is already trained (run Aug08_16-35-49 @ 5bad5e4): clean_reach 0.484,
+        # creep 0.190, reliable_reach_dx 0.646, squatQ 0.959, reward 17.1, noise 0.081. The command-range
+        # change (and the payment window below) go back on the table AFTER the observation/reference work,
+        # measured against that base rather than bundled with it.
+        landing_disp_x_stage2 = [0.5, 1.5]    # FIXED forward range (2026-07-11, user): no curriculum-from-0 -> command
                                               # 0.5-1.5 m directly from the start. Goal = FARTHER: every command is far, so
                                               # forward_reach (capped-at-command) always pays for jumping as far as possible,
                                               # pushing toward the physical reach instead of the conservative curriculum's
@@ -403,7 +409,12 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
         # accounts for the whole 0.53 m vs 0.74 m clean-flight gap. Capping the paid window stops extra
         # hang time from paying. Swept: 0.45s->51 deg, 0.36->49, 0.34->47, 0.32->45 (ballistic optimum,
         # 88% of the term's magnitude retained), <0.30 only shrinks the driver. See _reward_forward_reach.
-        forward_reach_window_s = 0.32
+        # ⚠️ 2026-08-18 SET BACK TO 0 (= uncapped, the model_4600 behaviour). Same reason as the command
+        # range above: the step-by-step plan starts from "4600 + joint limits only". The mechanism was
+        # VERIFIED (peak 0.541 -> 0.500 = exactly the commanded cap, launch angle 62 -> 55 deg), but the
+        # policy re-routed the saved hang time into a 77% LONGER ground creep (0.190 -> 0.336), so it is
+        # not a clean win and does not belong in the baseline. Revisit after the observation work.
+        forward_reach_window_s = 0.0
 
         soft_dof_pos_limit = 0.9            # was 1.0 (no margin = penalty only AT the hard limit = useless).
                                             # 0.9 -> dof_pos_limits starts penalizing in the last 10% before the
