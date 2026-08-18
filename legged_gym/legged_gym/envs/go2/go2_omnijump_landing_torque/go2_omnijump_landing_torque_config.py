@@ -49,6 +49,37 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
     # proven ~0.30 default stance (inherited). Revisit launch depth later via a milder crouch +
     # stronger default_hip_pos if pursuing more height.
 
+    class env(GO2OmniJumpCurriculumTorqueCfg.env):
+        # ATANASSOV-STYLE OBSERVATION HISTORY -- restored VERBATIM from commit 9ef99da (2026-08-18).
+        # This is the ONLY from-scratch history configuration that has ever discovered the jump here
+        # (run Jul31_17-37-21: squat_qualified 0 -> 0.96 at iter 908, mean_reward 30.7 vs flat's ~20).
+        # Three earlier history attempts collapsed; the difference was NOT the actor stack but the
+        # CRITIC -- see c_frame_stack below. Deliberately unmodified: its whole value is that it is the
+        # verified point, so history_length / the stacked content / fatigue stay exactly as they were.
+        #
+        #   obs_buf = [ stacked_frame(49) x history_length | single extras(32) ]
+        #
+        # STACKED (x20 = 0.10 s at the 200 Hz pure-torque endpoint): kinematic state + PREVIOUS ACTION
+        #   lin_vel3 + ang_vel3 + grav3 + dofpos12 + dofvel12 + foot4 + prev_action12 = 49
+        #   -> lets the policy reason about its own dynamics (Atanassov's stated purpose).
+        # SINGLE (current frame only, NOT stacked): command(landing_err3 + cmd_h1 + cmd4_1 + height2)
+        #   + torques12 + motor_fatigue12 + pd_prior1 = 32. Atanassov keeps the command single (no 20x
+        #   redundancy); we additionally keep the self-generated raw torques single, because stacking
+        #   240 dims of them was one of the suspects when the first flatten-everything version died.
+        num_stacked_frame = 49
+        num_single_extras = 32
+        history_length = 20
+        num_observations = history_length * num_stacked_frame + num_single_extras   # 49*20 + 32 = 1012
+        # ⭐ ASYMMETRIC CRITIC -- this is the change that actually fixed history here. A critic fed the
+        # FULL actor stack overfits the early low-return rollouts (value_loss -> 0.002, the signature),
+        # which wrecks the advantages and stops the discovered squat from ever being reinforced. Feed it
+        # a SHORT stack of PRIVILEGED frames instead (same c_frame_stack=3 as the working my_go2_jump).
+        #   priv frame(121) = stacked_frame(49) + extras(32) + priv_extra(40)
+        #   priv_extra(40)  = root_z1 + base_lin_vel3 + feet_pos_local12 + feet_vel12 + feet_forces12
+        c_frame_stack = 3
+        single_num_privileged_obs = num_stacked_frame + num_single_extras + 40      # 49+32+40 = 121
+        num_privileged_obs = c_frame_stack * single_num_privileged_obs              # 3*121 = 363
+
     class control(GO2OmniJumpCurriculumTorqueCfg.control):
         # Step H: turn ON the dual-head aux-stabiliser torque path in _compute_torques.
         # (Default False in the parent -> all other tasks with num_actions=12 are untouched.)
@@ -771,8 +802,19 @@ class GO2OmniJumpLandingTorqueCfgPPO(GO2OmniJumpCurriculumTorqueCfgPPO):
         aux_head_dim = 12
 
     class algorithm(GO2OmniJumpCurriculumTorqueCfgPPO.algorithm):
-        sym_coef = 1.0   # was 0.5: match my_go2_jump — tighter LEFT-RIGHT mirror symmetry
-                         # (front-rear is handled by the pushoff_leg_sync reward, not sym_loss)
+        # ⚠️ sym_loss OFF (2026-08-18, with the history obs). NOT a preference -- it is FORCED by the
+        # layout. ppo.py tiles obs_permutation across `frame_stack` identical copies of the frame, so it
+        # only works when obs is a uniform stack. Ours is [49 x 20 | 32 extras], which that tiling cannot
+        # express, so the mirror map would be wrong rather than merely absent. The verified run
+        # (Jul31_17-37-21) trained exactly like this.
+        # Restoring it is possible and is its OWN step: write a 49-dim frame permutation tiled x20 plus a
+        # separate 32-dim extras permutation. ⚠️ When doing that, note `torques` FLIPS SIGN on the hip
+        # joints while `motor_fatigue` does NOT (it integrates |tau|, a magnitude) -- the two 12-blocks
+        # are not interchangeable. Doing it as a separate step also finally isolates the long-standing
+        # question of whether sym_loss is load-bearing for discovery.
+        sym_loss = False
+        sym_coef = 0.0   # was 1.0 (flat): LEFT-RIGHT mirror symmetry, front-rear handled by pushoff_leg_sync
+        frame_stack = 1
         # Step H (final): τ_comp is OUT of the PPO action, so act_permutation stays 12-dim (inherited
         # = single-head). BC loss weight for the deterministic comp_head:
         bc_coef = 1.0
