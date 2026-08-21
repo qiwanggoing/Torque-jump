@@ -795,6 +795,65 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
         single_jump_play = True    # 单跳: play 跳一次就停站立 (撤回连续跳的 False)
 
 
+def _mirror_obs_permutation(history_length, frame_dim, extras_dim):
+    """LEFT-RIGHT mirror map for the STACKED layout [ frame(49) x history_length | extras(32) ].
+
+    ppo.py tiles a single frame permutation `frame_stack` times, which only works when the whole obs
+    is a uniform stack. Ours has trailing single-frame extras, so we hand it the COMPLETE 1012-dim map
+    and leave frame_stack=1 -- the tiling below is done here, where the layout is known.
+
+    Mirroring is about the sagittal plane: v_y / w_x / w_z / g_y / lateral target error flip sign, and
+    the legs swap FL<->FR, RL<->RR with the hip (abduction) joint flipping sign. WARNING: `torques`
+    flips the hip sign (it is a signed torque) but `motor_fatigue` does NOT -- it integrates |tau|, a
+    magnitude. Blocks/signs were cross-checked term by term against the flat 69-dim map in
+    go2_omnijump_torque_config.py and agree everywhere EXCEPT:
+
+      * projected_gravity. The parent map says `-6, 7, 8` = flip g_x, keep g_y. That is backwards: a
+        sagittal reflection preserves the x and z components and flips y (the mirror image of a
+        nose-down robot is still nose-down -> g_x must NOT flip; the mirror image of a robot leaning
+        left leans right -> g_y MUST flip). We use the correct `+g_x, -g_y, +g_z` here. The parent's
+        version is a real bug that every flat run inherited -- left alone on purpose, since changing it
+        silently retrains every other task; fix it as its own step if you want it.
+      * the third command slot. In the parent it is commands[2] (a yaw-rate command, sign-flipped);
+        here that slot is the landing error's hard-coded ZERO third channel, so its sign is moot.
+    """
+    def enc(idx, sign):
+        # ppo.py reads the index as int(abs(v)) and the sign as np.sign(v), so index 0 needs a stand-in.
+        return sign * (idx if idx != 0 else 0.0001)
+
+    def legs(base, flip_hip=True):
+        """12-vector of (hip, thigh, calf) x (FL, FR, RL, RR) at `base` -> mirrored source/sign."""
+        src = [3, 4, 5, 0, 1, 2, 9, 10, 11, 6, 7, 8]
+        sgn = [-1, 1, 1, -1, 1, 1, -1, 1, 1, -1, 1, 1] if flip_hip else [1] * 12
+        return [(base + i, g) for i, g in zip(src, sgn)]
+
+    frame = (
+        [(0, 1), (1, -1), (2, 1)]                  # base_lin_vel      (v_y)
+        + [(3, -1), (4, 1), (5, -1)]               # base_ang_vel      (w_x, w_z)
+        + [(6, 1), (7, -1), (8, 1)]                # projected_gravity (g_y)
+        + legs(9)                                  # dof_pos
+        + legs(21)                                 # dof_vel
+        + [(34, 1), (33, 1), (36, 1), (35, 1)]     # foot contact       FL<->FR, RL<->RR
+        + legs(37)                                 # previous action    (= act_permutation)
+    )
+    extras = (
+        [(0, 1), (1, -1), (2, 1)]                  # yaw-frame landing error (lateral flips)
+        + [(3, 1), (4, 1), (5, 1), (6, 1)]         # cmd height, cmd4 (jump toggle), height obs x2
+        + legs(7)                                  # torques        (signed -> hip flips)
+        + legs(19, flip_hip=False)                 # motor_fatigue  (magnitude -> NO sign flip)
+        + [(31, 1)]                                # pd_prior_alpha
+    )
+    assert len(frame) == frame_dim, f"frame perm {len(frame)} != {frame_dim}"
+    assert len(extras) == extras_dim, f"extras perm {len(extras)} != {extras_dim}"
+
+    perm = []
+    for k in range(history_length):
+        perm += [enc(i + k * frame_dim, g) for i, g in frame]
+    off = history_length * frame_dim
+    perm += [enc(i + off, g) for i, g in extras]
+    return perm
+
+
 class GO2OmniJumpLandingTorqueCfgPPO(GO2OmniJumpCurriculumTorqueCfgPPO):
     class policy(GO2OmniJumpCurriculumTorqueCfgPPO.policy):
         # Step H (final): τ_comp is a DETERMINISTIC independent head (12 outputs), NOT part of the PPO
@@ -802,19 +861,29 @@ class GO2OmniJumpLandingTorqueCfgPPO(GO2OmniJumpCurriculumTorqueCfgPPO):
         aux_head_dim = 12
 
     class algorithm(GO2OmniJumpCurriculumTorqueCfgPPO.algorithm):
-        # ⚠️ sym_loss OFF (2026-08-18, with the history obs). NOT a preference -- it is FORCED by the
-        # layout. ppo.py tiles obs_permutation across `frame_stack` identical copies of the frame, so it
-        # only works when obs is a uniform stack. Ours is [49 x 20 | 32 extras], which that tiling cannot
-        # express, so the mirror map would be wrong rather than merely absent. The verified run
-        # (Jul31_17-37-21) trained exactly like this.
-        # Restoring it is possible and is its OWN step: write a 49-dim frame permutation tiled x20 plus a
-        # separate 32-dim extras permutation. ⚠️ When doing that, note `torques` FLIPS SIGN on the hip
-        # joints while `motor_fatigue` does NOT (it integrates |tau|, a magnitude) -- the two 12-blocks
-        # are not interchangeable. Doing it as a separate step also finally isolates the long-standing
-        # question of whether sym_loss is load-bearing for discovery.
-        sym_loss = False
-        sym_coef = 0.0   # was 1.0 (flat): LEFT-RIGHT mirror symmetry, front-rear handled by pushoff_leg_sync
-        frame_stack = 1
+        # sym_loss BACK ON (2026-08-21) -- Step 1b, and it is a BUG FIX, not a tuning knob.
+        # Step 1 turned it off because ppo.py can only tile a frame permutation across a uniform stack and
+        # ours is [49 x 20 | 32 extras]. That made Step 1 secretly TWO changes, and the second one cost us
+        # heading discipline: with the mirror constraint gone the policy learned a one-sided SPIN --
+        # measured on Aug18_23-09-30/model_4700, every jump turns the SAME way, 116 deg (dx0.5) / 126 (dx0.9)
+        # / 150 (dx1.2), |dyaw|>20deg on 100% of landings, peak |wz| 7.8 rad/s. The flat baseline
+        # (Aug08_16-35-49/model_4700, sym_coef=1.0) turns 1.1 deg with peak |wz| 0.45. Frame by frame the
+        # yaw rate is built up ON THE GROUND during the push (yaw reaches -91 deg BEFORE takeoff) and the
+        # flight merely integrates the conserved angular momentum -- which is why the airborne-only yaw damp
+        # (tracking_angular_velocity + ang_vel_damp_airborne_only) cannot fix it: it acts where there is no
+        # contact force to act with. The baseline has that same hole and stays straight, so the missing
+        # ground-phase yaw penalty is what lets the spin GROW, not what causes it. The cause is the mirror.
+        # No rsl_rl change needed: hand PPO the COMPLETE 1012-dim map (built above) and keep frame_stack=1
+        # so it is not tiled again. This also settles "is sym_loss load-bearing for discovery?" in the other
+        # direction: Aug18 discovered at iter650 with sym fully OFF.
+        sym_loss = True
+        sym_coef = 1.0   # LEFT-RIGHT mirror symmetry (front-rear is handled by pushoff_leg_sync, not sym_loss)
+        frame_stack = 1  # the map below is ALREADY full-length -- do NOT let ppo.py tile it
+        obs_permutation = _mirror_obs_permutation(
+            GO2OmniJumpLandingTorqueCfg.env.history_length,
+            GO2OmniJumpLandingTorqueCfg.env.num_stacked_frame,
+            GO2OmniJumpLandingTorqueCfg.env.num_single_extras,
+        )
         # Step H (final): τ_comp is OUT of the PPO action, so act_permutation stays 12-dim (inherited
         # = single-head). BC loss weight for the deterministic comp_head:
         bc_coef = 1.0
