@@ -1009,6 +1009,24 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
         roll_sq = torch.square(self.base_ang_vel[:, 0])
         nose_down_rate = torch.square(torch.clamp(-self.base_ang_vel[:, 1], min=0.0))
         ang_vel_sq = roll_sq + nose_down_rate
+        # YAW (2026-08-25). The exclusion above ("may be commanded in Stage 2") left the yaw axis with no
+        # penalty at all -- its only pressure was the POSITIVE kernel exp(-wz^2/0.25) in
+        # _reward_tracking_angular_velocity, which cannot punish, only withhold. Both parts of that failed:
+        #   * the withheld amount is trivial -- the straight run earns 0.046 from it, while the spin it buys
+        #     took forward_reach from 0.39 to 1.20 and projected_landing from 0.22 to 0.56;
+        #   * the kernel FLOORS. exp(-wz^2/0.25) is 0.53 at wz=0.4, 4e-4 at 1.4, 2e-28 at 4, 2e-106 at 7.8,
+        #     so past ~1.4 rad/s the reward surface is exactly flat and NOTHING points back toward zero.
+        # Measured on Aug25_19-53-29 (flat, sym off): wz 0.4 @iter1000 -> 1.31 @2000 -> 4.4 @3000 -> 7.8
+        # @5000, and the earned yaw reward fell off the cliff (0.026 -> 0.0001) exactly across 2000->3000.
+        # The controlled comparison is inside the same run: roll/pitch, carrying THIS quadratic penalty
+        # (gradient ~ omega, never saturates), stay at |roll| ~ 15 deg, while yaw, carrying only the kernel,
+        # reaches 155 deg per jump. So put yaw on the same quadratic footing.
+        # Penalising the ERROR against commands[:, 2] (not raw wz) keeps Stage-2 commanded turning valid:
+        # today the command is 0, so this is exactly wz^2. Weight 0 (the default) = feature off for every
+        # other config, so nothing else changes.
+        yaw_w = float(getattr(self.cfg.rewards, "base_ang_vel_yaw_weight", 0.0))
+        if yaw_w > 0.0:
+            ang_vel_sq = ang_vel_sq + yaw_w * torch.square(self.base_ang_vel[:, 2] - self.commands[:, 2])
         if getattr(self, "_takeoff_omega_on", False):
             # POST-DISCOVERY (succ_rate gate latched): ALSO penalize ω during the PUSH/extension (where the
             # nose-down spin is IMPARTED -- it can't be undone in flight) and apply a STRONGER weight, so the

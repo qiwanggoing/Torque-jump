@@ -334,6 +334,20 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
         # blocks the messy from-scratch pushes (an ungated strong ω penalty broke discovery, iter526 flight0).
         takeoff_omega_succ_gate = 0.80     # latch the stronger ω penalty once succ_rate EMA clears this
         takeoff_omega_gain = 4.0           # post-gate multiplier on base_ang_vel_xy (-0.15 -> ~-0.6 effective)
+        # YAW into the quadratic omega penalty (2026-08-25). 1.0 = a yaw rate costs exactly what the same
+        # roll rate costs ("rotation is rotation"); 0.0 = off, which is what every other config gets.
+        # Rationale and measurements: see _reward_base_ang_vel_xy. Two properties make this the targeted
+        # fix rather than the mirror-loss hammer: the gradient grows with omega instead of vanishing, and
+        # it forbids only SPIN, not left-right asymmetry in general (which the sym ablation suggests is
+        # part of what buys reach: flat sym-off tracked commands at dAir +0.21..0.31 vs +0.03 with sym on).
+        # It also inherits the existing discovery-safe staging for free: before the succ-rate latch it acts
+        # on flight+landing only, and after the latch `_takeoff_omega_on` extends it to the PUSH phase at
+        # x4 -- which is where the angular momentum is actually created (yaw hits -91 deg BEFORE takeoff).
+        # WATCH: this term is quadratic and a 7.8 rad/s spin is ~61 rad^2/s^2, so early on it can be large.
+        # A clean jump pays ZERO (it penalises rate, not airtime), but if flight_rate / squat_qualified
+        # collapse it means exploration is being taxed too hard -> drop this to ~0.25 before blaming
+        # anything else.
+        base_ang_vel_yaw_weight = 1.0
         # HARD pitch termination (see check_termination): end the episode if the base pitches NOSE-DOWN beyond
         # this (projected_gravity[:,0], ~sin(tilt)) AT TOUCHDOWN (the landing phase). Forces a level touchdown
         # (no front-feet-first), since soft penalties got traded off. Same succ-rate gate as takeoff_omega
@@ -876,8 +890,17 @@ class GO2OmniJumpLandingTorqueCfgPPO(GO2OmniJumpCurriculumTorqueCfgPPO):
         # No rsl_rl change needed: hand PPO the COMPLETE 1012-dim map (built above) and keep frame_stack=1
         # so it is not tiled again. This also settles "is sym_loss load-bearing for discovery?" in the other
         # direction: Aug18 discovered at iter650 with sym fully OFF.
-        sym_loss = True
-        sym_coef = 1.0   # LEFT-RIGHT mirror symmetry (front-rear is handled by pushoff_leg_sync, not sym_loss)
+        # ⚠️ OFF AGAIN (2026-08-25), and this time it is a CHOICE, not a limitation. The ablation
+        # (Aug25_19-53-29, flat with sym off) showed the mirror loss is the wrong tool here: it is what was
+        # holding the spin down, but it does it by banning ALL left-right asymmetry, and the same run says
+        # that asymmetry is partly what buys reach -- flat sym-off tracked the distance command at
+        # dAir +0.21..0.31 against +0.03 for flat sym-on, which does not track at all. `base_ang_vel_yaw_weight`
+        # now forbids the SPIN specifically, with a gradient that grows instead of vanishing. So this run is
+        # Aug18 + the yaw penalty = one variable against a known-good reference.
+        # Everything needed to switch it back on is still here and tested: the 1012-dim mirror map above and
+        # the runner's discovery gate. Flip sym_loss to True and restore sym_gate_metric to use it.
+        sym_loss = False
+        sym_coef = 1.0   # the TARGET the gate would ramp to, if sym_loss is switched back on
                          # ⚠️ this is the TARGET value: the runner holds sym_coef at 0 until the discovery
                          # gate opens, then ramps to this over sym_ramp_iters (see runner cfg, sym_gate_*).
         frame_stack = 1  # the map below is ALREADY full-length -- do NOT let ppo.py tile it
@@ -929,7 +952,8 @@ class GO2OmniJumpLandingTorqueCfgPPO(GO2OmniJumpCurriculumTorqueCfgPPO):
         # reproduces exactly the Aug18 condition (sym off), which discovered 2 times out of 2.
         # Loss/symmetry keeps being logged while the gate is shut (coef 0 = no gradient), so the spin can
         # still be watched as it develops. Tensorboard: Policy/sym_coef + Policy/sym_gate_ema.
-        sym_gate_metric = "squat_qualified_rate"
+        sym_gate_metric = None    # gate DORMANT while sym_loss=False (see algorithm). Set back to
+                                  # "squat_qualified_rate" together with sym_loss=True.
         sym_gate_value = 0.5      # EMA of squat_qualified_rate that counts as "discovered"
         sym_gate_ema_alpha = 0.05  # ~14 iters to cross 0.5 once the raw metric pins at 1.0
         sym_ramp_iters = 300      # 0 -> sym_coef, gradual so the constraint never lands as a shock
