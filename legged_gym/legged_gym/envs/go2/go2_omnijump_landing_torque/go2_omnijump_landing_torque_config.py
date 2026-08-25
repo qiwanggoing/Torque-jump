@@ -302,6 +302,15 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
         # flies level and lands flat. succ-rate gate (not a fixed step) = adapts to discovery speed, never
         # blocks the messy from-scratch pushes (an ungated strong ω penalty broke discovery, iter526 flight0).
         takeoff_omega_succ_gate = 0.80     # latch the stronger ω penalty once succ_rate EMA clears this
+        # YAW into the quadratic omega penalty (2026-08-25). 1.0 = a yaw rate costs what the same roll rate
+        # costs; 0.0 = off, which is what every other config gets. This branch is the TESTBED: flat discovers
+        # reliably (iter 38-51, four for four) whereas the history config's discovery is a coin flip (2 of 4),
+        # so the yaw fix gets measured here instead of waiting on that lottery. Judged against this branch's
+        # own previous run Aug25_19-53-29 (identical except for this line): 10.9 deg per jump @2000,
+        # 78.8 @3000, 155.5 @5000, clean_reach 0.650, peak 0.627, deterministic dAir +0.21..0.31.
+        # WATCH: quadratic, and a 7.8 rad/s spin is ~61 rad^2/s^2, so it can be large early. A clean jump
+        # pays ZERO (rate, not airtime), but if flight_rate / squat_qualified collapse, drop this to ~0.25.
+        base_ang_vel_yaw_weight = 1.0
         takeoff_omega_gain = 4.0           # post-gate multiplier on base_ang_vel_xy (-0.15 -> ~-0.6 effective)
         # HARD pitch termination (see check_termination): end the episode if the base pitches NOSE-DOWN beyond
         # this (projected_gravity[:,0], ~sin(tilt)) AT TOUCHDOWN (the landing phase). Forces a level touchdown

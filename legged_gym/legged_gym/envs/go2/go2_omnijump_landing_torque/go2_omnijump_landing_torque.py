@@ -906,6 +906,18 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
         roll_sq = torch.square(self.base_ang_vel[:, 0])
         nose_down_rate = torch.square(torch.clamp(-self.base_ang_vel[:, 1], min=0.0))
         ang_vel_sq = roll_sq + nose_down_rate
+        # YAW (2026-08-25). The exclusion above left the yaw axis with NO penalty -- its only pressure was
+        # the positive kernel exp(-wz^2/0.25) in _reward_tracking_angular_velocity, which cannot punish,
+        # only withhold, and which FLOORS: 0.53 at wz=0.4, 4e-4 at 1.4, 2e-28 at 4, 2e-106 at 7.8. Past
+        # ~1.4 rad/s the surface is flat and nothing points back to zero. This very branch's run
+        # (Aug25_19-53-29) walks through it: wz 0.4 @1000 -> 1.31 @2000 -> 4.4 @3000 -> 7.8 @5000, ending at
+        # 155 deg of yaw per jump, while roll -- which carries THIS quadratic penalty, whose gradient grows
+        # with omega instead of vanishing -- stays at ~15 deg in the same run. So put yaw on the same footing.
+        # Penalises the error against commands[:, 2] rather than raw w_z, so Stage-2 commanded turning stays
+        # valid (the command is 0 today, making this exactly wz^2). Weight 0 = off, so nothing else changes.
+        yaw_w = float(getattr(self.cfg.rewards, "base_ang_vel_yaw_weight", 0.0))
+        if yaw_w > 0.0:
+            ang_vel_sq = ang_vel_sq + yaw_w * torch.square(self.base_ang_vel[:, 2] - self.commands[:, 2])
         if getattr(self, "_takeoff_omega_on", False):
             # POST-DISCOVERY (succ_rate gate latched): ALSO penalize ω during the PUSH/extension (where the
             # nose-down spin is IMPARTED -- it can't be undone in flight) and apply a STRONGER weight, so the
