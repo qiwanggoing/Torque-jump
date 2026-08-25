@@ -915,10 +915,20 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
         # with omega instead of vanishing -- stays at ~15 deg in the same run. So put yaw on the same footing.
         # Penalises the error against commands[:, 2] rather than raw w_z, so Stage-2 commanded turning stays
         # valid (the command is 0 today, making this exactly wz^2). Weight 0 = off, so nothing else changes.
-        yaw_w = float(getattr(self.cfg.rewards, "base_ang_vel_yaw_weight", 0.0))
-        if yaw_w > 0.0:
-            ang_vel_sq = ang_vel_sq + yaw_w * torch.square(self.base_ang_vel[:, 2] - self.commands[:, 2])
+        # ⚠️ POST-LATCH ONLY (2026-08-26). The first attempt applied it from step 1 and killed discovery on
+        # this very config: flat normally dips at iter 100-200 and is back at flight_rate 0.96 by iter 321,
+        # but with the yaw tax running during the exploratory-flight window it never came back -- iter 1492
+        # still read flight 0.066, squat_qualified 0.007, peak 0.020, noise collapsed to 0.04. Flailing
+        # exploratory flight carries wz ~1-3 rad/s, so a quadratic charges 1-9 per step for the mere act of
+        # leaving the ground, and "do not jump" wins. Exactly the old base_ang_vel -0.4 collapse. So the yaw
+        # term now lives INSIDE the succ-rate latch, next to the push-phase extension: zero tax while the
+        # robot is still learning to jump, full strength (and x4, covering the push) once it can. The timing
+        # works out -- the latch fires at iter 292 / 416 / 860 in Aug08 / Aug25_19-53-29 / Aug18, while the
+        # spin is only 3.5 deg at iter 1000 and 10.9 at 2000, so it engages long before there is a spin.
         if getattr(self, "_takeoff_omega_on", False):
+            yaw_w = float(getattr(self.cfg.rewards, "base_ang_vel_yaw_weight", 0.0))
+            if yaw_w > 0.0:
+                ang_vel_sq = ang_vel_sq + yaw_w * torch.square(self.base_ang_vel[:, 2] - self.commands[:, 2])
             # POST-DISCOVERY (succ_rate gate latched): ALSO penalize ω during the PUSH/extension (where the
             # nose-down spin is IMPARTED -- it can't be undone in flight) and apply a STRONGER weight, so the
             # policy launches WITHOUT the spin -> level flight -> flat landing (Atanassov: control ω, drive it
