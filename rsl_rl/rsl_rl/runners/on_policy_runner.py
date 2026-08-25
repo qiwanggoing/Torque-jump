@@ -79,6 +79,18 @@ class OnPolicyRunner:
         self.alg.init_storage(self.env.num_envs, self.num_steps_per_env, [self.env.num_obs],
                               [self.env.num_privileged_obs], [self.env.num_actions])
 
+        # --- sym_coef DISCOVERY GATE (opt-in via runner cfg; without `sym_gate_metric` nothing changes) ---
+        # The mirror loss is a STABILITY constraint, and in this project every stability lever switched on
+        # before the behaviour exists has killed discovery. So hold sym_coef at 0 until the run has actually
+        # discovered the behaviour (an episode metric crosses a threshold), then ramp it to the configured
+        # value. See _update_sym_coef.
+        self._sym_gate_metric = self.cfg.get("sym_gate_metric", None)
+        self._sym_coef_target = float(getattr(self.alg, "sym_coef", 0.0))
+        self._sym_gate_ema = 0.0
+        self._sym_gate_iter = None
+        if self._sym_gate_metric is not None:
+            self.alg.sym_coef = 0.0
+
         # Log
         self.log_dir = log_dir
         self.writer = None
@@ -87,6 +99,47 @@ class OnPolicyRunner:
         self.current_learning_iteration = 0
 
         _, _ = self.env.reset()
+
+    def _update_sym_coef(self, it, ep_infos):
+        """Ramp sym_coef in only AFTER the behaviour is discovered (opt-in, runner cfg).
+
+        Runner cfg keys:
+          sym_gate_metric     name of an episode metric (e.g. "squat_qualified_rate"); None = feature off
+          sym_gate_value      EMA threshold that counts as "discovered"          (default 0.5)
+          sym_gate_ema_alpha  EMA smoothing on that metric                        (default 0.05)
+          sym_ramp_iters      iterations to go 0 -> configured sym_coef           (default 200)
+
+        The gate LATCHES: once opened it never closes, so a temporary dip in the metric cannot yank the
+        mirror constraint back out mid-training. Resuming from a checkpoint restarts the gate closed.
+        """
+        if self._sym_gate_metric is None:
+            return
+        key = self._sym_gate_metric
+        vals = [e[key] for e in ep_infos if key in e] if ep_infos else []
+        if not vals:
+            ep = getattr(self.env, "extras", {}).get("episode", {})
+            if key in ep:
+                vals = [ep[key]]
+        if vals:
+            v = sum(float(x) for x in vals) / len(vals)
+            a = float(self.cfg.get("sym_gate_ema_alpha", 0.05))
+            self._sym_gate_ema = (1.0 - a) * self._sym_gate_ema + a * v
+        if self._sym_gate_iter is None:
+            if self._sym_gate_ema < float(self.cfg.get("sym_gate_value", 0.5)):
+                self.alg.sym_coef = 0.0
+                if self.writer is not None:
+                    self.writer.add_scalar("Policy/sym_coef", self.alg.sym_coef, it)
+                    self.writer.add_scalar("Policy/sym_gate_ema", self._sym_gate_ema, it)
+                return
+            self._sym_gate_iter = it
+            print(f"[sym gate] iter {it}: {key} EMA {self._sym_gate_ema:.3f} >= "
+                  f"{self.cfg.get('sym_gate_value', 0.5)} -> ramping sym_coef to {self._sym_coef_target} "
+                  f"over {self.cfg.get('sym_ramp_iters', 200)} iters", flush=True)
+        ramp = max(1, int(self.cfg.get("sym_ramp_iters", 200)))
+        self.alg.sym_coef = self._sym_coef_target * min(1.0, (it - self._sym_gate_iter) / ramp)
+        if self.writer is not None:
+            self.writer.add_scalar("Policy/sym_coef", self.alg.sym_coef, it)
+            self.writer.add_scalar("Policy/sym_gate_ema", self._sym_gate_ema, it)
 
     def learn(self, num_learning_iterations, init_at_random_ep_len=False):
         # initialize writer
@@ -167,6 +220,7 @@ class OnPolicyRunner:
                 start = stop
                 self.alg.compute_returns(critic_obs)
 
+            self._update_sym_coef(it, ep_infos)
             update_results = self.alg.update()
             extra_loss_stats = {}
             if len(update_results) == 4:

@@ -878,6 +878,8 @@ class GO2OmniJumpLandingTorqueCfgPPO(GO2OmniJumpCurriculumTorqueCfgPPO):
         # direction: Aug18 discovered at iter650 with sym fully OFF.
         sym_loss = True
         sym_coef = 1.0   # LEFT-RIGHT mirror symmetry (front-rear is handled by pushoff_leg_sync, not sym_loss)
+                         # ⚠️ this is the TARGET value: the runner holds sym_coef at 0 until the discovery
+                         # gate opens, then ramps to this over sym_ramp_iters (see runner cfg, sym_gate_*).
         frame_stack = 1  # the map below is ALREADY full-length -- do NOT let ppo.py tile it
         obs_permutation = _mirror_obs_permutation(
             GO2OmniJumpLandingTorqueCfg.env.history_length,
@@ -916,6 +918,21 @@ class GO2OmniJumpLandingTorqueCfgPPO(GO2OmniJumpCurriculumTorqueCfgPPO):
         # it crosses ~0.55 and collapses the jump. (Raise to 600-800 if a fresh run discovers slower; data = iter100.)
         entropy_anneal_iter = 500
         entropy_coef_final = 0.001
+        # sym_coef DISCOVERY GATE (2026-08-25). Step 1b's first run (Aug25_15-46-36, commit 4161ead,
+        # verified clean) never discovered: squatQ 0 for 3400 iters, reward stuck ~1.2, value_loss 0.001,
+        # peak 0.30 (below the 0.42 standing height = it only ever crouched). The mirror loss itself looks
+        # innocent -- Loss/symmetry ran 0.0026-0.0036, the same size as in the flat baseline that discovered
+        # fine (Aug08, sym_coef also 1.0) -- but the history obs moved DISCOVERY from iter 51 (flat) to
+        # iter 614-711 (Jul31/Aug18), i.e. into the tail where noise_std has already decayed to ~0.09, and
+        # 2 of 3 history runs got through on luck. So the mirror constraint is treated like every other
+        # stability lever here: HELD OUT until the behaviour exists, then ramped in. Before the gate this
+        # reproduces exactly the Aug18 condition (sym off), which discovered 2 times out of 2.
+        # Loss/symmetry keeps being logged while the gate is shut (coef 0 = no gradient), so the spin can
+        # still be watched as it develops. Tensorboard: Policy/sym_coef + Policy/sym_gate_ema.
+        sym_gate_metric = "squat_qualified_rate"
+        sym_gate_value = 0.5      # EMA of squat_qualified_rate that counts as "discovered"
+        sym_gate_ema_alpha = 0.05  # ~14 iters to cross 0.5 once the raw metric pins at 1.0
+        sym_ramp_iters = 300      # 0 -> sym_coef, gradual so the constraint never lands as a shock
 
 
 # ============================================================================================
