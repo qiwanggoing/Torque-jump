@@ -1024,10 +1024,16 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
         # Penalising the ERROR against commands[:, 2] (not raw wz) keeps Stage-2 commanded turning valid:
         # today the command is 0, so this is exactly wz^2. Weight 0 (the default) = feature off for every
         # other config, so nothing else changes.
-        yaw_w = float(getattr(self.cfg.rewards, "base_ang_vel_yaw_weight", 0.0))
-        if yaw_w > 0.0:
-            ang_vel_sq = ang_vel_sq + yaw_w * torch.square(self.base_ang_vel[:, 2] - self.commands[:, 2])
+        # ⚠️ POST-LATCH ONLY (2026-08-26). Applied from step 1 it KILLS DISCOVERY -- measured on the flat
+        # testbed (run yaw_pen_flat), which normally recovers to flight_rate 0.96 by iter 321 and instead
+        # read flight 0.000 there and 0.066 at iter 1492, noise collapsed to 0.04. Exploratory flailing
+        # carries wz ~1-3 rad/s, so a quadratic charges for the mere act of leaving the ground and "do not
+        # jump" wins (the old base_ang_vel -0.4 collapse). It therefore lives inside the succ-rate latch,
+        # next to the push-phase extension: no yaw tax until the robot can jump, then full strength.
         if getattr(self, "_takeoff_omega_on", False):
+            yaw_w = float(getattr(self.cfg.rewards, "base_ang_vel_yaw_weight", 0.0))
+            if yaw_w > 0.0:
+                ang_vel_sq = ang_vel_sq + yaw_w * torch.square(self.base_ang_vel[:, 2] - self.commands[:, 2])
             # POST-DISCOVERY (succ_rate gate latched): ALSO penalize ω during the PUSH/extension (where the
             # nose-down spin is IMPARTED -- it can't be undone in flight) and apply a STRONGER weight, so the
             # policy launches WITHOUT the spin -> level flight -> flat landing (Atanassov: control ω, drive it
