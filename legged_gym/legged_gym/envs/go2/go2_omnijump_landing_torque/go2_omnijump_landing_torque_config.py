@@ -771,8 +771,22 @@ class GO2OmniJumpLandingTorqueCfgPPO(GO2OmniJumpCurriculumTorqueCfgPPO):
         aux_head_dim = 12
 
     class algorithm(GO2OmniJumpCurriculumTorqueCfgPPO.algorithm):
-        sym_coef = 1.0   # was 0.5: match my_go2_jump — tighter LEFT-RIGHT mirror symmetry
-                         # (front-rear is handled by the pushoff_leg_sync reward, not sym_loss)
+        # ⚠️ ABLATION BRANCH (2026-08-25) -- the ONLY change from the 88a571c baseline (= the run
+        # Aug08_16-35-49). Everything else is untouched on purpose, including max_iterations, so this is a
+        # strict single-variable A/B against that run on the same machine.
+        #
+        # QUESTION: is the one-sided in-flight SPIN caused by sym_loss being off, or by the observation
+        # history itself? The two were confounded in Step 1 (the history layout FORCED sym off):
+        #     flat    + sym ON  = Aug08 : 1.1 deg per jump  (straight)
+        #     history + sym OFF = Aug18 : 3.5 @1000 -> 16.7 @2000 -> 64.1 @3000 -> 150 deg @4700
+        #     history + sym ON  = Aug25 : never discovered, tells us nothing
+        #     flat    + sym OFF = THIS RUN
+        # Land near 16 deg @2000 / 64 @3000 -> sym is the cause. Stay near 1 deg -> the history obs is,
+        # and the lever moves to the ground-phase yaw penalty instead (the airborne-only yaw damp cannot
+        # help: in flight the angular momentum is conserved).
+        # Verdict tool: scripts yaw_perjump on model_2000 / model_3000, TQ_DX=1.2.
+        sym_loss = False
+        sym_coef = 0.0   # baseline was 1.0 (LEFT-RIGHT mirror symmetry; front-rear is pushoff_leg_sync's job)
         # Step H (final): τ_comp is OUT of the PPO action, so act_permutation stays 12-dim (inherited
         # = single-head). BC loss weight for the deterministic comp_head:
         bc_coef = 1.0
