@@ -28,6 +28,8 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
         "projected_landing",
         "forward_reach",     # distance-progressive EFFORT reward (farther = more), decoupled from precise landing
         "foot_contact_sync",
+        "joint_symmetry",    # LEFT-RIGHT joint-pose symmetry (Atanassov 2025 "Symmetry", dense quadratic).
+                             # Replaces PPO's mirror loss -- see _reward_joint_symmetry.
         "stance_squat",
         "base_ang_vel_xy",   # landing stability: flight+landing roll/pitch ω damping
         "landing_impact",    # landing stability: touchdown force-spike penalty
@@ -58,6 +60,8 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
         "projected_landing": 1,
         "forward_reach": 1,
         "four_leg_push": 1,
+        "joint_symmetry": 0,        # active from step 1, like the mirror loss it replaces (4600 trained with
+                                    # sym_loss on from step 1 and discovered at iter 38-51)
         "clean_takeoff_bonus": 0,   # active from step 1 (soft positive bonus = discovery-safe)
         "stand_no_takeoff": 0,      # stage 0; real gate is _takeoff_omega_on inside the reward (post-discovery)
         "foot_contact_sync": 0,
@@ -705,6 +709,47 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
         err = torch.sum(torch.square(self.landing_root_xy - self.landing_target[:, :2]), dim=1)
         score = self._landing_kernel(err, "sigma_pos_landing", "sigma_pos_landing_norm")
         return floor + (1.0 - floor) * score
+
+    def _reward_joint_symmetry(self):
+        """LEFT-RIGHT joint-pose symmetry, as a REWARD term instead of PPO's mirror loss.
+
+        Atanassov 2025 (Table 1, "Symmetry", dense): w_sym * sum_joints ||q_left - q_right||^2, motivated by
+        "various quadrupedal jumps seen in nature exhibit high left- and right-side symmetry". Olsen 2025
+        splits it by jump type and, for HORIZONTAL jumps, uses only the left/right transversal difference --
+        front-rear is deliberately left free, because a forward jump needs the front/rear stagger. We follow
+        both: FL vs FR and RL vs RR only, never front vs rear (that is foot_contact_sync's business, and it
+        makes the same distinction at the contact-timing level).
+
+        Quadratic, not the exp kernel Olsen uses: a kernel FLOORS. The yaw case measured here in August is the
+        cautionary tale -- exp(-wz^2/0.25) is 2e-28 at 4 rad/s, so once the error is large the gradient is
+        gone and nothing pulls it back. A quadratic's gradient grows with the error instead.
+
+        WHY A REWARD AT ALL, when PPO already has sym_loss: the mirror loss is wired to the observation
+        LAYOUT (ppo.py tiles a frame permutation across a uniform stack). Every obs change re-opens the
+        question, and it has twice been switched off as collateral damage -- 859b517 because the OmniNet
+        actor takes {frame + latent} so a 1380-dim mirror would crash, then f80a088 because the Atanassov
+        stack [49 x 20 | 32 extras] is not uniform and the tiling would silently MISALIGN the map. That
+        second-order cost went unnoticed for a month: it is what produced the one-sided 150 deg/jump spin.
+        A reward depends on none of that.
+
+        The hip (abduction) joint flips sign under the mirror -- default is [+0.1, -0.1, +0.1, -0.1] -- so its
+        pair term is a SUM. Writing it as a difference would drive both hips to abduct the same way, i.e. the
+        opposite of symmetric. Thigh and calf match directly. Same convention as act_permutation.
+
+        Calibration (rollouts at dx 1.2, mean over all steps): model_4600, trained WITH the mirror loss,
+        sits at 0.0969; a policy trained without it sits at ~1.2; a freshly initialised one at 1.395. With
+        the empirical scale->earned factor 0.215 (from default_pos: raw 3.1514, scale -0.5, logged -0.3387),
+        weight -1.0 charges the 4600-like gait -0.021 (negligible, ~ orientation) and an asymmetric one
+        -0.26 (the default_pos / pitch_level band -- it bites without dominating).
+        """
+        d = self.dof_pos - self.default_dof_pos
+
+        def pair(a, b):   # a, b = first joint index of the two legs (hip, thigh, calf)
+            return ((d[:, a] + d[:, b]) ** 2                      # hip abduction: mirrored -> SUM
+                    + (d[:, a + 1] - d[:, b + 1]) ** 2            # thigh
+                    + (d[:, a + 2] - d[:, b + 2]) ** 2)           # calf
+
+        return pair(0, 3) + pair(6, 9)                            # FL/FR + RL/RR, never front vs rear
 
     def _reward_default_pos(self):
         # PENALTY on L1 pose deviation, but HALVED in config (-1.0 -> -0.5). Diagnosis (Jun21 runs): at -1.0 this

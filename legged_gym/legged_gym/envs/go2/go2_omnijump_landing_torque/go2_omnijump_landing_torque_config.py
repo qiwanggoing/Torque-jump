@@ -576,6 +576,17 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
             # clean_landing REMOVED (ineffective: detector never armed -> reward ~0). Post-landing slide handled by
             # landing_stability (brake momentum) + disable_jump_on_landing (no commanded re-jump); error obs real-time.
             # ---- four-foot contact-timing sync (penalty on staggered takeoff/landing) ----
+            joint_symmetry = -1.0            # LEFT-RIGHT joint-pose symmetry, replacing PPO's mirror loss
+                                             # (sym_loss is OFF on this branch). Calibrated against the
+                                             # measured symmetry error and this run's own reward economy:
+                                             #   4600 (mirror loss ON) 0.0969 -> earns -0.021 (negligible)
+                                             #   a policy without it   ~1.2   -> earns -0.26  (default_pos band)
+                                             #   fresh random init     1.395  -> earns -0.30  (bounded)
+                                             # conversion 0.215, from default_pos (raw 3.1514, scale -0.5,
+                                             # logged -0.3387). -2.0 would make it the largest penalty in the
+                                             # run, which it should not be. IF the run does not converge near
+                                             # 4600's symmetry (watch rew_joint_symmetry -> about -0.02),
+                                             # raise to -2.0 rather than suspecting the form.
             foot_contact_sync = -4.0         # was -3.0: STRENGTHEN four-foot takeoff/landing sync (less body tilt
                                              # at touchdown). config note: if peak drops too much, back off.
                                              # penalize 1-3 feet on the ground during the takeoff push / landing
@@ -700,6 +711,13 @@ class GO2OmniJumpLandingTorqueCfgPPO(GO2OmniJumpCurriculumTorqueCfgPPO):
         aux_head_dim = 12
 
     class algorithm(GO2OmniJumpCurriculumTorqueCfgPPO.algorithm):
+        # Mirror loss OFF -- the `joint_symmetry` REWARD replaces it on this branch. The point of the
+        # experiment: model_4600 was trained on this exact config WITH the mirror loss, so its numbers are the
+        # answer key (symmetry error 0.0148 in the push / 0.0969 over all steps, 5.9 deg of yaw per jump with a
+        # RANDOM sign, air 0.830 at dx 1.3, dAir +0.411). If the reward reproduces those, symmetry stops being
+        # coupled to the observation layout and the history obs can go back on top without a mirror map.
+        sym_loss = False
+        sym_coef = 0.0
         sym_coef = 1.0   # was 0.5: match my_go2_jump — tighter LEFT-RIGHT mirror symmetry
                          # (front-rear is handled by the pushoff_leg_sync reward, not sym_loss)
         # Step H (final): τ_comp is OUT of the PPO action, so act_permutation stays 12-dim (inherited
