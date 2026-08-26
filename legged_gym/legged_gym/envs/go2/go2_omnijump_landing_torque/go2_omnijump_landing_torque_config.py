@@ -283,6 +283,11 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
         # risks the squat-then-push (same failure mode as Jun09_11-29-05 strong default_pos/yaw).
         # The 1s settled-stance is a PLAY/visual nicety only -> set it in play_landing, not training.
         landing_real_jump_min_peak = 0.40   # peak gate for the landing_position reward
+        # ... and now for landing_stability too (2026-08-27). Without it a 3 cm hop followed by holding still
+        # farms landing_stability at nearly its maximum: measured +0.069 in the stuck run Aug26_23-47-59,
+        # which is 30% of the +0.227 that made NOT jumping profitable (net +0.086 against the reference's
+        # -0.096 at the same stage). See _reward_landing_stability.
+        landing_stability_requires_real_jump = True
                                             # (omnijump squat settles ~0.31, real jump peaks ~0.56)
         landing_buffer_steps = 150          # was 25 (=0.125s, inherited). A jump only "finishes" (success
                                             # credited + next jump re-enabled) after the robot stays stable

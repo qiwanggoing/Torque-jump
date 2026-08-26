@@ -1414,6 +1414,20 @@ class GO2OmniJumpTorque(GO2Torque):
         # configurable: the default 0.25/0.5 floors at ~0 for real landing speeds (vx~1.3 -> exp(-7)~0), which
         # is why it "never fired"; loosen them (landing task: ~2.0/1.0) so there is gradient across the brake.
         active = self.landing.float()
+        # REAL-JUMP GATE (2026-08-27, opt-in; absent flag = unchanged for every other config).
+        # `self.landing` is just `jumping_state & has_landed`, with no test that the jump was real, and the
+        # kernel below is ~1.0 for a motionless base. So a policy that hops 3 cm, touches down and then FREEZES
+        # collects this at nearly full value for the rest of the episode. That is not hypothetical: run
+        # Aug26_23-47-59 sat at squat_qualified 0, peak 0.30, flight_rate 1.0, and its income was
+        # default_hip_pos +0.082 / maintain_contact +0.071 / landing_stability +0.069 against -0.134 of
+        # penalties -- net +0.086, i.e. NOT jumping was PROFITABLE and there was no pressure to leave. The
+        # reference run at the same point in its own dip nets -0.096, and it climbs back out.
+        # Same loophole class that was closed for successful_jump and landing_position on 2026-06-20 (a pop
+        # to 0.40 used to collect them); landing_stability was added later, on 2026-06-18, and never got the
+        # gate. Reuse landing_position's threshold so "real jump" means one thing in this file.
+        if getattr(self.cfg.rewards, "landing_stability_requires_real_jump", False):
+            min_peak = float(getattr(self.cfg.rewards, "landing_real_jump_min_peak", 0.40))
+            active = active * (self.peak_base_height >= min_peak).float()
         lin_vel_error = torch.sum(torch.square(self.base_lin_vel), dim=1)
         ang_vel_error = torch.sum(torch.square(self.base_ang_vel[:, :2]), dim=1)
         lin_sigma = max(float(getattr(self.cfg.rewards, "landing_stability_lin_sigma", 0.25)), 1e-3)
