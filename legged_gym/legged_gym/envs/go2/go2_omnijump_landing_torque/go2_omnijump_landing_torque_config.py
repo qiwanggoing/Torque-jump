@@ -576,7 +576,14 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
             # clean_landing REMOVED (ineffective: detector never armed -> reward ~0). Post-landing slide handled by
             # landing_stability (brake momentum) + disable_jump_on_landing (no commanded re-jump); error obs real-time.
             # ---- four-foot contact-timing sync (penalty on staggered takeoff/landing) ----
-            joint_symmetry = -1.0            # LEFT-RIGHT joint-pose symmetry, replacing PPO's mirror loss
+            # ⚠️ ISOLATION CONTROL (2026-08-27): weight 0 = the reward is OFF (a zero scale is dropped from
+            # the active set). This branch is therefore 4600's config with ONLY sym_loss removed. It splits
+            # the two changes that were made together on sym-reward-4600, where four seeds failed to
+            # discover IDENTICALLY (squatQ 0.320 at iter50 then 0.000 forever, peak 0.30, net income +0.08)
+            # while the reference climbs out of the same dip by iter 200. Discovers here => the tiny
+            # joint_symmetry term is somehow the blocker; fails here => the mirror loss is load-bearing for
+            # the recovery on this config and a reward cannot drop in for it.
+            joint_symmetry = 0.0             # LEFT-RIGHT joint-pose symmetry, replacing PPO's mirror loss
                                              # (sym_loss is OFF on this branch). Calibrated against the
                                              # measured symmetry error and this run's own reward economy:
                                              #   4600 (mirror loss ON) 0.0969 -> earns -0.021 (negligible)
