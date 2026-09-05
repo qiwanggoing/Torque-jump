@@ -569,7 +569,23 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
                                              # The earlier 20->10 HALVING was to curb a "precise-but-topple" farm -- but stability is now SOLVED
                                              # (succ 0.90 via landing-focused pitch), so the topple risk is gone and boosting AIM is safe; it now
                                              # drives the forward launch toward the target. Discovery-safe (gated on a real jump peak>=0.40).
-            projected_peak = 20.0            # 25 -> 20: modest OVERALL height trim. Run trend showed the policy FARMS height (projected_peak
+            projected_peak = 40.0            # 2026-09-05 LAUNCH-ANGLE REBALANCE (20 -> 40). At THIS operating point this
+                                             # term is a height CAP, not a height incentive: measured mean_peak 0.542 vs commanded
+                                             # mean 0.45 -> the policy chronically OVERSHOOTS, so the exp kernel pulls vz DOWN.
+                                             # Integrated over the ascent its optimal launch angle is 46.5 deg, i.e. it is one of only
+                                             # two terms that pull FLAT (the other is landing_position); forward_reach (60.0 deg) and
+                                             # projected_landing (62.5 deg) dominate at 60% of income and pull STEEP, which is why the
+                                             # aggregate optimum sits at 57 deg and the policy drifted to 62 deg once the truncated
+                                             # thigh limit stopped holding it flat. Weight sweep (fixed |v|=2.68, averaged over the
+                                             # command distribution): 20->57 deg, 40->54, 80->51; paired with landing_position 40 the
+                                             # aggregate lands at 53 deg = +5.2% ballistic range. Trimming forward_reach/projected_landing
+                                             # instead is inefficient (60->5 only reaches 53 deg) because their per-step value is nearly
+                                             # angle-independent under chronic undershoot.
+                                             # WATCH: projected_peak = 35 once backfired (same-seed A/B: ceiling DOWN + succ collapse,
+                                             # it crowded out the held-squat gate). If squat_qualified_rate or flight_rate sags, fall
+                                             # back to projected_peak_sigma 0.025 -> 0.0125 (sharpens the cap WITHOUT adding income share;
+                                             # reaches 54.5 deg instead of 53).
+                                             # [prior note] 25 -> 20: modest OVERALL height trim. Run trend showed the policy FARMS height (projected_peak
                                              # rose 0.30->0.50 while landing accuracy collapsed to ~0 once far accuracy got hard) -- height is
                                              # the biggest reward AND paid regardless of landing, so the policy dumps accuracy for it. A mild 20%
                                              # cut eases that without gating. NOTE: an earlier 25->15 broke discovery, but that was BUNDLED with
@@ -579,7 +595,17 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
             successful_jump = 1000.0          # Jun23_01-23-30 baseline (reverted). Sparse so weight is big but earned
                                              # modest (~0.25; also graded by height_score). Coupled to landing accuracy
                                              # via _get_successful_jump_velocity_score (success_landing_min_score floor).
-            landing_position = 8.0           # 5 -> 8: BOOST (with projected_landing 15) so jump-DISTANCE/accuracy OUTRANKS height
+            landing_position = 40.0          # 2026-09-05 LAUNCH-ANGLE REBALANCE (8 -> 40). The ONLY distance term that is paid
+                                             # PER JUMP (fixed ~150-step landing buffer) instead of per airborne step, so its earned
+                                             # value carries NO "longer hang time = more money" factor -> its integrated optimum is the
+                                             # pure ballistic 45 deg. It is also the term that collapsed hardest after the joint-limit
+                                             # fix (earned 0.379 -> 0.146, -61%; share 12.2% -> 5.7%), i.e. exactly the centre of mass
+                                             # that moved from landing accuracy to height. Sweep: 8->57 deg, 40->54, 160->51 (but 160
+                                             # makes it 62% of all income -- rejected). At 40, with projected_peak 40, no single term
+                                             # dominates: forward_reach 25% / landing_position 25% / projected_peak 24% / proj_landing 13%.
+                                             # Farm-proof as before: gated on a real jump (peak >= 0.40) and scored on the FIXED touchdown
+                                             # xy, so it cannot be earned by crawling to the target after a short landing.
+                                             # [prior note] 5 -> 8: BOOST (with projected_landing 15) so jump-DISTANCE/accuracy OUTRANKS height
                                              # (user principle). DENSE over the landing buffer (~150 steps, fixed touchdown xy). Target:
                                              # distance earned (landing_position + projected_landing ~0.67) > height (~0.60). Discovery-safe
                                              # (gated on a real jump peak>=0.40 -> can't be farmed by standing). VERIFY the earned balance in
