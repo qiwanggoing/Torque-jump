@@ -119,6 +119,25 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
         # stays free). True = the xy the jump was commanded from -> every metre crept is a metre of
         # landing error. Only meaningful at dx=0 (see the note in _update_jump_state) -> stage 1 sets it.
         landing_anchor_jump_start = False
+        # ⭐2026-09-06 TAKEOFF ANCHOR. Lock the landing target to (takeoff xy + command) instead of a
+        # world-fixed point behind the takeoff, so the reward measures FLIGHT DISPLACEMENT and a ground
+        # run-up is worth exactly zero (it moves takeoff and touchdown by the same amount). Before
+        # takeoff the target slides with the body, so the OBSERVED error stays equal to the command and
+        # the policy never receives the "creeping shrinks the error" signal at all; the hand-off at
+        # takeoff is then continuous instead of snapping by the whole creep distance.
+        # WHY: run Sep06_03-25-19 (window 0.30 + landing_position far pull) doubled landing_hit_rate
+        # 0.18 -> 0.41, but HALF the distance turned out to be run-up -- run_up_creep 0.201 -> 0.524
+        # (+161%) while clean_reach only went 0.509 -> 0.540 (+7%). The far pull is the bigger culprit:
+        # before it, a far command's exp kernel was floored (e^-9) so creeping toward it earned nothing
+        # until the miss was already under ~0.15 m; the linear term paid a constant 1/1.5 per metre for
+        # every crept metre too, because the anchor sat behind the takeoff point.
+        # EXPECT: landing_hit_rate and reliable_reach_dx to DROP (they stop counting creep-assisted
+        # touchdowns) -- the honest number to compare across runs is clean_reach. Creep will NOT go to
+        # zero: building horizontal momentum on the ground genuinely lengthens the flight, and no
+        # reward shape can forbid that. Killing the residual needs the take-off FOUL LINE (planted foot
+        # may not cross a line latched at jump-command time), which is the NEXT knife -- and it must
+        # come after this one, so the policy is not terminated for doing what the reward still pays for.
+        landing_anchor_takeoff = True
         # 2026-08-12: [0.5, 1.5] -> [0.4, 1.2]. The old range asked for MORE THAN THE ROBOT CAN FLY, and
         # that is what forces the run-up: the landing target is anchored at the squat bottom, so hitting
         # a 1.2 m command when the clean flight tops out at 0.6-0.75 m REQUIRES shuffling the remaining

@@ -250,6 +250,25 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
         if torch.any(_new_low):
             self.squat_root_xy[_new_low] = self.root_states[_new_low, :2]
         super()._update_jump_state()
+        # ⭐SLIDING PRE-TAKEOFF TARGET (2026-09-06, landing_anchor_takeoff). While the robot has NOT yet
+        # left the ground, the target rides along with the body: landing_target = current xy + command.
+        # Two things follow, and they are the whole point of the takeoff anchor:
+        #   * the OBSERVED landing error (compute_observations reads landing_target - root_xy) stays
+        #     EXACTLY equal to the command no matter how far the robot shuffles -> creeping forward
+        #     produces no error reduction, so the policy never even receives the signal that creeping
+        #     helps. The old squat/jump-start anchors are world-fixed, so every centimetre crept made
+        #     the observed error shrink -- that IS the run-up teaching signal.
+        #   * it makes the takeoff hand-off CONTINUOUS. At the last grounded step err == cmd, and the
+        #     lock below sets target = takeoff_xy + cmd, so err == cmd there too. The world-fixed
+        #     anchors instead snap the observation by the whole creep distance (~0.52 m measured) at
+        #     the takeoff instant, and that discontinuity is exactly what the landing_err_obs comment
+        #     warns spikes the value loss.
+        # Reward terms are all gated on airborne/landing, so none of them fire while this is sliding.
+        if bool(getattr(self.cfg.commands, "landing_anchor_takeoff", False)):
+            _pre = ~self.has_taken_off
+            if torch.any(_pre):
+                self.landing_target[_pre, 0] = self.root_states[_pre, 0] + self.commands[_pre, 0]
+                self.landing_target[_pre, 1] = self.root_states[_pre, 1] + self.commands[_pre, 1]
         # ANTI-CHEAT squat-based target: at takeoff, LOCK landing_target = SQUAT-BOTTOM xy + commanded
         # (dx, dy). Landing accuracy is then the real distance squat-bottom -> land, NOT spawn -> land:
         # the "stand -> squat" ground creep (~0.42m observed) can no longer farm distance, while the
@@ -261,9 +280,28 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
             # dx=0: with an in-place command every metre shuffled forward is a metre of landing error.
             # (At dx>0 no anchor helps -- creeping simply substitutes for flight distance and lands on
             # target either way, which is why a forward stage always needs a curriculum/termination.)
-            anchor = (self.jump_start_root_xy
-                      if getattr(self.cfg.commands, "landing_anchor_jump_start", False)
-                      else self.squat_root_xy)
+            # ⭐TAKEOFF ANCHOR (2026-09-06) -- the only anchor that makes a ground creep worth EXACTLY
+            # ZERO. With target = takeoff_xy + cmd, the landing error is |flight displacement - cmd|:
+            # creeping moves the takeoff point and the touchdown point by the same amount, so the
+            # flight displacement -- and therefore every landing reward -- is unchanged. The comment
+            # below ("at dx>0 no anchor helps") is right about the squat / jump-start anchors, which
+            # both sit BEHIND the takeoff point so the crept metres are subtracted from the distance
+            # that still has to be flown; it does not cover this one.
+            # Measured motivation: with the squat anchor the policy put HALF its distance on the
+            # ground (run_up_creep 0.52 m vs clean_reach 0.54 m at iter 4600 of Sep06_03-25-19).
+            # This also cleans up two downstream terms for free, because both read
+            # (landing_target - takeoff_root_xy), which now collapses to exactly commands[:, :2]:
+            #   * takeoff_velocity_match -- v_req no longer depends on how far the robot crept
+            #   * forward_reach          -- creeping no longer shrinks cmd_dist, so it can no longer
+            #                               make the min() cap easier to saturate
+            # And landing_hit_rate / jump_target_hits become HONEST (a creep-assisted touchdown next
+            # to the target stops counting), so expect the reported hit rate and reliable_reach_dx to
+            # DROP on the next run -- that is the virtual part being squeezed out, not a regression.
+            anchor = (self.takeoff_root_xy
+                      if getattr(self.cfg.commands, "landing_anchor_takeoff", False)
+                      else (self.jump_start_root_xy
+                            if getattr(self.cfg.commands, "landing_anchor_jump_start", False)
+                            else self.squat_root_xy))
             self.landing_target[self.just_took_off, 0] = (
                 anchor[self.just_took_off, 0] + self.commands[self.just_took_off, 0]
             )
@@ -285,7 +323,9 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
                     and getattr(self.cfg.commands, "landing_dx_percurr", False)
                     and (not getattr(self.cfg.test, "use_test", False)) and hasattr(self, "landing_dx_env")):
                 jto = self.just_took_off
-                cmd_d = torch.norm(self.landing_target[jto, :2] - self.squat_root_xy[jto], dim=1)
+                # Pure COMMAND distance. Was (landing_target - squat_root_xy), which under the takeoff
+                # anchor reads command + creep and would drift the far-band bucket with the run-up.
+                cmd_d = torch.norm(self.commands[jto, 0:2], dim=1)
                 far_frac = float(getattr(self.cfg.commands, "landing_dx_per_env_far_frac", 0.6))
                 self._ep_counted_far[jto] = (cmd_d >= far_frac * self.landing_dx_env[jto]) & (~self._dx_probe_mask[jto])
         # Accumulate "landed ON the commanded point" for the curriculum gate: a REAL jump
