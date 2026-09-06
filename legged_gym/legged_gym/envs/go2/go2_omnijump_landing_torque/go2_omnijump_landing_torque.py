@@ -799,7 +799,21 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
         real_jump = self.peak_base_height >= min_peak
         active = self.landing.float() * real_jump.float()
         err = torch.sum(torch.square(self.landing_root_xy - self.landing_target[:, :2]), dim=1)
-        return active * self._landing_kernel(err, "sigma_pos_landing", "sigma_pos_landing_norm")
+        reward = self._landing_kernel(err, "sigma_pos_landing", "sigma_pos_landing_norm")
+        # NON-VANISHING far PULL (2026-09-06), same shape as _reward_projected_landing's. The exp kernel
+        # is distance-NORMALISED, so a far command that is badly undershot floors it: at cmd 1.3 with the
+        # measured 0.54 m reach, exp(-0.36/0.04) = e^-9 ~ 0 -> zero gradient, and "get closer" pays nothing
+        # until the miss is already under ~0.15. exp keeps doing precision near the target; the linear term
+        # gives partial credit plus a CONSTANT slope at any miss distance, so the policy can actually climb
+        # toward the commanded point from far away. This term is paid per JUMP (fixed landing buffer, fixed
+        # touchdown xy), so unlike the dense airborne terms its slope CANNOT be earned by hanging in the air
+        # longer -- which is exactly why it is the right place to put the tracking pressure.
+        if bool(getattr(self.cfg.rewards, "landing_pos_lin_pull", False)):
+            dist = torch.sqrt(err + 1e-8)
+            d_ref = float(getattr(self.cfg.rewards, "landing_pos_lin_ref", 1.5))
+            lin = torch.clamp(1.0 - dist / max(d_ref, 1e-3), min=0.0)
+            reward = reward + float(getattr(self.cfg.rewards, "landing_pos_lin_coef", 1.0)) * lin
+        return active * reward
 
     def _get_successful_jump_velocity_score(self):
         # DECOUPLED from the landing point (user, WITH clean_takeoff_terminate ON): successful_jump =

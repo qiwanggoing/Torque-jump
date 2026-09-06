@@ -414,7 +414,36 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
         # VERIFIED (peak 0.541 -> 0.500 = exactly the commanded cap, launch angle 62 -> 55 deg), but the
         # policy re-routed the saved hang time into a 77% LONGER ground creep (0.190 -> 0.336), so it is
         # not a clean win and does not belong in the baseline. Revisit after the observation work.
-        forward_reach_window_s = 0.0
+        # ⭐2026-09-06 KNIFE 1 (0.0 -> 0.30): the term was REWARDING THE POLICY FOR NOT TRACKING.
+        # forward_reach = min(projected_reach, cmd_dist) x (airborne steps above 0.40 m), i.e. reach x HANG
+        # TIME. Measured payout of a fixed-0.535 m jump vs one that tracks the command perfectly, averaged
+        # over the command distribution: this term pays the NON-tracking policy 114% of what it pays the
+        # tracking one. Mechanism: perfect tracking at a NEAR command means a short, low jump (short hang
+        # time), while the fixed steep jump keeps a long hang time and min() still caps the value at the
+        # command -- so overshooting is free and hang time is pure profit. It is the LARGEST single term
+        # (36.2% of positive income), so 36% of the reward was pulling the wrong way. Capping the paid
+        # window removes the hang-time factor: payout ratio 114% -> 101% (neutral), far-command (dx 1.3)
+        # local gradient 0.88 -> 1.60 per 0.05 m. Swept 0.22/0.25/0.30 -- all reach ~101%, and 0.30 keeps
+        # the most magnitude, so the driver is not weakened.
+        # (An earlier 0.32 run DID work mechanically but re-routed the saved hang time into +77% ground
+        # creep. That run capped ONLY this term; the creep-payable landing terms were untouched, which
+        # effectively cut creep's tax. Knife 2 below now strengthens the creep-visible landing term, so
+        # the two are applied together. WATCH run_up_creep -- if it climbs past ~0.25, revert to 0.0.)
+        forward_reach_window_s = 0.30
+
+        # ⭐2026-09-06 KNIFE 2: NON-VANISHING far pull for the TERMINAL landing_position (see
+        # _reward_landing_position). Its exp kernel is DEAD at far commands -- at cmd 1.3 with the policy's
+        # actual 0.54 m reach the normalised error is 0.36 and exp(-0.36/0.04) = e^-9 ~ 0, so "land closer"
+        # earns literally nothing until the error is already under ~0.15. That makes tracking a CLIFF, not
+        # a slope, and local search cannot climb it. landing_position and successful_jump (which reuses the
+        # same kernel) are the ONLY two distance terms paid per JUMP rather than per airborne step, i.e.
+        # the only ones hang time cannot substitute for -- and they were collecting just 48% / 63% of what
+        # perfect tracking would pay. Adding the same linear term projected_landing already has turns the
+        # cliff into a constant slope: payout 48% -> 74% and 63% -> 94%, far-command local gradient
+        # 1.60 -> 4.01 per 0.05 m (5x the unmodified baseline's 0.88).
+        landing_pos_lin_pull = True
+        landing_pos_lin_coef = 1.0          # weight of the linear term relative to the exp kernel
+        landing_pos_lin_ref = 1.5           # m: linear runs 1 (on target) -> 0 at this miss distance
 
         soft_dof_pos_limit = 0.9            # was 1.0 (no margin = penalty only AT the hard limit = useless).
                                             # 0.9 -> dof_pos_limits starts penalizing in the last 10% before the
