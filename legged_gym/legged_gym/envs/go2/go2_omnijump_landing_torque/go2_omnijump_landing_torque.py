@@ -157,6 +157,8 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
         # undone in flight). Gated on succ_rate (not a fixed step) so it adapts to discovery speed and never
         # penalizes the messy exploratory pushes before the robot can jump (that broke discovery before).
         self._succ_rate_ema = 0.0
+        self._hit_rate_ema = 0.0
+        self._dx_stage_b_on = False
         self._takeoff_omega_on = False
         # HONEST far-band mastery: decaying accumulators for a TRUSTWORTHY smoothed far-band hit rate
         # (per-batch far_n ~0.1 -> landing_stable_hit_rate is pure noise). See _log_jump_episode_stats.
@@ -382,6 +384,49 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
               f"{self.command_ranges['lin_vel_x']} dy{self.command_ranges['lin_vel_y']}, "
               f"anchor back to squat-bottom, forward_reach live\n", flush=True)
 
+    def _maybe_widen_dx_stage(self):
+        """TWO-STAGE COMMAND-RANGE CURRICULUM (user, 2026-09-06): train inside the reachable band first,
+        widen only once the policy is actually ACCURATE there.
+
+        WHY. The single standing jump tops out around 0.5-0.6 m (launch_diag on anchor_a/model_5000:
+        |v| = 2.22 m/s at 50 deg -> |v|^2/g = 0.50 m point-mass, 0.584 m measured), while the command
+        range was a flat uniform [0.5, 1.5]. Roughly ninety per cent of the commands were therefore
+        UNREACHABLE in one push, and "land on target" was literally asking for a run-up: the play trace
+        at cmd 1.3 shows creep 0.285 + flight 0.585 = 0.87, still 0.43 short. Creep is not a reward bug
+        there, it is the only way to do the task. Shrinking the band removes the NEED before the foul
+        line forbids the ACT.
+
+        GATE = landing_hit_rate EMA, i.e. "this policy actually lands on the commanded point", which is
+        the thing we want mastered. The existing stage-1 handover (_maybe_hand_over_to_stage2) is NOT
+        reused: it is guarded on landing_anchor_jump_start so it never runs in this task, and its
+        criteria (succ_rate + creep) were shown to confirm nothing -- creep <= 0.05 is trivially true
+        EARLY (the policy has not learned to creep yet, so "low creep" is the default, not mastery) and
+        succ >= 0.85 arrives within ~200 iters, so it handed over at iter 208 and stage 2 never learned.
+        A hit-rate gate cannot be satisfied by default: it has to land on target to move.
+
+        One-way latch on a slow (0.99) EMA, so a lucky batch cannot trip it and it will not flicker.
+        Also floored on common_step_counter so an early fluke cannot advance before the fade completes.
+        NOTE the EMA is updated BEFORE the latch check and the early return, so it keeps tracking after
+        the switch (the stage-1 handover freezes its creep EMA that way -- a logging bug worth not
+        repeating).
+        """
+        ep = self.extras.get("episode", {})
+        if "landing_hit_rate" in ep:
+            self._hit_rate_ema = 0.99 * getattr(self, "_hit_rate_ema", 0.0) + 0.01 * float(ep["landing_hit_rate"])
+        if getattr(self, "_dx_stage_b_on", False):
+            return
+        if not bool(getattr(self.cfg.commands, "dx_stage_auto", False)):
+            return
+        if self.common_step_counter < float(getattr(self.cfg.commands, "dx_stage_min_steps", 60000)):
+            return
+        if getattr(self, "_hit_rate_ema", 0.0) < float(getattr(self.cfg.commands, "dx_stage_hit_gate", 0.80)):
+            return
+        self._dx_stage_b_on = True
+        self.command_ranges["lin_vel_x"] = list(self.cfg.commands.dx_stage_b_range)
+        print(f"\n[dx-stage] WIDEN at step {self.common_step_counter}: "
+              f"hit_rate_ema={self._hit_rate_ema:.3f} -> commands dx {self.command_ranges['lin_vel_x']}\n",
+              flush=True)
+
     def _log_jump_episode_stats(self, env_ids):
         super()._log_jump_episode_stats(env_ids)
         # RUN-UP ACCOUNTING (log only). reach_total = creep + clean, so run_up_share says how much of the
@@ -400,6 +445,13 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
                 1.0 if getattr(self, "_stage2_on", False) else 0.0, dtype=torch.float, device=self.device)
             self.extras["episode"]["run_up_creep_ema"] = torch.tensor(
                 float(getattr(self, "_creep_ema", 0.0)), dtype=torch.float, device=self.device)
+            # two-stage command-range curriculum state (see _maybe_widen_dx_stage)
+            self.extras["episode"]["dx_stage_b"] = torch.tensor(
+                1.0 if getattr(self, "_dx_stage_b_on", False) else 0.0, dtype=torch.float, device=self.device)
+            self.extras["episode"]["hit_rate_ema"] = torch.tensor(
+                float(getattr(self, "_hit_rate_ema", 0.0)), dtype=torch.float, device=self.device)
+            self.extras["episode"]["dx_cmd_max"] = torch.tensor(
+                float(self.command_ranges["lin_vel_x"][1]), dtype=torch.float, device=self.device)
         # PER-ENV 双向课程升降 (2026-07-04, episode 末评估, 修漏算失败): 对本集"被计入的挑战跳"(_ep_counted_far,
         # 起跳时锁的 far&非probe), 按 jump_target_hits(本集命中数, >=1=命中)升降 — 命中→+step_up, 否则(落短/摔/
         # 跳废, hits=0)→−step_down. 之前在 just_landed 评估会漏掉"没干净落地的失败"(摔了不进 just_landed)→dx_env 虚涨;
@@ -437,6 +489,7 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
         # episodes -> each count is 0/1, so the AND of (>=1) is "this episode's jump did both". This
         # closes the loophole where "some jumps hit then topple + others land short but stable" cleared
         # the old separate hit/succ averages without any jump being both.
+        self._maybe_widen_dx_stage()
         stable_hit = (self.successful_jumps[env_ids] >= 1.0) & (self.jump_target_hits[env_ids] >= 1.0)
         self.extras["episode"]["landing_stable_hit_uniform"] = torch.mean(stable_hit.float() / jump_den)  # diagnostic (all dx)
         # FAR-BAND gate metric: only jumps whose commanded dx was in the top band [dx_max*(1-frac),

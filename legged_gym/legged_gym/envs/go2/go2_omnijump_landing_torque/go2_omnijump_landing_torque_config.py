@@ -157,7 +157,25 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
         # creep 0.190, reliable_reach_dx 0.646, squatQ 0.959, reward 17.1, noise 0.081. The command-range
         # change (and the payment window below) go back on the table AFTER the observation/reference work,
         # measured against that base rather than bundled with it.
-        landing_disp_x_stage2 = [0.5, 1.5]    # FIXED forward range (2026-07-11, user): no curriculum-from-0 -> command
+        # ⭐2026-09-06 TWO-STAGE COMMAND RANGE (user). Stage A trains INSIDE the reachable band; stage B
+        # widens once the policy is genuinely accurate there (see _maybe_widen_dx_stage).
+        # The measured single standing jump is ~0.58 m (launch_diag anchor_a/model_5000: |v| = 2.22 m/s
+        # at 50 deg -> 0.50 m point-mass, 0.584 m actual), so a flat uniform [0.5, 1.5] made ~90% of the
+        # commands physically unreachable in one push and "land on target" was an instruction to run up:
+        # the play trace at cmd 1.3 reads creep 0.285 + flight 0.585 = 0.87, still 0.43 short.
+        # ⚠️ Stage B's 1.3 is still well beyond one push, so the run-up pressure comes back when it
+        # opens -- that is what the take-off FOUL LINE is for, and stage B is the run to add it to.
+        # If instead the goal is a strictly reachable curriculum, cap stage B at ~1.0.
+        landing_disp_x_stage2 = [0.3, 0.8]      # STAGE A -- inside the measured reach
+        dx_stage_b_range = [0.5, 1.3]           # STAGE B -- opened by the gate below
+        dx_stage_auto = True                    # False = stay in stage A forever (old single-range behaviour)
+        dx_stage_hit_gate = 0.80                # landing_hit_rate EMA (0.99 smoothing) required to widen.
+                                                # Honest since the takeoff anchor: it measures |flight
+                                                # displacement - command|, so a creep-assisted touchdown
+                                                # no longer counts. WATCH Episode/hit_rate_ema -- if it
+                                                # plateaus below this, lower the gate rather than waiting.
+        dx_stage_min_steps = 60000              # floor before any widen (PD fade completes ~iter 650;
+                                                # this is well past it, so a fluke cannot advance early)    # FIXED forward range (2026-07-11, user): no curriculum-from-0 -> command
                                               # 0.5-1.5 m directly from the start. Goal = FARTHER: every command is far, so
                                               # forward_reach (capped-at-command) always pays for jumping as far as possible,
                                               # pushing toward the physical reach instead of the conservative curriculum's
