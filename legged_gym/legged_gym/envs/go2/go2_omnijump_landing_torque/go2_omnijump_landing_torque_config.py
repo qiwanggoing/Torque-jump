@@ -50,9 +50,26 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
     # stronger default_hip_pos if pursuing more height.
 
     class control(GO2OmniJumpCurriculumTorqueCfg.control):
-        # Step H: turn ON the dual-head aux-stabiliser torque path in _compute_torques.
-        # (Default False in the parent -> all other tasks with num_actions=12 are untouched.)
-        aux_stabilizer_head = True
+        # ⭐2026-09-06 STABILISER HEAD OFF. With it on the torque was
+        #     tau = residual*rl_alpha*scale + pd_alpha*PD_full + (0.5 - pd_alpha)*tau_comp
+        # whose endpoint (general_scale = 1, pd_alpha = 0) is 1.0*residual + 0.5*tau_comp -- weights
+        # summing to 1.5, NOT a convex blend, and tau_comp never decays. So the "pure torque" policy was
+        # never pure: about a third of the endpoint torque came from a head behaviour-cloned onto PD_full,
+        # and deploy (deploy_mujoco/sim2sim_landing_torque.py) had to carry that head onto the robot.
+        # Li 2023's ablation is explicit that a reference used as an ACTION residual is the worst of the
+        # structures they tried -- the prior is not dynamically feasible, so the robot spends effort
+        # correcting it and is fenced out of anything the prior does not cover -- and DecAP's rule is that
+        # an action prior must decay to zero. A non-decaying action prior is exactly what this head is.
+        # Off, _compute_torques takes the else branch: tau = residual*rl_alpha*scale + pd_alpha*PD_full,
+        # endpoint 1.0*residual = genuinely pure torque, weights summing to 1.0.
+        # Existence proof for this shape (PD scaffold that fades, no stabiliser head) is the user's own
+        # my_go2_jump: torques = pd_torques + actions with pd_factor = 1 - progress, trained from scratch.
+        # NOTE 37e113e (model_4600), 88a571c and stage_a were ALL trained WITH the head, so this is
+        # untested on this task line -- the user chose to skip the warm-start probe and retrain directly.
+        # The action space is unchanged (tau_comp was runner-fed, never a PPO action), so obs, num_actions
+        # and the sym_loss permutations are identical; only the comp_head weights disappear, which means
+        # old checkpoints will NOT load (train from scratch).
+        aux_stabilizer_head = False
 
     class asset(GO2OmniJumpCurriculumTorqueCfg.asset):
         # 2026-08-07: use the REAL Go2 joint ranges instead of the SATA URDF's truncated thigh
@@ -832,16 +849,16 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
 
 class GO2OmniJumpLandingTorqueCfgPPO(GO2OmniJumpCurriculumTorqueCfgPPO):
     class policy(GO2OmniJumpCurriculumTorqueCfgPPO.policy):
-        # Step H (final): τ_comp is a DETERMINISTIC independent head (12 outputs), NOT part of the PPO
-        # action (num_actions stays 12 = τ_jump). BC hits only comp_head; PPO over τ_jump = single-head.
-        aux_head_dim = 12
+        # 0 -> ActorCritic never builds comp_head, comp_forward returns None, and the runner skips
+        # feeding env.comp_torque. Was 12 (a deterministic PD-mimic head, never part of the PPO action).
+        aux_head_dim = 0
 
     class algorithm(GO2OmniJumpCurriculumTorqueCfgPPO.algorithm):
         sym_coef = 1.0   # was 0.5: match my_go2_jump — tighter LEFT-RIGHT mirror symmetry
                          # (front-rear is handled by the pushoff_leg_sync reward, not sym_loss)
-        # Step H (final): τ_comp is OUT of the PPO action, so act_permutation stays 12-dim (inherited
-        # = single-head). BC loss weight for the deterministic comp_head:
-        bc_coef = 1.0
+        # 0.0 -> the behaviour-cloning loss is skipped entirely (there is no comp_head left to clone
+        # PD_full into). act_permutation stays 12-dim either way, so sym_loss is unaffected.
+        bc_coef = 0.0
         entropy_coef = 0.003   # 0.001 -> 0.003: MORE exploration. At 0.001 noise_std collapsed to ~0.04 -> the
                                # policy got too CONSERVATIVE (peak ~0.50, undershoots far) and plateaued; the old
                                # high+far run had noise ~0.39. 0.003 settles noise ~0.32 (memory) = that exploration
