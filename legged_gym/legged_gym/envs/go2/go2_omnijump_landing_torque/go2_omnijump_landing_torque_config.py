@@ -49,6 +49,37 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
     # proven ~0.30 default stance (inherited). Revisit launch depth later via a milder crouch +
     # stronger default_hip_pos if pursuing more height.
 
+    class env(GO2OmniJumpCurriculumTorqueCfg.env):
+        # ATANASSOV-STYLE OBSERVATION HISTORY -- restored VERBATIM from commit 9ef99da (2026-08-18).
+        # This is the ONLY from-scratch history configuration that has ever discovered the jump here
+        # (run Jul31_17-37-21: squat_qualified 0 -> 0.96 at iter 908, mean_reward 30.7 vs flat's ~20).
+        # Three earlier history attempts collapsed; the difference was NOT the actor stack but the
+        # CRITIC -- see c_frame_stack below. Deliberately unmodified: its whole value is that it is the
+        # verified point, so history_length / the stacked content / fatigue stay exactly as they were.
+        #
+        #   obs_buf = [ stacked_frame(49) x history_length | single extras(32) ]
+        #
+        # STACKED (x20 = 0.10 s at the 200 Hz pure-torque endpoint): kinematic state + PREVIOUS ACTION
+        #   lin_vel3 + ang_vel3 + grav3 + dofpos12 + dofvel12 + foot4 + prev_action12 = 49
+        #   -> lets the policy reason about its own dynamics (Atanassov's stated purpose).
+        # SINGLE (current frame only, NOT stacked): command(landing_err3 + cmd_h1 + cmd4_1 + height2)
+        #   + torques12 + motor_fatigue12 + pd_prior1 = 32. Atanassov keeps the command single (no 20x
+        #   redundancy); we additionally keep the self-generated raw torques single, because stacking
+        #   240 dims of them was one of the suspects when the first flatten-everything version died.
+        num_stacked_frame = 49
+        num_single_extras = 32
+        history_length = 20
+        num_observations = history_length * num_stacked_frame + num_single_extras   # 49*20 + 32 = 1012
+        # ⭐ ASYMMETRIC CRITIC -- this is the change that actually fixed history here. A critic fed the
+        # FULL actor stack overfits the early low-return rollouts (value_loss -> 0.002, the signature),
+        # which wrecks the advantages and stops the discovered squat from ever being reinforced. Feed it
+        # a SHORT stack of PRIVILEGED frames instead (same c_frame_stack=3 as the working my_go2_jump).
+        #   priv frame(121) = stacked_frame(49) + extras(32) + priv_extra(40)
+        #   priv_extra(40)  = root_z1 + base_lin_vel3 + feet_pos_local12 + feet_vel12 + feet_forces12
+        c_frame_stack = 3
+        single_num_privileged_obs = num_stacked_frame + num_single_extras + 40      # 49+32+40 = 121
+        num_privileged_obs = c_frame_stack * single_num_privileged_obs              # 3*121 = 363
+
     class control(GO2OmniJumpCurriculumTorqueCfg.control):
         # ⭐2026-09-06 STABILISER HEAD OFF. With it on the torque was
         #     tau = residual*rl_alpha*scale + pd_alpha*PD_full + (0.5 - pd_alpha)*tau_comp
@@ -847,6 +878,65 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
         single_jump_play = True    # 单跳: play 跳一次就停站立 (撤回连续跳的 False)
 
 
+def _mirror_obs_permutation(history_length, frame_dim, extras_dim):
+    """LEFT-RIGHT mirror map for the STACKED layout [ frame(49) x history_length | extras(32) ].
+
+    ppo.py tiles a single frame permutation `frame_stack` times, which only works when the whole obs
+    is a uniform stack. Ours has trailing single-frame extras, so we hand it the COMPLETE 1012-dim map
+    and leave frame_stack=1 -- the tiling below is done here, where the layout is known.
+
+    Mirroring is about the sagittal plane: v_y / w_x / w_z / g_y / lateral target error flip sign, and
+    the legs swap FL<->FR, RL<->RR with the hip (abduction) joint flipping sign. WARNING: `torques`
+    flips the hip sign (it is a signed torque) but `motor_fatigue` does NOT -- it integrates |tau|, a
+    magnitude. Blocks/signs were cross-checked term by term against the flat 69-dim map in
+    go2_omnijump_torque_config.py and agree everywhere EXCEPT:
+
+      * projected_gravity. The parent map says `-6, 7, 8` = flip g_x, keep g_y. That is backwards: a
+        sagittal reflection preserves the x and z components and flips y (the mirror image of a
+        nose-down robot is still nose-down -> g_x must NOT flip; the mirror image of a robot leaning
+        left leans right -> g_y MUST flip). We use the correct `+g_x, -g_y, +g_z` here. The parent's
+        version is a real bug that every flat run inherited -- left alone on purpose, since changing it
+        silently retrains every other task; fix it as its own step if you want it.
+      * the third command slot. In the parent it is commands[2] (a yaw-rate command, sign-flipped);
+        here that slot is the landing error's hard-coded ZERO third channel, so its sign is moot.
+    """
+    def enc(idx, sign):
+        # ppo.py reads the index as int(abs(v)) and the sign as np.sign(v), so index 0 needs a stand-in.
+        return sign * (idx if idx != 0 else 0.0001)
+
+    def legs(base, flip_hip=True):
+        """12-vector of (hip, thigh, calf) x (FL, FR, RL, RR) at `base` -> mirrored source/sign."""
+        src = [3, 4, 5, 0, 1, 2, 9, 10, 11, 6, 7, 8]
+        sgn = [-1, 1, 1, -1, 1, 1, -1, 1, 1, -1, 1, 1] if flip_hip else [1] * 12
+        return [(base + i, g) for i, g in zip(src, sgn)]
+
+    frame = (
+        [(0, 1), (1, -1), (2, 1)]                  # base_lin_vel      (v_y)
+        + [(3, -1), (4, 1), (5, -1)]               # base_ang_vel      (w_x, w_z)
+        + [(6, 1), (7, -1), (8, 1)]                # projected_gravity (g_y)
+        + legs(9)                                  # dof_pos
+        + legs(21)                                 # dof_vel
+        + [(34, 1), (33, 1), (36, 1), (35, 1)]     # foot contact       FL<->FR, RL<->RR
+        + legs(37)                                 # previous action    (= act_permutation)
+    )
+    extras = (
+        [(0, 1), (1, -1), (2, 1)]                  # yaw-frame landing error (lateral flips)
+        + [(3, 1), (4, 1), (5, 1), (6, 1)]         # cmd height, cmd4 (jump toggle), height obs x2
+        + legs(7)                                  # torques        (signed -> hip flips)
+        + legs(19, flip_hip=False)                 # motor_fatigue  (magnitude -> NO sign flip)
+        + [(31, 1)]                                # pd_prior_alpha
+    )
+    assert len(frame) == frame_dim, f"frame perm {len(frame)} != {frame_dim}"
+    assert len(extras) == extras_dim, f"extras perm {len(extras)} != {extras_dim}"
+
+    perm = []
+    for k in range(history_length):
+        perm += [enc(i + k * frame_dim, g) for i, g in frame]
+    off = history_length * frame_dim
+    perm += [enc(i + off, g) for i, g in extras]
+    return perm
+
+
 class GO2OmniJumpLandingTorqueCfgPPO(GO2OmniJumpCurriculumTorqueCfgPPO):
     class policy(GO2OmniJumpCurriculumTorqueCfgPPO.policy):
         # 0 -> ActorCritic never builds comp_head, comp_forward returns None, and the runner skips
@@ -854,10 +944,32 @@ class GO2OmniJumpLandingTorqueCfgPPO(GO2OmniJumpCurriculumTorqueCfgPPO):
         aux_head_dim = 0
 
     class algorithm(GO2OmniJumpCurriculumTorqueCfgPPO.algorithm):
-        sym_coef = 1.0   # was 0.5: match my_go2_jump — tighter LEFT-RIGHT mirror symmetry
-                         # (front-rear is handled by the pushoff_leg_sync reward, not sym_loss)
-        # 0.0 -> the behaviour-cloning loss is skipped entirely (there is no comp_head left to clone
-        # PD_full into). act_permutation stays 12-dim either way, so sym_loss is unaffected.
+        # sym_loss BACK ON (2026-08-21) -- Step 1b, and it is a BUG FIX, not a tuning knob.
+        # Step 1 turned it off because ppo.py can only tile a frame permutation across a uniform stack and
+        # ours is [49 x 20 | 32 extras]. That made Step 1 secretly TWO changes, and the second one cost us
+        # heading discipline: with the mirror constraint gone the policy learned a one-sided SPIN --
+        # measured on Aug18_23-09-30/model_4700, every jump turns the SAME way, 116 deg (dx0.5) / 126 (dx0.9)
+        # / 150 (dx1.2), |dyaw|>20deg on 100% of landings, peak |wz| 7.8 rad/s. The flat baseline
+        # (Aug08_16-35-49/model_4700, sym_coef=1.0) turns 1.1 deg with peak |wz| 0.45. Frame by frame the
+        # yaw rate is built up ON THE GROUND during the push (yaw reaches -91 deg BEFORE takeoff) and the
+        # flight merely integrates the conserved angular momentum -- which is why the airborne-only yaw damp
+        # (tracking_angular_velocity + ang_vel_damp_airborne_only) cannot fix it: it acts where there is no
+        # contact force to act with. The baseline has that same hole and stays straight, so the missing
+        # ground-phase yaw penalty is what lets the spin GROW, not what causes it. The cause is the mirror.
+        # No rsl_rl change needed: hand PPO the COMPLETE 1012-dim map (built above) and keep frame_stack=1
+        # so it is not tiled again. This also settles "is sym_loss load-bearing for discovery?" in the other
+        # direction: Aug18 discovered at iter650 with sym fully OFF.
+        sym_loss = True
+        sym_coef = 1.0   # LEFT-RIGHT mirror symmetry (front-rear is handled by pushoff_leg_sync, not sym_loss)
+        frame_stack = 1  # the map below is ALREADY full-length -- do NOT let ppo.py tile it
+        obs_permutation = _mirror_obs_permutation(
+            GO2OmniJumpLandingTorqueCfg.env.history_length,
+            GO2OmniJumpLandingTorqueCfg.env.num_stacked_frame,
+            GO2OmniJumpLandingTorqueCfg.env.num_single_extras,
+        )
+        # ⭐2026-09-10 (history x nohead): the stabiliser head is GONE on this line, so there is no
+        # comp_head to clone PD_full into and the BC loss is skipped outright. act_permutation stays
+        # 12-dim either way, so the mirror map above is unaffected.
         bc_coef = 0.0
         entropy_coef = 0.003   # 0.001 -> 0.003: MORE exploration. At 0.001 noise_std collapsed to ~0.04 -> the
                                # policy got too CONSERVATIVE (peak ~0.50, undershoots far) and plateaued; the old
@@ -886,7 +998,15 @@ class GO2OmniJumpLandingTorqueCfgPPO(GO2OmniJumpCurriculumTorqueCfgPPO):
         # the OLD strong calf whose peak hit ~iter2500; the NEW calf cracks the squat gate by iter100 (squatQ 0.91)
         # and noise bottoms at ~iter300, so anneal at 500 LOCKS the early peak (~0.58) and kills the runaway BEFORE
         # it crosses ~0.55 and collapses the jump. (Raise to 600-800 if a fresh run discovers slower; data = iter100.)
-        entropy_anneal_iter = 500
+        # ⭐2026-09-10 500 -> 1500 (history line only). 500 was calibrated for the FLAT observation,
+        # whose squat gate cracks at iter ~50-150, so the anneal lands long after discovery. The history
+        # observation discovers much later -- the one run that ever made it (Aug18_23-09-30) reached
+        # squatQ at iter ~650, and the two that died (702b8c4, 859b517) never did. Annealing entropy_coef
+        # 0.003 -> 0.001 at iter 500 therefore cuts exploration ~150 iterations BEFORE this layout's
+        # discovery window, which is the one concrete, never-tested suspect for history discovery being
+        # 2/4. 1500 keeps the high-entropy phase over the whole window. If squatQ is still flat past
+        # iter 900, push this further rather than blaming the layout.
+        entropy_anneal_iter = 1500
         entropy_coef_final = 0.001
 
 
