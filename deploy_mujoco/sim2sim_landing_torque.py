@@ -192,6 +192,7 @@ class TorqueLaw:
     def __init__(self):
         self.activation_sign = np.zeros(12)
         self.fatigue = np.zeros(12)
+        self.pd_offset = np.zeros(12)
         self.last_torque = np.zeros(12)
 
     def reset(self):
@@ -205,7 +206,14 @@ class TorqueLaw:
         scale = C.START_TORQUE_SCALE + general_scale * (C.MAX_TORQUE_SCALE - C.START_TORQUE_SCALE)
         comp_w = max(0.0, pd_prior_weight - pd_alpha)
 
-        pd_full = C.P_GAIN * (C.DEFAULT_DOF_POS - q) - C.D_GAIN * dq
+        # ⭐2026-09-11 --predip: the PD target can be OFFSET toward the squat pose. Measured on
+        # nohead_a/model_4700: the policy jumps when handed over WHILE STILL DESCENDING (stand-hold
+        # 1-4, h 0.306-0.312, not yet converged) and refuses once the stand has converged (stand-hold
+        # 6+, h 0.298-0.302, dq ~0.015). Its training entry is also a descent -- the jump is commanded
+        # at first_jump_delay while the robot is still falling from the spawn drop (base 0.106 m).
+        # So the deployable version of "hand over during a descent" is: let PD settle properly, then
+        # walk its target down for a few steps and release DURING that dip.
+        pd_full = C.P_GAIN * (C.DEFAULT_DOF_POS + self.pd_offset - q) - C.D_GAIN * dq
         tau_jump = action * C.TAU_LIM * rl_alpha * scale
         tau_comp = (comp * C.TAU_LIM * scale) if comp is not None else 0.0
         tau_action = tau_jump + pd_alpha * pd_full + comp_w * tau_comp
@@ -480,10 +488,38 @@ def run_trial(rb, actor, comp_head, args, trial_idx, recorder=None, viewer=None)
     if not settled:
         return None
 
+    # ---- PRE-DIP: walk the PD target down and hand over DURING the descent ----
+    if args.predip > 0.0 and args.predip_steps > 0:
+        # crouch direction, one leg = [hip, thigh, calf]: fold the knee, drop the hip pitch
+        law.pd_offset = np.tile(np.array([0.0, args.predip, -2.0 * args.predip]), 4)
+        for _ in range(args.predip_steps):
+            q, dq, base, lin, ang, pg, yaw = rb.state()
+            tau, _ = law.compute(np.zeros(12), None, q, dq,
+                                 general_scale=0.0, pd_prior_weight=args.stand_pd_weight)
+            rb.apply(tau)
+            if viewer is not None:
+                viewer.sync()
+        law.pd_offset = np.zeros(12)          # PD is released to the RL below anyway
+        q, dq, base, lin, ang, pg, yaw = rb.state()
+        print(f"  [predip] {args.predip_steps} steps @ {args.predip:+.2f} rad -> h={base[2]:.3f}m "
+              f"vz={lin[2]:+.3f}m/s", flush=True)
+
     # ---------------- phase 2: hand to RL and command the jump ---------------
     handoff_xy = base[:2].copy()
     squat_xy = base[:2].copy()          # squat_root_xy (landing env _start_jump / _update_jump_state)
     jump_min_z = base[2]
+    # ⭐2026-09-10 ANCHOR (--anchor). The landing env changed how landing_target is anchored, and the
+    # observation is built from (landing_target - base_xy), so getting this wrong feeds the policy an
+    # observation it never saw in training.
+    #   squat   (<= a6813f0, the model_4600 / stage_a family): world-fixed at handoff, re-locked at
+    #           takeoff to squat_bottom_xy + cmd. The pre-takeoff observed error therefore SHRINKS as
+    #           the robot squats and travels, by the whole creep distance.
+    #   takeoff (>= a6813f0, landing_anchor_takeoff=True): before takeoff the target SLIDES with the
+    #           body, so the observed error stays identically equal to the command however far the
+    #           robot shuffles; at takeoff it locks to takeoff_xy + cmd.
+    # Running a takeoff-anchor policy under the squat anchor makes the observed error fall 0.5 -> ~0.2
+    # during the push -- never seen in training. Measured symptom on nohead_a/model_4700: it squats to
+    # 0.204 m and then NEVER LEAVES THE GROUND, torques only 16-27% of limit.
     landing_target = handoff_xy + np.array([args.dx, args.dy])   # provisional; re-locked at takeoff
     cmd4 = 1.0
 
@@ -518,6 +554,13 @@ def run_trial(rb, actor, comp_head, args, trial_idx, recorder=None, viewer=None)
     # obs is computed AFTER the physics step in training -> build the first one from the
     # post-PD-stand state with the PD torques that were just applied.
     torques = law.last_torque.copy()
+    if args.reset_history:
+        # HANDOFF HYGIENE: obs[44:56] is the torque APPLIED LAST STEP and obs[56:68] is motor_fatigue.
+        # After the PD stand those carry the PD's holding torques -- a state the policy never sees in
+        # training, where the pre-jump steps are its own. Zeroing them at the handoff makes the first
+        # RL observation look like the start of a training episode.
+        law.fatigue[:] = 0.0
+        torques = np.zeros(12)
     fatigue = law.fatigue.copy()
     # obs slot 68 = pd_prior_alpha as set by the LAST _compute_torques call, i.e. the PD-stand
     # weight on this first RL observation and 0 from the next step on (verified against an Isaac
@@ -527,6 +570,9 @@ def run_trial(rb, actor, comp_head, args, trial_idx, recorder=None, viewer=None)
 
     for jt in range(args.jump_max):
         q, dq, base, lin, ang, pg, yaw = rb.state()
+        if args.anchor == "takeoff" and not took_off:
+            # target rides with the body -> observed error == command, exactly as in training
+            landing_target = base[:2] + np.array([args.dx, args.dy])
         obs = build_obs(q, dq, base, lin, ang, pg, yaw, landing_target,
                         args.height, cmd4, contact, torques, fatigue, pd_alpha_obs)
 
@@ -579,7 +625,8 @@ def run_trial(rb, actor, comp_head, args, trial_idx, recorder=None, viewer=None)
                 if air_streak >= TAKEOFF_STREAK:        # just_took_off (debounced)
                     took_off = True
                     takeoff_xy = takeoff_cand_xy
-                    landing_target = squat_xy + np.array([args.dx, args.dy])   # ANTI-CHEAT lock
+                    _anchor_xy = takeoff_xy if args.anchor == "takeoff" else squat_xy
+                    landing_target = _anchor_xy + np.array([args.dx, args.dy])   # ANTI-CHEAT lock
             else:
                 air_streak = 0
         elif not landed:
@@ -983,6 +1030,18 @@ def main():
     p.add_argument("--xml", default=default_xml, help="MuJoCo scene xml")
     p.add_argument("--dx", type=float, default=1.0, help="commanded forward landing displacement (m)")
     p.add_argument("--dy", type=float, default=0.0)
+    p.add_argument("--reset-history", type=int, default=0,
+                   help="zero the torque-history and fatigue observations at the PD->RL handoff")
+    p.add_argument("--predip", type=float, default=0.0,
+                   help="rad of thigh crouch added to the PD target after the stand settles; the RL "
+                        "handoff then happens DURING the resulting descent. 0 = off (old behaviour)")
+    p.add_argument("--predip-steps", type=int, default=20,
+                   help="how many PD steps to hold the dipped target before handing over")
+    p.add_argument("--anchor", choices=["takeoff", "squat"], default="takeoff",
+                   help="how landing_target is anchored -- MUST match the checkpoint's training config. "
+                        "takeoff = landing_anchor_takeoff=True (>= a6813f0: nohead_a, anchor_a, stage_a "
+                        "trained after the flag); squat = the older squat-bottom anchor (model_4600 family). "
+                        "Mismatching it feeds the policy an unseen observation and it will refuse to jump.")
     p.add_argument("--height", type=float, default=0.5, help="jump-height command (train range 0.4-0.6)")
     p.add_argument("--trials", type=int, default=3)
     p.add_argument("--z0", type=float, default=0.33, help="spawn base height before the PD stand settles")
