@@ -1007,8 +1007,14 @@ class GO2OmniJumpLandingTorqueCfgPPO(GO2OmniJumpCurriculumTorqueCfgPPO):
         load_run = -1
         checkpoint = -1
         resume_path = None
-        max_iterations = 5000    # 3000 -> 5000 (user 2026-07-16). PD fades early (~iter800), then plenty of room for the
-                                 # pure-torque policy to consolidate + dx_max to evolve (with the safety-revert).
+        # 5000 -> 10000 (user, 2026-09-11). The incremental dx curriculum needs the room: it starts from
+        # in-place and only widens a band when the CHALLENGE commands are actually hit (step_up 0.02 vs
+        # step_down 0.18), so the ceiling climbs slowly by design. 5000 was sized for a FIXED command
+        # band. Two runs also showed the tracking itself only appears late -- flat Delta_air was +0.017
+        # at iter 2300 and +0.254 by 5000 -- so cutting at 5000 was already cutting mid-climb.
+        # [prior] 3000 -> 5000 (user 2026-07-16). PD fades early (~iter800), then plenty of room for the
+        # pure-torque policy to consolidate + dx_max to evolve (with the safety-revert).
+        max_iterations = 10000
         # entropy_coef ANNEALS 0.005 -> 0.001 at entropy_anneal_iter (HARD STEP, on_policy_runner.py:129-133).
         # MOVED 2800 -> 500 for the real-Go2 actuator. The 0.005 START is the ONLY force pushing action_std UP;
         # with the weak real calf the precise squat-jump can't survive high noise, so noise_std running away
