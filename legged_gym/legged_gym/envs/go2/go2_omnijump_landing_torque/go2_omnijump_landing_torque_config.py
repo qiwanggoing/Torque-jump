@@ -185,7 +185,8 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
         # If instead the goal is a strictly reachable curriculum, cap stage B at ~1.0.
         landing_disp_x_stage2 = [0.3, 0.8]      # STAGE A -- inside the measured reach
         dx_stage_b_range = [0.5, 1.3]           # STAGE B -- opened by the gate below
-        dx_stage_auto = True                    # False = stay in stage A forever (old single-range behaviour)
+        dx_stage_auto = False                   # OFF while landing_dx_curriculum is on -- the two would both
+                                                # rewrite command_ranges["lin_vel_x"] and fight each other.
         dx_stage_hit_gate = 0.80                # landing_hit_rate EMA (0.99 smoothing) required to widen.
                                                 # Honest since the takeoff anchor: it measures |flight
                                                 # displacement - command|, so a creep-assisted touchdown
@@ -214,7 +215,15 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
         # is height-only and would let an in-place policy keep advancing). After each bump both rates
         # dip and must be re-earned at the new distance. Trains forward jumping in ONE from-scratch
         # run without the discovery cliff that a one-shot dx[0,0.40] open hits.
-        landing_dx_curriculum = False        # OFF (2026-07-11, user): no curriculum-from-0. Command is drawn uniformly
+        # ⭐2026-09-11 BACK ON (user). Grow the dx ceiling from in-place instead of drawing uniformly
+        # from a fixed band. WHY: with the fixed [0.3, 0.8] band and a measured reach of ~0.59, HALF the
+        # sampled commands are ones the policy can already over-reach -- and there forward_reach's
+        # min(reach, cmd) cap binds, so jumping farther earns nothing extra, while landing_position and
+        # projected_landing actively penalise the overshoot. Half the training time the reward was asking
+        # for a SHORTER jump. The two-stage gate never rescued it either: hit_rate_ema peaked at 0.566
+        # (stage_a) and 0.628 (nohead_a) against a 0.80 gate, so Stage B was never opened and the policy
+        # never trained on a command it had to stretch for.
+        landing_dx_curriculum = True
                                              # from landing_disp_x_stage2 = [0.5, 1.5] m (see else-branch in _init_buffers).
         # BIASED command sampling (Atanassov local-difficulty): concentrate most jump commands at the FAR
         # frontier (the goal = farthest landing point) instead of uniform over [0, dx_max]. The policy then
@@ -230,7 +239,16 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
         landing_dx_frontier_frac = 0.7         # (inert while landing_dx_biased=False)
         landing_dx_frontier_lo = 0.8           # (inert while landing_dx_biased=False)
         landing_dx_start = 0.0                 # initial dx upper bound (0 = in-place)
-        landing_dx_final = 2.0                # final dx upper bound (the Stage-2 target)
+        # 2.0 -> 1.2 (user). This is the CEILING, not a target. The per-env bidirectional curriculum is
+        # step_up 0.02 : step_down 0.18 = 1:9, so a band only widens when the challenge commands are
+        # genuinely hit and collapses fast when they are not -- it self-limits at whatever the policy has
+        # mastered. ⚠️ The 2026-07-10 collapse ([[project_curriculum_overshoot_collapse]]: dx pushed past
+        # the true reach -> value_loss climbs -> the exploration-noise hump destabilises everything at
+        # once, and the retreat lags too far behind to recover) happened with the OLD per-batch-EMA gate,
+        # which small-sample noise rode up to 1.6. The recorded fix was "cap dx_max at about the reach";
+        # measured reach today is 0.59, so 1.2 is roughly 2x that -- WATCH value_loss and noise_std, and
+        # if dx_max climbs past ~0.9 while landing_hit_rate falls, this ceiling is the first suspect.
+        landing_dx_final = 1.2
         landing_dx_step = 0.10                 # [global advance-only — 被 per-env 双向课程取代, 见下]
         # ── PER-ENV 双向课程 (2026-07-04, user, Atanassov/terrain-curriculum 风格) ──
         # 根治 dx 虚高: 不再全局单值+只升(会被PD辅助期+noise冲高、advance-only不退). 改成每个 env 一个自己的
