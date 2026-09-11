@@ -814,6 +814,22 @@ def interactive_loop(rb, actor, comp_head, args):
                         print(f"  [jump ] refused: {'robot is DOWN' if mode == 'DOWN' else 'not standing cleanly yet'} "
                               f"-- press R to reset", flush=True)
                     else:
+                        if args.predip > 0.0 and args.predip_steps > 0:
+                            # Same countermovement as the protocol path: the policy needs to be
+                            # DESCENDING at the handoff (|vz| >~ 0.43 m/s). Without it the jump
+                            # depends on how long you happened to stand -- which is the bimodality
+                            # the fresh_jump comment below describes, now with a mechanism.
+                            law.pd_offset = np.tile(
+                                np.array([0.0, args.predip, -2.0 * args.predip]), 4)
+                            for _ in range(args.predip_steps):
+                                _q, _dq, *_ = rb.state()
+                                _t, _ = law.compute(np.zeros(12), None, _q, _dq, general_scale=0.0,
+                                                    pd_prior_weight=args.stand_pd_weight)
+                                rb.apply(_t)
+                                viewer.sync()
+                            law.pd_offset = np.zeros(12)
+                            _q, _dq, _b, _l, *_ = rb.state()
+                            print(f"  [predip] h={_b[2]:.3f}m vz={_l[2]:+.3f}m/s", flush=True)
                         if args.fresh_jump:
                             # Re-place the robot at the exact post-reset condition (default pose,
                             # zero velocity, cleared actuator state) at its CURRENT x/y, then settle

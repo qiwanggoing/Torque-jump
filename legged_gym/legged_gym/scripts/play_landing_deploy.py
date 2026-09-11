@@ -101,6 +101,20 @@ WINDUP = _envb("PLAY_DEPLOY_WINDUP", False)        # Default OFF: verified INERT
                                                # (same 0.52m run-up, same reach); it only shifts WHEN jumping_state flips, not the
                                                # policy's actions. TRUE resets the jump timer at handoff so jumping_state flips ~55
                                                # steps later (cosmetic; makes h_at_start read the mid-squat ~0.14m instead of ~0.30m).
+PREDIP = _envf("PLAY_DEPLOY_PREDIP", 0.0)      # rad of thigh crouch added to the PD target AFTER the stand settles,
+                                               # so the RL handoff happens WHILE THE ROBOT IS DESCENDING. 0 = off.
+                                               # WHY: every policy trained after the joint-limit change (88a571c) refuses
+                                               # to jump from a CONVERGED stand -- it sits at 16-27% of torque limit and
+                                               # does nothing. Its training entry is a descent (the jump is commanded at
+                                               # first_jump_delay while the robot is still falling from the spawn drop,
+                                               # base ~0.106 m), so a static stand is a state it has never started a jump
+                                               # from. Measured threshold in MuJoCo: |vz| >~ 0.43 m/s at the handoff.
+                                               # model_4600 does NOT need this -- it rams the truncated thigh stop
+                                               # (front thighs pinned at 1.500 = the old hard limit, 58% of the rollout)
+                                               # and that constraint reaction works from any state.
+                                               # Shallowest dip that clears the threshold is best: deeper ones perturb
+                                               # the launch and cost reach.
+PREDIP_STEPS = _envi("PLAY_DEPLOY_PREDIP_STEPS", 8)   # PD steps to hold the dipped target before handing over
 STAND_HOLD = _envi("PLAY_DEPLOY_STAND_HOLD", 60)   # consecutive STABLE-stand steps required before we trigger the jump
 STAND_MAX = _envi("PLAY_DEPLOY_STAND_MAX", 400)    # give up settling after this many stand steps (report "did not settle")
 JUMP_MAX = _envi("PLAY_DEPLOY_JUMP_MAX", 400)      # max steps to watch the jump+landing before moving on
@@ -231,6 +245,20 @@ def main():
                       f"tilt={tilt:+.1f}deg drift={drift:.3f}m feet={feet}/4 "
                       f"(held {int(env.stand_step_counter[0])} stable steps)", flush=True)
                 break
+        if settled and PD_STAND and PREDIP > 0.0 and PREDIP_STEPS > 0:
+            # Countermovement. _update_default_joint_pd_target() writes default_joint_pd_target from
+            # default_dof_pos while not jumping, so offsetting default_dof_pos moves the PD target;
+            # restored immediately afterwards so nothing else sees it.
+            _dip = torch.tensor([0.0, PREDIP, -2.0 * PREDIP], device=env.device).repeat(4)
+            _orig_default = env.default_dof_pos.clone()
+            env.default_dof_pos += _dip
+            for _ in range(PREDIP_STEPS):
+                env.commands[:, 4] = 0.0
+                if pd_hold_step(STAND_PD_WEIGHT):
+                    break
+            env.default_dof_pos.copy_(_orig_default)
+            print(f"[predip] {PREDIP_STEPS} steps @ {PREDIP:+.2f} rad -> h={float(env.root_states[0, 2]):.3f}m "
+                  f"vz={float(env.root_states[0, 9]):+.3f}m/s", flush=True)
         if not settled:
             why = "FELL while standing" if fell_standing else f"did NOT settle in {STAND_MAX} steps"
             _who = "PURE-PD" if PD_STAND else f"RL(cmd4={STAND_CMD4})"
