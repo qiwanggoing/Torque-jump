@@ -288,7 +288,20 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
         # 的距离 = 该 env 真能稳命中的上界. PD辅助/noise冲上去的, 纯力矩后跳不到→自动降级收敛回真实~0.6, 无需门/gate.
         landing_dx_percurr = True              # 开 per-env 双向课程(取代 global advance-only)
         landing_dx_step_up = 0.02              # 命中挑战命令 → 自己上界 +这么多
-        landing_dx_step_down = 0.18            # 0.14→0.18 (2026-07-11, 抬自限门到90%): 升:降=1:9 → 收敛到挑战命中≈90%
+        # ⭐2026-09-11 0.18 -> 0.0 (user): ADVANCE-ONLY. The bidirectional rule was doing exactly what it
+        # was designed to do and that was the problem. Equilibrium sits where p*step_up = (1-p)*step_down,
+        # so 0.02 : 0.18 pins it at p = 0.90 -- it converges to 90% HIT, not to distance. Measured on
+        # Sep11_20-49-52_histcurr_local: landing_dx_max peaked at 0.52 around iter 2500 and then RETREATED
+        # all the way to 0.13 by iter 8000, with clean_reach following it down 0.275 -> 0.174, while
+        # landing_hit_rate sat at 0.94-0.99 the whole time. At tol 0.10 the band where it hits 90% of the
+        # time is 0.13-0.52, well inside the measured reach of 0.59 -- so the curriculum kept deleting
+        # exactly the out-of-reach commands that pull the distance out. The fixed [0.3, 0.8] band, whose
+        # upper half it could NOT reach, produced clean_reach 0.48 against this run's 0.17.
+        # ⚠️ With no retreat, landing_dx_final is the ONLY brake, and the reach is 0.59 against a cap of
+        # 1.2 -- this can ride up and park where nothing is reachable, which is the wide_local failure
+        # (hit stuck at 0, discovery 6x slower, late degradation). If landing_dx_max parks near the cap
+        # while landing_hit_rate collapses, pull landing_dx_final back to 0.7-0.8.
+        landing_dx_step_down = 0.0
                                                # (=用户"门槛调到0.9"). 平衡命中率 = step_down/(step_up+step_down) = 0.18/0.20 = 0.90.
                                                # 更保守 → 每个env上界停在"90%可靠"的距离、离够不到的边缘更远 → 命令更少落进够不到区 →
                                                # 更少毒化策略 → 治后期崩(overshoot→毒化→塌). [0.10→0.14 史: 升档贴近确定性能力].
