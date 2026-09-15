@@ -301,7 +301,17 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
         # 1.2 -- this can ride up and park where nothing is reachable, which is the wide_local failure
         # (hit stuck at 0, discovery 6x slower, late degradation). If landing_dx_max parks near the cap
         # while landing_hit_rate collapses, pull landing_dx_final back to 0.7-0.8.
-        landing_dx_step_down = 0.0
+        # ⭐2026-09-15 0.0 -> 0.02 (user): advance-only COLLAPSED on the 4090 (Sep15_03-52-38_advcurr_hist).
+        # An advance fires on a hit ANYWHERE in the challenge band [far_frac*b, b], including its near end,
+        # so b only stops once 0.6*b = reach, i.e. b = reach/0.6 = 1.67x reach. Measured: best at iter ~1750
+        # (hit 0.78, reward 23.4, dx_mean 0.74); dx_mean crossed 0.82 -> hit 0.69 -> 0.15 by iter 2500 and
+        # the bounds FROZE there (p90 0.92 / mean 0.86 / min 0.68, unchanged for 3000 iters: nobody hits the
+        # band, nobody may retreat); landing-reward sum 2.4 -> 0.6, squat_qualified 0.92 -> 0.19, and at
+        # iter 4590 flight went 0.89 -> 0.01 in one iteration with noise_std 0.04 left to rediscover.
+        # Ideal-reach model: with p = step_down/(step_up+step_down) the band hit rate settles at p, so
+        # b = reach/(0.6 + 0.4*p): 0.18 -> p 0.90 -> b 1.04x reach (never pushes), 0.0 -> 1.67x (collapses),
+        # 0.02 -> p 0.50 -> b 1.25x reach: the top ~20% of commands stay out of reach, 80% still pay.
+        landing_dx_step_down = 0.02
                                                # (=用户"门槛调到0.9"). 平衡命中率 = step_down/(step_up+step_down) = 0.18/0.20 = 0.90.
                                                # 更保守 → 每个env上界停在"90%可靠"的距离、离够不到的边缘更远 → 命令更少落进够不到区 →
                                                # 更少毒化策略 → 治后期崩(overshoot→毒化→塌). [0.10→0.14 史: 升档贴近确定性能力].
