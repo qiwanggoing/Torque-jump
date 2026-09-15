@@ -1059,7 +1059,17 @@ class GO2OmniJumpLandingTorqueCfgPPO(GO2OmniJumpCurriculumTorqueCfgPPO):
         # discovery window, which is the one concrete, never-tested suspect for history discovery being
         # 2/4. 1500 keeps the high-entropy phase over the whole window. If squatQ is still flat past
         # iter 900, push this further rather than blaming the layout.
-        entropy_anneal_iter = 1500
+        # ⭐2026-09-15 fixed 1500 -> DISCOVERY-GATED (user). Both the PD fade and this anneal count
+        # ITERATIONS, not samples, so one number cannot fit both machines: the 4090 at 4096 envs discovers
+        # at iter ~300 (fix012 / hist_a), the 3060 at 2048 envs at ~900 (hist_local). At 1500 the 4090 runs
+        # sat with the PD gone (pd_prior 0 by iter ~1100) and entropy still 0.003: squatQ fell 0.89 -> 0.70
+        # at the fade end and noise_std climbed 0.11 -> 0.27 until exactly iter 1500, then turned down
+        # (fix012 iter 1500 reward 1.4 -> recovered by 1920). Flat anneals at 500 and never saw it.
+        # Now: anneal 200 iters after the success latch (_takeoff_omega_on, succ EMA >= 0.80) opens,
+        # i.e. ~500 on the 4090 and ~1100 on the 3060; entropy_anneal_iter is only the fallback ceiling.
+        entropy_anneal_gate = "_takeoff_omega_on"
+        entropy_anneal_gate_delay = 200
+        entropy_anneal_iter = 3000
         entropy_coef_final = 0.001
 
 

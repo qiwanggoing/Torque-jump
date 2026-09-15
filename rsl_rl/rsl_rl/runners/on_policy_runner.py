@@ -120,15 +120,35 @@ class OnPolicyRunner:
         cur_episode_length = torch.zeros(self.env.num_envs, dtype=torch.float, device=self.device)
 
         tot_iter = self.current_learning_iteration + num_learning_iterations
+        self._ent_gate_iter = None
+        _resumed = self.current_learning_iteration > 0
         for it in range(self.current_learning_iteration, tot_iter):
             start = time.time()
             # entropy_coef annealing (optional, via runner cfg): keep high exploration early
             # to discover the behavior, then drop entropy_coef at a configured iteration so the
             # policy stops exploring and CONVERGES (noise_std tightens) in late training.
             _anneal_iter = self.cfg.get("entropy_anneal_iter", None)
-            if _anneal_iter is not None and it >= int(_anneal_iter):
+            _gate = self.cfg.get("entropy_anneal_gate", None)
+            if _gate is not None:
+                # DISCOVERY-GATED: anneal `entropy_anneal_gate_delay` iterations after the env attribute
+                # `_gate` first reads True; entropy_anneal_iter becomes the fallback ceiling. A fixed
+                # iteration cannot serve both 4096 envs (discovery ~iter 300) and 2048 envs (~iter 900),
+                # because the PD fade and this anneal count iterations, not samples. A resumed run is
+                # past discovery by construction and anneals at once.
+                if self._ent_gate_iter is None and bool(getattr(self.env, _gate, False)):
+                    self._ent_gate_iter = it
+                    print(f"[entropy anneal] iter {it}: gate '{_gate}' opened")
+                _due = [int(_anneal_iter)] if _anneal_iter is not None else []
+                if self._ent_gate_iter is not None:
+                    _due.append(self._ent_gate_iter + int(self.cfg.get("entropy_anneal_gate_delay", 200)))
+                if _resumed:
+                    _due.append(it)
+                _anneal_at = min(_due) if _due else None
+            else:
+                _anneal_at = int(_anneal_iter) if _anneal_iter is not None else None
+            if _anneal_at is not None and it >= _anneal_at:
                 _ec_final = self.cfg.get("entropy_coef_final", self.alg.entropy_coef)
-                if it == int(_anneal_iter):
+                if self.alg.entropy_coef != _ec_final:
                     print(f"[entropy anneal] iter {it}: entropy_coef {self.alg.entropy_coef} -> {_ec_final}")
                 self.alg.entropy_coef = _ec_final
             # Rollout
@@ -220,6 +240,7 @@ class OnPolicyRunner:
         for loss_name, loss_value in locs.get('extra_loss_stats', {}).items():
             self.writer.add_scalar(f'Loss/{loss_name}', loss_value, locs['it'])
         self.writer.add_scalar('Loss/learning_rate', self.alg.learning_rate, locs['it'])
+        self.writer.add_scalar('Loss/entropy_coef', self.alg.entropy_coef, locs['it'])
         self.writer.add_scalar('Policy/mean_noise_std', mean_std.item(), locs['it'])
         self.writer.add_scalar('Perf/total_fps', fps, locs['it'])
         self.writer.add_scalar('Perf/collection time', locs['collection_time'], locs['it'])
@@ -228,6 +249,7 @@ class OnPolicyRunner:
                     'Loss/surrogate': locs['mean_surrogate_loss'],
                     'Loss/symmetry': locs['mean_sym_loss'],
                     'Loss/learning_rate': self.alg.learning_rate,
+                    'Loss/entropy_coef': self.alg.entropy_coef,
                     'Policy/mean_noise_std': mean_std.item(),
                     'Perf/total_fps': fps,
                     'Perf/collection time': locs['collection_time'],
