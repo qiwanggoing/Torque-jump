@@ -214,7 +214,13 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
         # ⚠️ Stage B's 1.3 is still well beyond one push, so the run-up pressure comes back when it
         # opens -- that is what the take-off FOUL LINE is for, and stage B is the run to add it to.
         # If instead the goal is a strictly reachable curriculum, cap stage B at ~1.0.
-        landing_disp_x_stage2 = [0.3, 0.8]      # STAGE A -- inside the measured reach
+        # ⭐2026-09-15 [0.3, 0.8] -> [0.0, 1.2] with landing_dx_curriculum OFF (user): fixed band from step 0.
+        # The good-posture history ckpt (Sep11_00-11-03_hist_local_ext/model_7300, fixed [0.3, 0.8]) launches
+        # with a nose-UP rotation (wy -1.5) and lands level, but flies 0.50-0.53 for EVERY command (no tracking).
+        # Both incremental-curriculum runs (advcurr_hist / sd02_hist) turned a mid-run wobble into a dead end
+        # (frozen out of reach / retreated to an in-place hop), while the fixed-band runs rode theirs out.
+        # 0.0 keeps near commands (discovery + reward signal); 1.2 keeps far ones to stretch for.
+        landing_disp_x_stage2 = [0.0, 1.2]
         dx_stage_b_range = [0.5, 1.3]           # STAGE B -- opened by the gate below
         dx_stage_auto = False                   # OFF while landing_dx_curriculum is on -- the two would both
                                                 # rewrite command_ranges["lin_vel_x"] and fight each other.
@@ -254,7 +260,7 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
         # for a SHORTER jump. The two-stage gate never rescued it either: hit_rate_ema peaked at 0.566
         # (stage_a) and 0.628 (nohead_a) against a 0.80 gate, so Stage B was never opened and the policy
         # never trained on a command it had to stretch for.
-        landing_dx_curriculum = True
+        landing_dx_curriculum = False          # 2026-09-15 OFF: fixed [0.0, 1.2] above (see there)
                                              # from landing_disp_x_stage2 = [0.5, 1.5] m (see else-branch in _init_buffers).
         # BIASED command sampling (Atanassov local-difficulty): concentrate most jump commands at the FAR
         # frontier (the goal = farthest landing point) instead of uniform over [0, dx_max]. The policy then
