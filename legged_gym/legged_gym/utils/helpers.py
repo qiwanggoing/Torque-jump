@@ -145,6 +145,12 @@ def _pick_checkpoint(load_run, checkpoint):
 def update_cfg_from_args(env_cfg, cfg_train, args):
     # seed
     if env_cfg is not None:
+        # 2026-09-16: --seed must reach the ENV too. make_env calls this with cfg_train=None and then does
+        # set_seed(env_cfg.seed), while get_cfgs copies the seed from the TRAIN class default beforehand --
+        # so --seed changed nothing that mattered: floor_s1 (--seed=1) and floor_s2 (--seed=2) came out
+        # bitwise identical for 512 iterations, i.e. the same run twice.
+        if args.seed is not None:
+            env_cfg.seed = args.seed
         # num envs
         if args.num_envs is not None:
             env_cfg.env.num_envs = args.num_envs

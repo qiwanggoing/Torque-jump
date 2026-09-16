@@ -122,6 +122,7 @@ class OnPolicyRunner:
         tot_iter = self.current_learning_iteration + num_learning_iterations
         self._ent_gate_iter = None
         self._ent_annealed_at = None
+        self._ent_metric_streak = 0
         _resumed = self.current_learning_iteration > 0
         for it in range(self.current_learning_iteration, tot_iter):
             start = time.time()
@@ -130,13 +131,16 @@ class OnPolicyRunner:
             # policy stops exploring and CONVERGES (noise_std tightens) in late training.
             _anneal_iter = self.cfg.get("entropy_anneal_iter", None)
             _gate = self.cfg.get("entropy_anneal_gate", None)
+            _metric = self.cfg.get("entropy_anneal_metric", None)
+            if _metric is not None:
+                _gate = "__metric__"   # per-iteration training statistic, see below
             if _gate is not None:
                 # DISCOVERY-GATED: anneal `entropy_anneal_gate_delay` iterations after the env attribute
                 # `_gate` first reads True; entropy_anneal_iter becomes the fallback ceiling. A fixed
                 # iteration cannot serve both 4096 envs (discovery ~iter 300) and 2048 envs (~iter 900),
                 # because the PD fade and this anneal count iterations, not samples. A resumed run is
                 # past discovery by construction and anneals at once.
-                if self._ent_gate_iter is None and bool(getattr(self.env, _gate, False)):
+                if self._ent_gate_iter is None and _gate != "__metric__" and bool(getattr(self.env, _gate, False)):
                     self._ent_gate_iter = it
                     print(f"[entropy anneal] iter {it}: gate '{_gate}' opened")
                 _due = [int(_anneal_iter)] if _anneal_iter is not None else []
@@ -190,6 +194,27 @@ class OnPolicyRunner:
                 start = stop
                 self.alg.compute_returns(critic_obs)
 
+            # DISCOVERY SIGNAL from the training log, not from an env latch. The env's `_takeoff_omega_on`
+            # is an EMA over per-reset-batch rates, and early batches are a handful of envs whose rate can be
+            # 1.0 by luck: it opened at iter 5 in floor_s1/floor_s2, annealed entropy at iter 205, and the
+            # policy -- which only discovered the jump around iter 300-400 -- then starved (noise_std 0.036
+            # -> 0.016, squatQ 1.00 -> 0). A per-ITERATION mean over thousands of envs cannot be spoofed that
+            # way. Requires `entropy_anneal_metric_hold` consecutive iterations over the threshold.
+            _metric = self.cfg.get("entropy_anneal_metric", None)
+            if _metric is not None and self._ent_gate_iter is None and len(ep_infos) > 0:
+                _vals = [float(torch.as_tensor(e[_metric]).float().mean()) for e in ep_infos if _metric in e]
+                if _vals:
+                    _m = sum(_vals) / len(_vals)
+                    if _m >= float(self.cfg.get("entropy_anneal_metric_thresh", 0.90)):
+                        self._ent_metric_streak += 1
+                    else:
+                        self._ent_metric_streak = 0
+                    if self._ent_metric_streak >= int(self.cfg.get("entropy_anneal_metric_hold", 3)):
+                        self._ent_gate_iter = it
+                        print(f"[entropy anneal] iter {it}: '{_metric}' held >= "
+                              f"{self.cfg.get('entropy_anneal_metric_thresh', 0.90)} for "
+                              f"{self._ent_metric_streak} iters ({_m:.3f})")
+
             update_results = self.alg.update()
             # ACTION-NOISE CEILING (2026-09-16). entropy_coef pushes log_std UP every update, and with a
             # converged policy nothing pushes back: noise_std bottoms out and then CREEPS. Four history runs
@@ -198,13 +223,17 @@ class OnPolicyRunner:
             # Clamping the std is a direct guard on the measured failure variable; the flat line, which never
             # creeps, sits at 0.06-0.09, so the ceiling is chosen inside the range that trains well.
             # Gated on the entropy anneal (i.e. post-discovery): exploration during discovery is untouched.
+            # ... and a FLOOR. At entropy_coef 0.001 a converged policy lets the std COLLAPSE instead
+            # (floor_s1/floor_s2: 0.059 at iter 400 -> 0.036 at 1000 -> 0.016, and the jump was gone by
+            # iter 1200). The good stretches of every run sit in 0.055-0.094, so clamp to that band.
             _std_cap = self.cfg.get("noise_std_max", None)
-            if (_std_cap is not None and self._ent_annealed_at is not None
+            _std_min = self.cfg.get("noise_std_min", None)
+            if ((_std_cap is not None or _std_min is not None) and self._ent_annealed_at is not None
                     and it >= self._ent_annealed_at + int(self.cfg.get("noise_std_cap_delay", 0))):
                 with torch.no_grad():
                     _std = self.alg.actor_critic.std
-                    if float(_std.max()) > float(_std_cap):
-                        _std.data.clamp_(max=float(_std_cap))
+                    _std.data.clamp_(min=float(_std_min) if _std_min is not None else 0.0,
+                                     max=float(_std_cap) if _std_cap is not None else float("inf"))
             extra_loss_stats = {}
             if len(update_results) == 4:
                 mean_value_loss, mean_surrogate_loss, mean_sym_loss, extra_loss_stats = update_results

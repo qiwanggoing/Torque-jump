@@ -1117,8 +1117,17 @@ class GO2OmniJumpLandingTorqueCfgPPO(GO2OmniJumpCurriculumTorqueCfgPPO):
         # The flat line never creeps (0.061-0.066 for 3500 iters). Applied only AFTER the entropy anneal
         # fires, so discovery keeps its full exploration. See on_policy_runner.
         noise_std_max = 0.08
+        noise_std_min = 0.05   # 2026-09-16: floor as well as ceiling -- at entropy 0.001 the std COLLAPSED
+                               # (floor_s1: 0.059 -> 0.016) and the policy starved. Band = the measured good range.
         noise_std_cap_delay = 0
-        entropy_anneal_gate = "_takeoff_omega_on"
+        # 2026-09-16: gate the anneal on a per-ITERATION training statistic instead of the env latch
+        # `_takeoff_omega_on`, which is an EMA over per-reset-batch rates and opened at iter 5 (small early
+        # batches read 1.0 by luck) -- it annealed 100+ iters BEFORE the jump was discovered and killed both
+        # floor runs. squat_qualified_rate >= 0.90 held for 3 iterations IS the discovery event.
+        entropy_anneal_metric = "squat_qualified_rate"
+        entropy_anneal_metric_thresh = 0.90
+        entropy_anneal_metric_hold = 3
+        entropy_anneal_gate = "_takeoff_omega_on"   # fallback, unused while entropy_anneal_metric is set
         entropy_anneal_gate_delay = 200
         entropy_anneal_iter = 3000
         entropy_coef_final = 0.001
