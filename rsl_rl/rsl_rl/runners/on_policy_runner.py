@@ -121,6 +121,7 @@ class OnPolicyRunner:
 
         tot_iter = self.current_learning_iteration + num_learning_iterations
         self._ent_gate_iter = None
+        self._ent_annealed_at = None
         _resumed = self.current_learning_iteration > 0
         for it in range(self.current_learning_iteration, tot_iter):
             start = time.time()
@@ -151,6 +152,8 @@ class OnPolicyRunner:
                 if self.alg.entropy_coef != _ec_final:
                     print(f"[entropy anneal] iter {it}: entropy_coef {self.alg.entropy_coef} -> {_ec_final}")
                 self.alg.entropy_coef = _ec_final
+                if self._ent_annealed_at is None:
+                    self._ent_annealed_at = it
             # Rollout
             with torch.inference_mode():
                 for i in range(self.num_steps_per_env):
@@ -188,6 +191,20 @@ class OnPolicyRunner:
                 self.alg.compute_returns(critic_obs)
 
             update_results = self.alg.update()
+            # ACTION-NOISE CEILING (2026-09-16). entropy_coef pushes log_std UP every update, and with a
+            # converged policy nothing pushes back: noise_std bottoms out and then CREEPS. Four history runs
+            # degraded or died right after it crossed ~0.10-0.12 (fix012 hit 0.49 -> 0.37 as it went
+            # 0.12 -> 0.18; hist78 died at 0.17; gate_local collapsed at 0.125; hist_local_ext the same).
+            # Clamping the std is a direct guard on the measured failure variable; the flat line, which never
+            # creeps, sits at 0.06-0.09, so the ceiling is chosen inside the range that trains well.
+            # Gated on the entropy anneal (i.e. post-discovery): exploration during discovery is untouched.
+            _std_cap = self.cfg.get("noise_std_max", None)
+            if (_std_cap is not None and self._ent_annealed_at is not None
+                    and it >= self._ent_annealed_at + int(self.cfg.get("noise_std_cap_delay", 0))):
+                with torch.no_grad():
+                    _std = self.alg.actor_critic.std
+                    if float(_std.max()) > float(_std_cap):
+                        _std.data.clamp_(max=float(_std_cap))
             extra_loss_stats = {}
             if len(update_results) == 4:
                 mean_value_loss, mean_surrogate_loss, mean_sym_loss, extra_loss_stats = update_results

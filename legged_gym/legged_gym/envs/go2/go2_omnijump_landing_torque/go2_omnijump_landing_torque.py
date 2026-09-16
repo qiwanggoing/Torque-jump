@@ -159,6 +159,14 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
         self._succ_rate_ema = 0.0
         self._hit_rate_ema = 0.0
         self._dx_stage_b_on = False
+        # RISING-FLOOR command curriculum (user 2026-09-16): the TOP of the command band stays put and the
+        # BOTTOM is raised once the lowest band is reliably hit, so training concentrates on the frontier
+        # without the two-stage cliff (stage B [0.6,1.0] against a 0.58 reach = every command unreachable).
+        # Self-limiting: the floor only moves when [floor, floor+band] is hit, so it stalls just below reach.
+        self._dx_floor = float(getattr(self.cfg.commands, "dx_floor_start", 0.0))
+        self._dx_floor_n = 0.0
+        self._dx_floor_hit = 0.0
+        self._dx_floor_last_step = 0
         self._takeoff_omega_on = False
         # HONEST far-band mastery: decaying accumulators for a TRUSTWORTHY smoothed far-band hit rate
         # (per-batch far_n ~0.1 -> landing_stable_hit_rate is pure noise). See _log_jump_episode_stats.
@@ -371,6 +379,14 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
             self.jump_target_hits += hit.float()
             # remember this jump's commanded distance (for the far-band advance gate)
             self._last_jump_cmd_dx[self.just_landed] = torch.norm(self.commands[self.just_landed, 0:2], dim=1)
+            # RISING-FLOOR curriculum: score only the jumps whose COMMAND sits in the bottom band
+            # [floor, floor + dx_floor_band]; that band's hit rate is what unlocks the next floor step.
+            if bool(getattr(self.cfg.commands, "dx_floor_curriculum", False)) and not getattr(self.cfg.test, "use_test", False):
+                band = float(getattr(self.cfg.commands, "dx_floor_band", 0.10))
+                cmd_d = torch.norm(self.commands[:, 0:2], dim=1)
+                in_band = self.just_landed & (cmd_d >= self._dx_floor) & (cmd_d < self._dx_floor + band)
+                self._dx_floor_n += float(in_band.sum())
+                self._dx_floor_hit += float((in_band & hit).sum())
             # (PER-ENV 升降已移到 episode 末 _log_jump_episode_stats: 那里能把"摔/跳废/落短"都算 down, 不像这里
             #  的 just_landed 只看"落了地的跳"→漏算失败→dx_env 虚涨. jump_target_hits 上面已累积供末尾评估.)
 
@@ -457,6 +473,49 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
               f"hit_rate_ema={self._hit_rate_ema:.3f} -> commands dx {self.command_ranges['lin_vel_x']}\n",
               flush=True)
 
+    def _maybe_raise_dx_floor(self):
+        """RISING-FLOOR command curriculum (user 2026-09-16).
+
+        Commands are drawn from [floor, top] with `top` FIXED (1.0). Once the bottom band
+        [floor, floor+dx_floor_band] is hit at least dx_floor_hit_gate of the time, that band is deleted
+        (floor += dx_floor_step) and the sampling concentrates on what is still hard, converging on the
+        farthest distance the robot can actually reach.
+
+        WHY NOT the two-stage [0.3,0.6] -> [0.6,1.0] version: the measured reach is ~0.58, so stage B would
+        make EVERY command unreachable in one step -- the same cliff that killed sd02_hist/advcurr_hist
+        (landing rewards -> 0, no gradient, policy parks). Here the floor is SELF-LIMITING: it can only move
+        while the band right above it is still being hit, so it stalls on its own just under the reach, and
+        the far commands (up to `top`) stay in the mix the whole time to keep pulling the distance out.
+
+        Evaluated on a rolling sample window (dx_floor_min_samples landings in the band), not an EMA: an EMA
+        over a band that holds a small share of the commands is mostly noise (the far-band gate learned this
+        the hard way -- see the landing_farband_hit_smooth comment)."""
+        if not bool(getattr(self.cfg.commands, "dx_floor_curriculum", False)):
+            return
+        if getattr(self.cfg.test, "use_test", False):
+            return
+        need = float(getattr(self.cfg.commands, "dx_floor_min_samples", 300))
+        if self._dx_floor_n < need:
+            return
+        rate = self._dx_floor_hit / max(self._dx_floor_n, 1.0)
+        gate = float(getattr(self.cfg.commands, "dx_floor_hit_gate", 0.85))
+        hold = float(getattr(self.cfg.commands, "dx_floor_min_steps", 20000))
+        self._dx_floor_n = 0.0
+        self._dx_floor_hit = 0.0
+        if rate < gate or (self.common_step_counter - self._dx_floor_last_step) < hold:
+            return
+        step = float(getattr(self.cfg.commands, "dx_floor_step", 0.10))
+        cap = float(getattr(self.cfg.commands, "dx_floor_max", 0.90))
+        top = float(self.command_ranges["lin_vel_x"][1])
+        new_floor = min(self._dx_floor + step, cap, max(top - step, 0.0))
+        if new_floor <= self._dx_floor + 1e-6:
+            return
+        self._dx_floor = new_floor
+        self._dx_floor_last_step = int(self.common_step_counter)
+        self.command_ranges["lin_vel_x"][0] = self._dx_floor
+        print(f"\n[dx-floor] RAISE at step {self.common_step_counter}: band hit {rate:.2f} "
+              f"-> commands dx {self.command_ranges['lin_vel_x']}\n", flush=True)
+
     def _log_jump_episode_stats(self, env_ids):
         super()._log_jump_episode_stats(env_ids)
         # RUN-UP ACCOUNTING (log only). reach_total = creep + clean, so run_up_share says how much of the
@@ -480,6 +539,10 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
                 1.0 if getattr(self, "_dx_stage_b_on", False) else 0.0, dtype=torch.float, device=self.device)
             self.extras["episode"]["hit_rate_ema"] = torch.tensor(
                 float(getattr(self, "_hit_rate_ema", 0.0)), dtype=torch.float, device=self.device)
+            self.extras["episode"]["dx_floor"] = torch.tensor(
+                float(getattr(self, "_dx_floor", 0.0)), dtype=torch.float, device=self.device)
+            self.extras["episode"]["dx_floor_band_n"] = torch.tensor(
+                float(getattr(self, "_dx_floor_n", 0.0)), dtype=torch.float, device=self.device)
             self.extras["episode"]["dx_cmd_max"] = torch.tensor(
                 float(self.command_ranges["lin_vel_x"][1]), dtype=torch.float, device=self.device)
         # PER-ENV 双向课程升降 (2026-07-04, episode 末评估, 修漏算失败): 对本集"被计入的挑战跳"(_ep_counted_far,
@@ -520,6 +583,7 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
         # closes the loophole where "some jumps hit then topple + others land short but stable" cleared
         # the old separate hit/succ averages without any jump being both.
         self._maybe_widen_dx_stage()
+        self._maybe_raise_dx_floor()
         stable_hit = (self.successful_jumps[env_ids] >= 1.0) & (self.jump_target_hits[env_ids] >= 1.0)
         self.extras["episode"]["landing_stable_hit_uniform"] = torch.mean(stable_hit.float() / jump_den)  # diagnostic (all dx)
         # FAR-BAND gate metric: only jumps whose commanded dx was in the top band [dx_max*(1-frac),
@@ -817,6 +881,32 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
             sigma = float(getattr(self.cfg.rewards, base_sigma_key, 0.10))
         return torch.exp(-err_sq / max(sigma, 1e-4))
 
+    def _squat_gate_scale(self):
+        """PARTIAL payout of the squat-gated jump chain (2026-09-16, user: "problem 1").
+
+        `_squat_deep_enough()` is all-or-nothing, and the whole DIRECTION-carrying reward family hangs
+        off it (forward_reach / projected_landing / takeoff_velocity_match, plus the parent's
+        projected_peak / all_feet_airborne). Measured on gate_local at cmd 0.6: a policy that had lost
+        the held squat still jumped 0.47 m but scored EXACTLY 0.00 on every one of them -- per-jump
+        positives 30 -> 7.6, and everything that survived (successful_jump, stance_squat, contact terms)
+        is direction-blind. So after the noise-creep collapse there was no gradient left pointing
+        forward at all, and the policy sat in a backward hop (launch vx -0.66) for thousands of iters.
+        With `squat_gate_floor` > 0 an unqualified but otherwise valid jump still earns that FRACTION,
+        which keeps the forward gradient alive as a rescue path while a qualified squat still pays 1.0.
+        floor = 0 -> exactly the old behaviour.
+        """
+        floor = float(getattr(self.cfg.rewards, "squat_gate_floor", 0.0))
+        gate = self._squat_deep_enough().float()
+        # DISCOVERY-SAFE: the floor is a RESCUE path for a policy that already jumps and then loses the
+        # hold, so it stays shut until the success latch opens. Before discovery squat_qualified is 0 for
+        # everyone, and paying 30% of the jump chain for any unqualified hop rewrites the discovery
+        # landscape: gatefloor_local (2026-09-16, floor live from step 0) never found the jump at all --
+        # flight 1.00 -> 0.001 by iter 700, peak 0, parked on the standing terms at reward ~1.3, where the
+        # same machine/config with floor=0 (gate_local) discovered at iter 700.
+        if floor <= 0.0 or not getattr(self, "_takeoff_omega_on", False):
+            return gate
+        return gate + (1.0 - gate) * floor
+
     def _reward_projected_landing(self):
         # Olsen 2025 densification: while airborne, project the final landing xy
         # from ballistic motion and reward closeness to the commanded landing
@@ -835,7 +925,7 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
         # the dense in-place landing control (Stage 1, target=spawn) is preserved.
         pz = self.root_states[:, 2]
         min_h = float(getattr(self.cfg.rewards, "projected_landing_min_height", 0.40))
-        active = (self.airborne & (pz > min_h) & self._jump_commanded() & self._squat_deep_enough()).float()
+        active = (self.airborne & (pz > min_h) & self._jump_commanded()).float() * self._squat_gate_scale()
         g = 9.81
         vz = self.root_states[:, 9]
         h_land = self.env_origins[:, 2] + float(self.cfg.rewards.base_height_target)
@@ -869,7 +959,7 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
         min_height = float(getattr(self.cfg.rewards, "ascending_min_base_height", 0.18))
         vz = self.root_states[:, 9]
         ascending = self.jumping_state & (vz > 0) & (~self.has_landed) & (base_height > min_height)
-        ascending = ascending & self._squat_deep_enough()           # same squat-depth gate as takeoff_vz
+        ascending_f = ascending.float() * self._squat_gate_scale()  # squat gate, partial below the hold (see _squat_gate_scale)
         # required LAUNCH velocity (world frame): vz from the height cmd (== takeoff_vz target); horizontal =
         # commanded displacement / ballistic flight time (symmetric arc, land ~ launch height -> T = 2 vz/g).
         h_stand = float(getattr(self.cfg.rewards, "stance_standing_height", 0.30))
@@ -884,7 +974,7 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
             1.0 - torch.norm(v_act - v_req, dim=1) / torch.norm(v_req, dim=1).clamp(min=1e-3),
             min=0.0, max=1.0,
         )
-        return ascending.float() * match
+        return ascending_f * match
 
     def _reward_launch_pitch_toward_vel(self):
         # 起跳上升段，奖励"机身鼻尖方向"对齐"起跳速度方向"(抬头往速度方向)。
@@ -930,7 +1020,7 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
             return torch.zeros(self.num_envs, device=self.device)
         pz = self.root_states[:, 2]
         min_h = float(getattr(self.cfg.rewards, "projected_landing_min_height", 0.40))
-        active = (self.airborne & (pz > min_h) & self._jump_commanded() & self._squat_deep_enough()).float()
+        active = (self.airborne & (pz > min_h) & self._jump_commanded()).float() * self._squat_gate_scale()
         # PAYMENT-WINDOW CAP (2026-08-12). This term is paid EVERY airborne step, so what the policy
         # actually maximises is (reach x time in the window), and window time is bought with VERTICAL
         # velocity -- the integral is maximised at ~55 deg, not at the ballistic 45 deg. Measured on

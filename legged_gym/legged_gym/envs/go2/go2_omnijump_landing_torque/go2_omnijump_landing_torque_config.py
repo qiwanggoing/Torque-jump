@@ -220,15 +220,34 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
         # Both incremental-curriculum runs (advcurr_hist / sd02_hist) turned a mid-run wobble into a dead end
         # (frozen out of reach / retreated to an in-place hop), while the fixed-band runs rode theirs out.
         # 0.0 keeps near commands (discovery + reward signal); 1.2 keeps far ones to stretch for.
-        landing_disp_x_stage2 = [0.0, 1.2]
-        dx_stage_b_range = [0.5, 1.3]           # STAGE B -- opened by the gate below
-        dx_stage_auto = False                   # OFF while landing_dx_curriculum is on -- the two would both
+        # ⭐2026-09-16 (user, second pass): keep ONE band [0.0, 1.0] and raise its FLOOR instead of switching
+        # stages. The two-stage version was written first ([0.3,0.6] -> [0.6,1.0]) and dropped: reach is ~0.58,
+        # so stage B would have made every command unreachable in a single step -- exactly the cliff that
+        # killed advcurr_hist / sd02_hist. See dx_floor_* below and _maybe_raise_dx_floor.
+        landing_disp_x_stage2 = [0.0, 1.0]
+        dx_stage_b_range = [0.6, 1.0]           # STAGE B -- opened by the gate below (user 2026-09-16)
+        dx_stage_auto = False                   # OFF: superseded by the rising-floor curriculum (dx_floor_*)
+                                                # [prior] OFF while landing_dx_curriculum is on -- the two would both
                                                 # rewrite command_ranges["lin_vel_x"] and fight each other.
         dx_stage_hit_gate = 0.80                # landing_hit_rate EMA (0.99 smoothing) required to widen.
                                                 # Honest since the takeoff anchor: it measures |flight
                                                 # displacement - command|, so a creep-assisted touchdown
                                                 # no longer counts. WATCH Episode/hit_rate_ema -- if it
                                                 # plateaus below this, lower the gate rather than waiting.
+        # ── RISING-FLOOR command curriculum (user 2026-09-16) ──────────────────────────────────────
+        # Commands are drawn from [dx_floor, 1.0]. Once the bottom band [floor, floor+band] is hit at least
+        # dx_floor_hit_gate of the time, it is DELETED (floor += step) so training keeps concentrating on the
+        # frontier, converging on the farthest reachable distance. Self-limiting: the floor can only move
+        # while the band above it is still being hit, so it stalls just under the reach instead of walking
+        # into the "nothing is reachable" cliff. The far commands stay in the band throughout.
+        dx_floor_curriculum = True
+        dx_floor_start = 0.0                    # commands start at the full [0.0, 1.0]
+        dx_floor_step = 0.10                    # delete this much off the bottom per advance
+        dx_floor_band = 0.10                    # the bottom band whose hit rate is scored
+        dx_floor_hit_gate = 0.85                # band hit rate (landing err <= tol AND a real jump) to advance
+        dx_floor_min_samples = 300              # band landings per evaluation (rolling window, not an EMA)
+        dx_floor_min_steps = 20000              # hold between advances (~400 iters at the pure-torque rate)
+        dx_floor_max = 0.90                     # hard cap, the gate should stop it well before this
         dx_stage_min_steps = 60000              # floor before any widen (PD fade completes ~iter 650;
                                                 # this is well past it, so a fluke cannot advance early)    # FIXED forward range (2026-07-11, user): no curriculum-from-0 -> command
                                               # 0.5-1.5 m directly from the start. Goal = FARTHER: every command is far, so
@@ -260,7 +279,7 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
         # for a SHORTER jump. The two-stage gate never rescued it either: hit_rate_ema peaked at 0.566
         # (stage_a) and 0.628 (nohead_a) against a 0.80 gate, so Stage B was never opened and the policy
         # never trained on a command it had to stretch for.
-        landing_dx_curriculum = False          # 2026-09-15 OFF: fixed [0.0, 1.2] above (see there)
+        landing_dx_curriculum = False          # 2026-09-15 OFF: the two-stage fixed band above drives the command
                                              # from landing_disp_x_stage2 = [0.5, 1.5] m (see else-branch in _init_buffers).
         # BIASED command sampling (Atanassov local-difficulty): concentrate most jump commands at the FAR
         # frontier (the goal = farthest landing point) instead of uniform over [0, dx_max]. The policy then
@@ -385,7 +404,16 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
                                            # 连续跳落地立刻再跳没法蓄力 -> 每跳只 0.13m; 单跳能蓄力 -> 纯力矩~0.77m.
 
         class ranges(GO2OmniJumpCurriculumTorqueCfg.commands.ranges):
-            jump_height = [0.40, 0.50]   # 0.60 -> 0.50 (2026-07-10, RE-APPLY the LAUNCH-ANGLE fix): 0.60 launched at
+            # ⭐2026-09-16 [0.40,0.50] -> [0.35,0.45] (user): LAUNCH ANGLE, second application. Measured on
+            # Sep16_01-12-16/model_8500 (256 env, deterministic, cmd 0.6): launch |v| = 2.48 m/s at 51 deg with
+            # the calf at 116-129% of rated speed and hip/thigh torque at 97-100% -- the speed is AT the actuator
+            # wall, so the only distance left is the angle. Ballistic at |v| 2.48: 45 deg -> 0.627 m, 51 deg ->
+            # 0.613, 55 deg -> 0.590 (measured flight 0.562). vz is pinned by this command (vz_req =
+            # sqrt(2g(h - stance_standing_height))), and the policy holds peak 0.48 even when commanded 0.40,
+            # so the trade has to come from the command range, not from the policy. 0.45 -> vz_req 1.71 (was 1.98).
+            # Comes WITH landing_real_jump_min_peak and projected_landing_min_height 0.40 -> 0.35: at peak ~0.43
+            # the old 0.40 gates would delete the landing/reach rewards (or leave a few ms of payment window).
+            jump_height = [0.35, 0.45]   # [prior] 0.60 -> 0.50 (2026-07-10, RE-APPLY the LAUNCH-ANGLE fix): 0.60 launched at
             lin_vel_x = [0.0, 0.0]       # repurposed: landing dx (m). Stage 1 = land in place.
             lin_vel_y = [0.0, 0.0]       # repurposed: landing dy (m). Stage 1 = land in place.
             ang_vel_yaw = [0.0, 0.0]
@@ -447,7 +475,19 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
         # iter500): 1s of standing rewards makes "don't jump" too comfortable -> the policy never
         # risks the squat-then-push (same failure mode as Jun09_11-29-05 strong default_pos/yaw).
         # The 1s settled-stance is a PLAY/visual nicety only -> set it in play_landing, not training.
-        landing_real_jump_min_peak = 0.40   # peak gate for the landing_position reward
+        # ⭐2026-09-16 PARTIAL squat-gate payout (user: "problem 1"). The held-squat gate is all-or-nothing and
+        # the whole direction-carrying family hangs off it (forward_reach / projected_landing /
+        # takeoff_velocity_match / projected_peak / all_feet_airborne). Measured on gate_local model_4500 at
+        # cmd 0.6: the collapsed policy still jumped 0.47 m but scored 0.00 on every one of them (per-jump
+        # positives 30 -> 7.6), and every reward that survived is direction-blind -- so nothing pointed forward
+        # any more and it settled into a BACKWARD hop (launch vx -0.66) for the rest of the run. With 0.30 an
+        # unqualified-but-real jump still earns 30%, which is the gradient back. A held squat still pays 3.3x
+        # more, so the countermovement is still the optimum. 0.0 = the old all-or-nothing gate.
+        # Gated on the success latch (_takeoff_omega_on) -- see _squat_gate_scale: live from step 0 it cost
+        # the run its discovery (gatefloor_local: flight -> 0 by iter 700, never jumped).
+        squat_gate_floor = 0.30
+        landing_real_jump_min_peak = 0.35   # 0.40 -> 0.35 (2026-09-16): follows jump_height [0.35,0.45], peak ~0.43
+        # [prior] peak gate for the landing_position reward
                                             # (omnijump squat settles ~0.31, real jump peaks ~0.56)
         landing_buffer_steps = 150          # was 25 (=0.125s, inherited). A jump only "finishes" (success
                                             # credited + next jump re-enabled) after the robot stays stable
@@ -479,7 +519,9 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
         # Force False here so the airborne-only gate actually takes effect (yaw damp in the air only, as
         # intended). The linear-velocity reward that also reads this flag is weight 0, so this is a no-op there.
         tracking_linear_velocity_all_time = False
-        projected_landing_min_height = 0.40 # instantaneous height gate for the DENSE projected_landing:
+        projected_landing_min_height = 0.35 # 0.40 -> 0.35 (2026-09-16, with jump_height [0.35,0.45]): at peak ~0.43
+                                            # a 0.40 gate leaves almost no payment window above it.
+                                            # [prior] instantaneous height gate for the DENSE projected_landing:
                                             # blocks the legs-tucked sprawl farm (body ~0.13, feet off ground)
                                             # while keeping dense in-place landing control during real apex.
         # pose_guidance_sigma for joint_angle_aerial/prelanding/landing: kept inherited 5.0
@@ -909,6 +951,8 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
             "rew_dof_pos_limits",    # joint-limit penalty — watch it shrinks as the over-deep squat stops jamming
             "squat_qualified_rate",  # frac of takeoffs preceded by a HELD squat; compare to jump_flight_rate
             # ---- distance curriculum (watch these to see the dx ramp progress) ----
+            "dx_floor",                  # ★ rising-floor curriculum: current LOW end of the command band
+            "dx_floor_band_n",           # landings scored in the bottom band since the last evaluation
             "landing_dx_max",            # per-env 双向课程: 全局最大上界 (最强 env)
             "landing_dx_mean",           # per-env 双向课程: 群体平均上界 = 真实纯力矩能力 (★盯这个诚实收敛~0.6-0.7)
             "landing_dx_min",            # per-env 双向课程: 最弱 env 上界
@@ -1067,6 +1111,13 @@ class GO2OmniJumpLandingTorqueCfgPPO(GO2OmniJumpCurriculumTorqueCfgPPO):
         # (fix012 iter 1500 reward 1.4 -> recovered by 1920). Flat anneals at 500 and never saw it.
         # Now: anneal 200 iters after the success latch (_takeoff_omega_on, succ EMA >= 0.80) opens,
         # i.e. ~500 on the 4090 and ~1100 on the 3060; entropy_anneal_iter is only the fallback ceiling.
+        # ⭐2026-09-16 ACTION-NOISE CEILING (user). Measured across four history runs: the good stretches all
+        # sit at noise_std 0.055-0.094, and every degradation/collapse started once it crept past ~0.10-0.12
+        # (fix012 hit 0.49 -> 0.37 while 0.12 -> 0.18; hist78 died for good at 0.17; gate_local at 0.125).
+        # The flat line never creeps (0.061-0.066 for 3500 iters). Applied only AFTER the entropy anneal
+        # fires, so discovery keeps its full exploration. See on_policy_runner.
+        noise_std_max = 0.08
+        noise_std_cap_delay = 0
         entropy_anneal_gate = "_takeoff_omega_on"
         entropy_anneal_gate_delay = 200
         entropy_anneal_iter = 3000

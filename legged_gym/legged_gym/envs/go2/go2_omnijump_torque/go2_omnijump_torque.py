@@ -1080,6 +1080,23 @@ class GO2OmniJumpTorque(GO2Torque):
         # (a clean symmetric vertical fold, neutral hips). The single scalar that defines "squatted".
         return torch.sum(torch.abs(self.dof_pos - self.q_squat_target.unsqueeze(0)), dim=1)
 
+    def _squat_gate_scale(self):
+        """Float version of _squat_deep_enough(): 1.0 when the squat was HELD, else cfg.rewards.squat_gate_floor
+        (default 0.0 = the old all-or-nothing gate). Subclasses/tasks that leave the floor at 0 are unchanged.
+        See the landing task for why a partial payout exists (a collapsed policy that loses the hold otherwise
+        loses EVERY direction-carrying reward at once and has no gradient back)."""
+        floor = float(getattr(self.cfg.rewards, "squat_gate_floor", 0.0))
+        gate = self._squat_deep_enough().float()
+        # DISCOVERY-SAFE: the floor is a RESCUE path for a policy that already jumps and then loses the
+        # hold, so it stays shut until the success latch opens. Before discovery squat_qualified is 0 for
+        # everyone, and paying 30% of the jump chain for any unqualified hop rewrites the discovery
+        # landscape: gatefloor_local (2026-09-16, floor live from step 0) never found the jump at all --
+        # flight 1.00 -> 0.001 by iter 700, peak 0, parked on the standing terms at reward ~1.3, where the
+        # same machine/config with floor=0 (gate_local) discovered at iter 700.
+        if floor <= 0.0 or not getattr(self, "_takeoff_omega_on", False):
+            return gate
+        return gate + (1.0 - gate) * floor
+
     def _squat_deep_enough(self):
         # Squat-POSE gate (countermovement): True once this jump has HELD the loaded squat POSE for
         # >= squat_hold_steps consecutive steps before takeoff (latched in squat_qualified). The whole
@@ -1140,12 +1157,12 @@ class GO2OmniJumpTorque(GO2Torque):
             & (~self.has_landed)
             & (base_height > min_height)
         )
-        ascending = ascending & self._squat_deep_enough()   # squat-depth gate (countermovement)
+        ascending_f = ascending.float() * self._squat_gate_scale()   # squat-depth gate (countermovement), partial below the hold
         projected = base_height + torch.clamp(vz, min=0.0) ** 2 / (2.0 * 9.81)
         target = self.commands[:, 3]
         sigma = max(float(getattr(self.cfg.rewards, "projected_peak_sigma", 0.05)), 1e-4)
         reward = torch.exp(-torch.square(projected - target) / sigma)
-        return ascending.float() * reward
+        return ascending_f * reward
 
     def _reward_takeoff_impulse(self):
         active = self.jumping_state & (~self.has_taken_off)
@@ -1165,8 +1182,8 @@ class GO2OmniJumpTorque(GO2Torque):
 
     def _reward_all_feet_airborne(self):
         height_progress = self._get_height_progress()
-        active = self.airborne & self._squat_deep_enough()   # squat-depth gate: no dip -> no flight reward
-        return active.float() * (0.25 + 0.75 * height_progress)
+        active_f = self.airborne.float() * self._squat_gate_scale()   # squat-depth gate: no dip -> no flight reward (partial below the hold)
+        return active_f * (0.25 + 0.75 * height_progress)
 
     def _reward_clean_takeoff_bonus(self):
         # SOFT clean-takeoff incentive (REPLACES the HARD clean_takeoff_terminate gate, which zeroed the whole
