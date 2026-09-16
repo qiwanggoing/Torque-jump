@@ -483,9 +483,14 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
         # any more and it settled into a BACKWARD hop (launch vx -0.66) for the rest of the run. With 0.30 an
         # unqualified-but-real jump still earns 30%, which is the gradient back. A held squat still pays 3.3x
         # more, so the countermovement is still the optimum. 0.0 = the old all-or-nothing gate.
-        # Gated on the success latch (_takeoff_omega_on) -- see _squat_gate_scale: live from step 0 it cost
-        # the run its discovery (gatefloor_local: flight -> 0 by iter 700, never jumped).
-        squat_gate_floor = 0.30
+        # ⭐2026-09-16 -> 0.0 (user): TURNED OFF. The gate it hangs on (_takeoff_omega_on) turned out to open
+        # at iter 5 -- it is an EMA over per-reset-batch success rates and a 2-env batch reads 1.0 by luck --
+        # so "post-discovery only" never held and the 30% was live from the start. Discovery record since:
+        # 3/6 with the floor live (gatefloor_local, floor_s2, floor2_s2, floor2_s3 failed) against 4/4 without
+        # (fix012, hist78, gate_local, hist_local). Paying 30% of the jump chain for an unqualified hop gives
+        # the pre-discovery policy a cheap basin. Set it back to 0.30 only together with an honest,
+        # batch-weighted discovery latch of its own (see _squat_gate_scale).
+        squat_gate_floor = 0.0
         landing_real_jump_min_peak = 0.35   # 0.40 -> 0.35 (2026-09-16): follows jump_height [0.35,0.45], peak ~0.43
         # [prior] peak gate for the landing_position reward
                                             # (omnijump squat settles ~0.31, real jump peaks ~0.56)
