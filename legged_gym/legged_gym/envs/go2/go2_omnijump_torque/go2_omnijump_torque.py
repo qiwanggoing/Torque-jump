@@ -600,10 +600,12 @@ class GO2OmniJumpTorque(GO2Torque):
         # gate) and stance_squat keeps paying toward the squat pose meanwhile, which is the gradient the
         # drop used to hand over. require_squat_before_takeoff = False keeps the old behaviour.
         if bool(getattr(self.cfg.rewards, "require_squat_before_takeoff", False)):
-            no_squat = self.just_took_off & (~self._squat_deep_enough())
-            if torch.any(no_squat):
-                self.jumping_state[no_squat] = False     # attempt voided; the settle gate re-arms it
-                self.just_took_off[no_squat] = False
+            # STAY IN THE LOAD PHASE: the unload is simply not a takeoff, so jumping_state stays True and
+            # stance_squat keeps paying toward the squat pose (on ground contact) until the squat is held or
+            # takeoff_timeout_steps (1 s) ends the attempt. Voiding the attempt instead -- the first version
+            # of this -- dropped the env out of jumping_state, which is where stance_squat lives, so it paid
+            # 0.001/s and the runs (sq_s1/sq_s2) sat at squatQ 0 exactly like before.
+            self.just_took_off = self.just_took_off & self._squat_deep_enough()
         self.has_taken_off |= self.just_took_off
         self.airborne = self.jumping_state & self.has_taken_off & (~self.has_landed) & (~any_foot_contact)
         self.airborne_time += self.airborne.float() * self.dt
