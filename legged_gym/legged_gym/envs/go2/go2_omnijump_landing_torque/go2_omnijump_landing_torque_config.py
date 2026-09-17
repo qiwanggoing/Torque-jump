@@ -521,7 +521,14 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
         # until the scaffold vanished. pd_off_in_load drops the PD for the load phase only, so the policy
         # owns the crouch from step 0 with no handover cliff; squat_pay_after_qualified keeps stance_squat
         # paying while the squat is HELD (it used to stop at qualification, so holding paid nothing).
-        pd_off_in_load = bool(int(os.environ.get("PD_OFF_LOAD", "1")))
+        # ⭐2026-09-17 -> OFF. Its only window of effect is the PD fade (afterwards pd_alpha is 0 anyway),
+        # and that is exactly where it hurts: st2_s1/st2_s2 lost the jump during the fade WITH the spawn
+        # drop still in place (succ 0.98 -> 0.10 by iter 900, stance_ramp still 0.000), a stage the old
+        # config passes fine (keep_s1 at iter 600: squatQ 0.97, succ 0.97). Without PD in the load phase
+        # the policy has to hold the squat alone exactly while the scaffold is being withdrawn, and with
+        # require_squat_before_takeoff a missed hold means no takeoff at all. The stance curriculum is the
+        # thing that teaches the policy to own the crouch now.
+        pd_off_in_load = bool(int(os.environ.get("PD_OFF_LOAD", "0")))
         squat_pay_after_qualified = bool(int(os.environ.get("SQUAT_PAY_HELD", "1")))
         jump_settle_lin_vel = 0.3          # m/s horizontal base speed below which the stance counts as settled
         jump_settle_ang_vel = 1.5          # rad/s roll+pitch rate ceiling for the same
