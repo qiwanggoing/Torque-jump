@@ -1200,7 +1200,14 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
         # Keep paying the dip-shaping reward until the squat is QUALIFIED (held >= squat_hold_steps),
         # not merely touched: this is what gives the policy a reason to STAY folded through the hold
         # window instead of popping straight back up the instant pose_err first dips under thr.
-        not_in_pose_yet = (~self.squat_qualified) if thr > 0.0 else torch.ones_like(self.jumping_state)
+        # KEEP PAYING WHILE HELD (2026-09-17, user: the reward set has nothing for the squat itself). This
+        # term used to switch OFF the moment the squat qualified, so HOLDING the squat -- exactly what the
+        # policy loses when the PD prior disappears -- paid nothing; the whole squat family is only 1-3% of
+        # the earned reward (0.026/s against 1.8/s of jump rewards on the working old run).
+        if bool(getattr(self.cfg.rewards, "squat_pay_after_qualified", False)):
+            not_in_pose_yet = torch.ones_like(self.jumping_state)
+        else:
+            not_in_pose_yet = (~self.squat_qualified) if thr > 0.0 else torch.ones_like(self.jumping_state)
         active = self.jumping_state & (~self.has_taken_off) & not_in_pose_yet
         # ON THE GROUND only (2026-09-17): with require_squat_before_takeoff a no-squat unload no longer
         # ends the load phase, so without this a tucked-in-the-air pose could farm the squat kernel.

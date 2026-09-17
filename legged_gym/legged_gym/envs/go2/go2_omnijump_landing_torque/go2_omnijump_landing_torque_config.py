@@ -501,6 +501,14 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
         # stance kills discovery -- the policy picks its feet up a few steps after arming, stance_squat
         # collapses to 0.001 (vs 0.026), the squat gate never qualifies and every jump reward stays locked.
         require_squat_before_takeoff = bool(int(os.environ.get("REQ_SQUAT", "1")))
+        # ⭐2026-09-17 OWN THE CROUCH. Every settled-stance run died exactly at pd_prior -> 0 (squatQ 0.97 ->
+        # 0.00 across iter 800-1200, and a looser criterion changed nothing), because the PD prior is a
+        # phase-scheduled reference whose LOAD keyframe IS the squat: the crouch was done for the policy
+        # until the scaffold vanished. pd_off_in_load drops the PD for the load phase only, so the policy
+        # owns the crouch from step 0 with no handover cliff; squat_pay_after_qualified keeps stance_squat
+        # paying while the squat is HELD (it used to stop at qualification, so holding paid nothing).
+        pd_off_in_load = bool(int(os.environ.get("PD_OFF_LOAD", "1")))
+        squat_pay_after_qualified = bool(int(os.environ.get("SQUAT_PAY_HELD", "1")))
         jump_settle_lin_vel = 0.3          # m/s horizontal base speed below which the stance counts as settled
         jump_settle_ang_vel = 1.5          # rad/s roll+pitch rate ceiling for the same
         # [prior] first_jump_delay_steps stayed at the inherited 55 (0.275s). A 1s pre-jump idle (200) was
@@ -862,7 +870,9 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
                                              # command, so there is no in-jump squat-down window. Contributed 0.0000.
                                              # SUPERSEDED by stance_squat below (same goal, NO vz<=0 dead-loop gate).
             # ---- countermovement: stance-squat shaping (the piece we were missing) ----
-            stance_squat = 3.0               # was 1.5: now the PRIMARY early driver (RSI off -> jump chain locked
+            stance_squat = float(os.environ.get("STANCE_SQUAT_W", "8.0"))  # 3.0 -> 8.0 (2026-09-17): the ONLY
+                                             # squat term, earning 1-3% of the reward while the fall/PD did the
+                                             # crouch. With pd_off_in_load the policy must produce it -> it has to pay.               # was 1.5: now the PRIMARY early driver (RSI off -> jump chain locked
                                              # until folded, so this is the main thing firing early). pose-based
                                              # exp(-|dof-q_squat|/sigma). SHAPES the dip (how to get down); paid while loading and not yet at
                                              # squat_gate_height, then stops. The squat-depth gate on successful_jump/

@@ -327,13 +327,31 @@ class GO2OmniJumpCurriculumTorque(GO2OmniJumpTorque):
         # PD fades from pd_prior_weight → 0; RL grows from rl_prior_weight → 1.0
         pd_alpha = float(self.cfg.control.pd_prior_weight) * max(0.0, 1.0 - float(self.general_scale))
         rl_alpha = 1.0 - pd_alpha
+        # NO PD IN THE LOAD PHASE (2026-09-17). The PD prior is a phase-scheduled keyframe reference whose
+        # LOAD keyframe is the squat, so while it is alive the crouch is done FOR the policy -- which is why
+        # every settled-stance run died the moment pd_prior hit 0 (squatQ 0.97 -> 0.35 -> 0.00 across iter
+        # 800-1200 in sq2_s1 and hold12_s1 alike, and loosening the criterion changed nothing). The old
+        # stance never exposed this because the 0.42 m spawn drop did the crouch in every episode forever.
+        # Zeroing pd_alpha for the load phase only (arming -> takeoff) means the policy owns the crouch from
+        # iteration 0 and there is no handover cliff; standing, push, flight and landing keep their PD.
+        if bool(getattr(self.cfg.rewards, "pd_off_in_load", False)):
+            load = (self.jumping_state & (~self.has_taken_off)).float()
+            pd_alpha_t = torch.full((self.num_envs,), pd_alpha, device=self.device) * (1.0 - load)
+            rl_alpha_t = 1.0 - pd_alpha_t
+        else:
+            pd_alpha_t = None
+            rl_alpha_t = None
 
         # RL residual bounded by physical torque limits (not action_scale)
         torques_limits_eff = torch.clamp(self.torque_limits, min=1e-6)
         residual_torques = actions[:, :12] * torques_limits_eff
 
-        self.rl_prior_alpha[:] = rl_alpha
-        self.pd_prior_alpha[:] = pd_alpha
+        if pd_alpha_t is not None:
+            self.rl_prior_alpha[:] = rl_alpha_t.view(-1, 1) if self.rl_prior_alpha.dim() > 1 else rl_alpha_t
+            self.pd_prior_alpha[:] = pd_alpha_t.view(-1, 1) if self.pd_prior_alpha.dim() > 1 else pd_alpha_t
+        else:
+            self.rl_prior_alpha[:] = rl_alpha
+            self.pd_prior_alpha[:] = pd_alpha
 
         # PD_full (UNWEIGHTED): both the stabiliser head's BC target and the α-weighted scaffold.
         pd_full = self.p_gains * (self.default_joint_pd_target - self.dof_pos) - self.d_gains * self.dof_vel
