@@ -265,6 +265,17 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
         # [0.70, 1.0]. This fraction of every draw is re-drawn from [0, floor], so the near distances stay
         # trained -- the floor then only re-WEIGHTS practice toward the frontier instead of deleting it.
         dx_floor_keep_near_frac = 0.25
+        # ⭐2026-09-17 STANCE CURRICULUM (user). Phase 1 keeps the spawn drop and the short arming delay --
+        # the configuration that reliably discovers the jump -- and once the policy can jump (batch-weighted
+        # squat_qualified EMA >= stance_latch_rate) the spawn height, the arming delay and the settle gate
+        # ramp to the settled-stance values in init_state.pos / first_jump_delay_steps / jump_settle_steps
+        # over stance_ramp_steps. Cutting straight to the settled stance failed five different ways, all at
+        # pd_prior -> 0: the drop was doing the countermovement and feeding the push its downward momentum.
+        stance_curriculum = bool(int(os.environ.get("STANCE_CURR", "1")))
+        stance_spawn_start = 0.42               # phase-1 spawn height (the proven one); ramps to init_state.pos
+        stance_delay_start = 55                 # phase-1 arming delay in substeps; ramps to first_jump_delay_steps
+        stance_latch_rate = 0.85                # batch-weighted squat_qualified EMA that counts as "can jump"
+        stance_ramp_steps = int(os.environ.get("STANCE_RAMP", "60000"))   # ~1200 iters of ramp
         dx_stage_min_steps = 60000              # floor before any widen (PD fade completes ~iter 650;
                                                 # this is well past it, so a fluke cannot advance early)    # FIXED forward range (2026-07-11, user): no curriculum-from-0 -> command
                                               # 0.5-1.5 m directly from the start. Goal = FARTHER: every command is far, so
@@ -1006,6 +1017,8 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
             "rew_dof_pos_limits",    # joint-limit penalty — watch it shrinks as the over-deep squat stops jamming
             "squat_qualified_rate",  # frac of takeoffs preceded by a HELD squat; compare to jump_flight_rate
             # ---- distance curriculum (watch these to see the dx ramp progress) ----
+            "stance_ramp",               # ★ stance curriculum: 0 = spawn drop, 1 = settled stance
+            "stance_spawn_z",            # current spawn height while the drop ramps away
             "dx_floor",                  # ★ rising-floor curriculum: current LOW end of the command band
             "dx_floor_band_n",           # landings scored in the bottom band since the last evaluation
             "landing_dx_max",            # per-env 双向课程: 全局最大上界 (最强 env)

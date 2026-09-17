@@ -487,6 +487,51 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
               f"hit_rate_ema={self._hit_rate_ema:.3f} -> commands dx {self.command_ranges['lin_vel_x']}\n",
               flush=True)
 
+    def _update_stance_curriculum(self, env_ids):
+        """STANCE CURRICULUM (user 2026-09-17): learn the jump WITH the spawn drop, then take it away.
+
+        The settled stance is a genuinely harder skill, not a config detail: the 0.42 m spawn drop both
+        performed the countermovement and handed the push some downward momentum, so every from-scratch
+        run that started from a settled stance died the moment the PD scaffold reached zero -- with a
+        looser hold criterion (hold12_s1), with the fade stretched 2x (slowfade_s1, still degrading), with
+        the no-squat-no-takeoff rule (sq2_s1/s2), and with the PD removed from the load phase and the squat
+        reward raised (crouch_s1: squatQ 1.00 -> 0.30, reward 15 -> -15 exactly as pd_prior hit 0).
+
+        So ramp the crutch away instead of cutting it: phase 1 uses the proven drop + short delay until the
+        policy can jump (batch-weighted squat_qualified EMA, which small early reset batches cannot spoof),
+        then the spawn height, the arming delay and the settle gate ramp to their settled-stance values over
+        stance_ramp_steps. One from-scratch run, no warm start.
+        """
+        if not bool(getattr(self.cfg.commands, "stance_curriculum", False)):
+            return
+        ep = self.extras.get("episode", {})
+        if "squat_qualified_rate" in ep and len(env_ids) > 0:
+            w = float(len(env_ids)) / float(self.num_envs)
+            a = 0.05 * w
+            self._stance_sq_ema = (1.0 - a) * getattr(self, "_stance_sq_ema", 0.0) + a * float(ep["squat_qualified_rate"])
+            if (not getattr(self, "_stance_latched", False)
+                    and self._stance_sq_ema >= float(getattr(self.cfg.commands, "stance_latch_rate", 0.85))):
+                self._stance_latched = True
+                self._stance_latch_step = int(self.common_step_counter)
+                print(f"\n[stance] jump learned at step {self.common_step_counter} "
+                      f"(squatQ ema {self._stance_sq_ema:.2f}) -> ramping the spawn drop away\n", flush=True)
+        z0 = float(getattr(self.cfg.commands, "stance_spawn_start", 0.42))
+        z1 = float(self.cfg.init_state.pos[2])
+        d0 = float(getattr(self.cfg.commands, "stance_delay_start", 55))
+        d1 = float(self.cfg.rewards.first_jump_delay_steps)
+        s1 = int(getattr(self.cfg.rewards, "jump_settle_steps", 0))
+        if not getattr(self, "_stance_latched", False):
+            p = 0.0
+        else:
+            ramp = max(float(getattr(self.cfg.commands, "stance_ramp_steps", 60000)), 1.0)
+            p = min(1.0, max(0.0, (self.common_step_counter - self._stance_latch_step) / ramp))
+        self.base_init_state[2] = z0 + (z1 - z0) * p
+        self._stance_delay_steps = d0 + (d1 - d0) * p
+        self._stance_settle_steps = int(round(s1 * p))
+        self.extras.setdefault("episode", {})["stance_ramp"] = torch.tensor(p, dtype=torch.float, device=self.device)
+        self.extras["episode"]["stance_spawn_z"] = torch.tensor(
+            float(self.base_init_state[2]), dtype=torch.float, device=self.device)
+
     def _maybe_raise_dx_floor(self):
         """RISING-FLOOR command curriculum (user 2026-09-16).
 
@@ -598,6 +643,7 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
         # the old separate hit/succ averages without any jump being both.
         self._maybe_widen_dx_stage()
         self._maybe_raise_dx_floor()
+        self._update_stance_curriculum(env_ids)
         stable_hit = (self.successful_jumps[env_ids] >= 1.0) & (self.jump_target_hits[env_ids] >= 1.0)
         self.extras["episode"]["landing_stable_hit_uniform"] = torch.mean(stable_hit.float() / jump_den)  # diagnostic (all dx)
         # FAR-BAND gate metric: only jumps whose commanded dx was in the top band [dx_max*(1-frac),

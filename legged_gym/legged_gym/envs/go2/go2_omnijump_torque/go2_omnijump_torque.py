@@ -554,7 +554,10 @@ class GO2OmniJumpTorque(GO2Torque):
             can_start_single_jump = torch.ones_like(self.jumping_state)
         if self.cfg.commands.num_commands > 4 and getattr(self.cfg.rewards, "one_jump_reward_per_episode", False):
             can_start_single_jump &= ~self.single_jump_command_done
-        first_jump_ready = self.episode_length_buf >= self.cfg.rewards.first_jump_delay_steps
+        # `_stance_delay_steps` / `_stance_settle_steps` are set by the landing task's stance curriculum
+        # (see _update_stance_curriculum); without it they fall back to the config values.
+        _delay = float(getattr(self, "_stance_delay_steps", self.cfg.rewards.first_jump_delay_steps))
+        first_jump_ready = self.episode_length_buf >= _delay
         first_jump_request = (self.jump_starts <= 0.0) & first_jump_ready
         rearm_ready = first_jump_ready
         ready_to_jump = (
@@ -568,7 +571,7 @@ class GO2OmniJumpTorque(GO2Torque):
         # never stood. On hardware the jump always starts from a settled stance. This only delays WHEN the
         # jump may arm (no reward attached, so "standing" earns nothing extra -- the 1 s idle that broke
         # discovery in June did it by paying for standing). 0 = off, other tasks unaffected.
-        settle_steps = int(getattr(self.cfg.rewards, "jump_settle_steps", 0))
+        settle_steps = int(getattr(self, "_stance_settle_steps", getattr(self.cfg.rewards, "jump_settle_steps", 0)))
         if settle_steps > 0:
             if not hasattr(self, "_settle_count"):
                 self._settle_count = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
