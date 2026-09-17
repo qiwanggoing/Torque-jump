@@ -248,6 +248,11 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
         dx_floor_min_samples = 300              # band landings per evaluation (rolling window, not an EMA)
         dx_floor_min_steps = 20000              # hold between advances (~400 iters at the pure-torque rate)
         dx_floor_max = 0.90                     # hard cap, the gate should stop it well before this
+        # ⭐2026-09-17 (user: "keep the whole command range"). The floor deletes what it passes, and
+        # floor2_s1 ended up jumping 0.68-0.70 for EVERY command (hit only near 0.7) once the band was
+        # [0.70, 1.0]. This fraction of every draw is re-drawn from [0, floor], so the near distances stay
+        # trained -- the floor then only re-WEIGHTS practice toward the frontier instead of deleting it.
+        dx_floor_keep_near_frac = 0.25
         dx_stage_min_steps = 60000              # floor before any widen (PD fade completes ~iter 650;
                                                 # this is well past it, so a fluke cannot advance early)    # FIXED forward range (2026-07-11, user): no curriculum-from-0 -> command
                                               # 0.5-1.5 m directly from the start. Goal = FARTHER: every command is far, so

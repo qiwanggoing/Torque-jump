@@ -228,6 +228,20 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
         # Only DISTANCE is biased (height untouched -- the goal is a stable landing at the farthest point,
         # not the highest jump). In-place phase (dx_max == 0) is a no-op, so discovery is untouched.
         super()._resample_commands(env_ids)
+        # RETENTION under the rising floor (user 2026-09-17). The floor DELETES the band it has mastered,
+        # and floor2_s1 showed what that costs: by iter 9000 the band was [0.70, 1.0] and the policy had
+        # forgotten everything else -- deterministic flight 0.682 / 0.693 / 0.696 / 0.702 for commands
+        # 0.5 / 0.7 / 0.9 / 1.0, i.e. one maximal jump, hit only where the command happened to match.
+        # Keep `dx_floor_keep_near_frac` of the draws in [0, floor] so the full command range stays trained
+        # while the rest of the batch still concentrates on the frontier.
+        if (len(env_ids) > 0 and bool(getattr(self.cfg.commands, "dx_floor_curriculum", False))
+                and not getattr(self.cfg.test, "use_test", False)):
+            keep = float(getattr(self.cfg.commands, "dx_floor_keep_near_frac", 0.0))
+            floor = float(getattr(self, "_dx_floor", 0.0))
+            if keep > 0.0 and floor > 1e-6:
+                m = torch.rand(len(env_ids), device=self.device) < keep
+                near = torch.rand(len(env_ids), device=self.device) * floor
+                self.commands[env_ids, 0] = torch.where(m, near, self.commands[env_ids, 0])
         # PER-ENV 双向课程 (2026-07-04): 每个 env 从 [0, 自己上界 landing_dx_env] 抽 dx, 覆盖父类的 global 抽.
         # play/eval(landing_dx_curriculum=False) 走父类的 command_ranges[DX,DX], 不进这段.
         if (len(env_ids) > 0 and getattr(self, "landing_dx_curriculum", False)
