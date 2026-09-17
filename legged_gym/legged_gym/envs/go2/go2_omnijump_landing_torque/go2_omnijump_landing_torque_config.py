@@ -165,7 +165,7 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
         warmup_steps = 19200       # full PD 到 iter200. ⚠️step/iter 非线性! step()内 `while current_dt·freq<1` 每env.step跑
                                    # 200/freq个substep(每个substep step_count+=1): warmup期 general_scale=0/freq=100 -> 2/env.step
                                    # = 96/iter -> warmup19200=iter200. fade末 freq=200 -> 1/env.step=48/iter. (旧注释"96/iter"只对warmup期.)
-        x0 = 70400                 # 纯力矩 iter1000 (user). fade期 freq100->200 => step/iter 96->48,积分得【fade完成iter = 200 +
+        x0 = int(os.environ.get("GROWTH_X0", "70400"))  # DIAGNOSTIC HOOK 2026-09-17: PD fade end                 # 纯力矩 iter1000 (user). fade期 freq100->200 => step/iter 96->48,积分得【fade完成iter = 200 +
                                    # (x0-19200)/64】. 实测x0=48000->iter650✓,要iter1000 -> x0=70400. fade跨度iter200->1000(800iter).
 
     class commands(GO2OmniJumpCurriculumTorqueCfg.commands):
@@ -597,7 +597,10 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
         default_hip_pos_lat_ref = 0.15      # read by _reward_default_hip_pos override (lateral unlock). The |d_y| (m) at which
                                             # the hip-abduction lock is fully released; forward (d_y=0) keeps the full lock.
                                             # Lives here in `class rewards` (NOT in scales, or it'd be mis-read as a reward term).
-        squat_hold_steps = 25               # was 40 (0.2s) -> 25 (0.125s): EASED to unstick. jump chain unlocks only after the squat POSE is HELD within
+        # DIAGNOSTIC HOOK 2026-09-17: SQUAT_HOLD. With the settled stance the policy loses the HOLD as the
+        # PD fades (squatQ 1.00 -> 0.02 across iter 600-1100 while stance_squat RISES to 0.061, i.e. it is
+        # crouching and just missing the criterion), and every jump reward is gated behind it.
+        squat_hold_steps = int(os.environ.get("SQUAT_HOLD", "25"))               # was 40 (0.2s) -> 25 (0.125s): EASED to unstick. jump chain unlocks only after the squat POSE is HELD within
                                             # squat_pose_threshold for this many CONSECUTIVE steps (= 0.2s at
                                             # sim dt 0.005s). Closes the "flick through the pose for one frame
                                             # and harvest the flight" hole. THE dwell knob: collapses to
