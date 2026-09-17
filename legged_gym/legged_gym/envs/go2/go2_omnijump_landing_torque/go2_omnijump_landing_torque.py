@@ -509,7 +509,14 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
             w = float(len(env_ids)) / float(self.num_envs)
             a = 0.05 * w
             self._stance_sq_ema = (1.0 - a) * getattr(self, "_stance_sq_ema", 0.0) + a * float(ep["squat_qualified_rate"])
-            if (not getattr(self, "_stance_latched", False)
+            # ONE CRUTCH AT A TIME (2026-09-17): also wait for the PD scaffold to be GONE. stcurr_s1 latched
+            # at iter ~190 while pd_prior was still 0.42, so the drop and the PD were being taken away
+            # together and success fell 0.99 -> 0.43 by iter 600. Order: learn with drop+PD, consolidate the
+            # pure-torque jump while the drop is still there (the old config proves that step works), then
+            # ramp the drop away.
+            _fade_done = (not bool(getattr(self.cfg.commands, "stance_latch_after_fade", True))
+                          or float(getattr(self, "general_scale", 1.0)) >= 0.999)
+            if (not getattr(self, "_stance_latched", False) and _fade_done
                     and self._stance_sq_ema >= float(getattr(self.cfg.commands, "stance_latch_rate", 0.85))):
                 self._stance_latched = True
                 self._stance_latch_step = int(self.common_step_counter)

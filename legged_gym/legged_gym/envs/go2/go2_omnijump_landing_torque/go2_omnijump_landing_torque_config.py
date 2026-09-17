@@ -275,6 +275,9 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
         stance_spawn_start = 0.42               # phase-1 spawn height (the proven one); ramps to init_state.pos
         stance_delay_start = 55                 # phase-1 arming delay in substeps; ramps to first_jump_delay_steps
         stance_latch_rate = 0.85                # batch-weighted squat_qualified EMA that counts as "can jump"
+        stance_latch_after_fade = True          # ALSO wait for the PD scaffold to be gone before ramping the
+                                                # drop away -- stcurr_s1 started ramping at iter ~190 with
+                                                # pd_prior still 0.42 and lost the jump (succ 0.99 -> 0.43)
         stance_ramp_steps = int(os.environ.get("STANCE_RAMP", "60000"))   # ~1200 iters of ramp
         dx_stage_min_steps = 60000              # floor before any widen (PD fade completes ~iter 650;
                                                 # this is well past it, so a fluke cannot advance early)    # FIXED forward range (2026-07-11, user): no curriculum-from-0 -> command
