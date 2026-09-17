@@ -582,7 +582,11 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
                                             # pull from standing (7.1 rad away) is (1/sigma)*e^(-7.1/sigma), which
                                             # is ~55% stronger at 5 than 3 (peaks near sigma~7). default_pos no
                                             # longer competes during the dip, so this positive pull now drives it.
-        squat_pose_threshold = 3.2          # was 2.8: EASED (stuck @ squatQ~0.48). "in the squat" = pose_err<=3.2, shallower from
+        # DIAGNOSTIC HOOK 2026-09-17: SQUAT_THR loosens/tightens the held-squat gate (pose error sum over
+        # 12 joints, larger = easier). The gate is all-or-nothing and the whole jump-reward chain hangs
+        # off it, so a from-scratch policy that dips but not deep enough earns nothing and has no
+        # gradient toward a deeper dip -- the suspect for the stance change killing discovery.
+        squat_pose_threshold = float(os.environ.get("SQUAT_THR", "3.2"))          # was 2.8: EASED (stuck @ squatQ~0.48). "in the squat" = pose_err<=3.2, shallower from
                                             # standing (7.1). THE depth knob: stuck-not-jumping (can't fold
                                             # enough) -> RAISE; jumps too shallow / want a deeper load -> LOWER.
         default_hip_pos_lat_ref = 0.15      # read by _reward_default_hip_pos override (lateral unlock). The |d_y| (m) at which
