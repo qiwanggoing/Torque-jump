@@ -563,6 +563,24 @@ class GO2OmniJumpTorque(GO2Torque):
             & can_start_single_jump
             & rearm_ready
         )
+        # SETTLED-STANCE GATE (user 2026-09-17). Training spawns the robot above standing height and arms
+        # the jump `first_jump_delay_steps` later, so it used to launch ~0.1 s after touching down -- it
+        # never stood. On hardware the jump always starts from a settled stance. This only delays WHEN the
+        # jump may arm (no reward attached, so "standing" earns nothing extra -- the 1 s idle that broke
+        # discovery in June did it by paying for standing). 0 = off, other tasks unaffected.
+        settle_steps = int(getattr(self.cfg.rewards, "jump_settle_steps", 0))
+        if settle_steps > 0:
+            if not hasattr(self, "_settle_count"):
+                self._settle_count = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
+            contact4 = torch.all(self.contact_forces[:, self.feet_indices, 2] > 1.0, dim=1)
+            calm = (
+                (torch.norm(self.base_lin_vel[:, :2], dim=1) < float(getattr(self.cfg.rewards, "jump_settle_lin_vel", 0.3)))
+                & (torch.norm(self.base_ang_vel[:, :2], dim=1) < float(getattr(self.cfg.rewards, "jump_settle_ang_vel", 1.5)))
+            )
+            settled_now = contact4 & calm
+            self._settle_count = torch.where(settled_now, self._settle_count + 1,
+                                             torch.zeros_like(self._settle_count))
+            ready_to_jump = ready_to_jump & (self._settle_count >= settle_steps)
         start_ids = ready_to_jump.nonzero(as_tuple=False).flatten()
         self._start_jump(start_ids)
 

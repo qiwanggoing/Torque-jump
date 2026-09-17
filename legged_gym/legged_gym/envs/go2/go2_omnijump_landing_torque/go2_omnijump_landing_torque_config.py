@@ -49,6 +49,12 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
     # proven ~0.30 default stance (inherited). Revisit launch depth later via a milder crouch +
     # stronger default_hip_pos if pursuing more height.
 
+    class init_state(GO2OmniJumpCurriculumTorqueCfg.init_state):
+        # 0.42 -> 0.35 (2026-09-17): standing height is ~0.30, so this cuts the free fall at episode start
+        # from ~0.16 s to ~0.10 s. Paired with first_jump_delay_steps / jump_settle_steps below so the jump
+        # starts from a settled stance instead of ~0.1 s after the robot lands from the spawn drop.
+        pos = [0.0, 0.0, 0.35]
+
     class env(GO2OmniJumpCurriculumTorqueCfg.env):
         # ATANASSOV-STYLE OBSERVATION HISTORY -- restored VERBATIM from commit 9ef99da (2026-08-18).
         # This is the ONLY from-scratch history configuration that has ever discovered the jump here
@@ -475,7 +481,18 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
         # down, consistently. 0.40 (~24deg) is a modest step below that -> forces ~4deg flatter (low collapse
         # risk); tighten over runs (0.40->0.35->...) to progressively flatten; loosen if dx/succ collapse.
         landing_tilt_terminate = 0.0       # OFF for now -- trying the SOFT (reward) route first (see below); flip to ~0.40 if soft fails
-        # first_jump_delay_steps stays at the inherited 55 (0.275s). A 1s pre-jump idle (200) was
+        # ⭐2026-09-17 STAND BEFORE THE JUMP (user). Spawn is 0.42 m against a ~0.30 standing height, so the
+        # robot fell for ~0.16 s and the 55-step delay (0.275 s) let it launch ~0.1 s after touchdown: it never
+        # actually stood, which no real jump does. 55 -> 120 steps (0.6 s -- episode_length_buf counts physics
+        # substeps at dt 0.005, so it is 0.6 s at either control rate) PLUS a settled-stance gate (four feet
+        # loaded and the base calm for jump_settle_steps), and init_state.pos drops to 0.35 to shorten the fall.
+        # NOTE what this deliberately does NOT repeat: the June 1 s idle paid standing REWARD for a whole
+        # second, which made not jumping comfortable and broke discovery. This only moves the arming time.
+        first_jump_delay_steps = 120
+        jump_settle_steps = 10             # consecutive settled substeps (0.05 s) before the jump may arm
+        jump_settle_lin_vel = 0.3          # m/s horizontal base speed below which the stance counts as settled
+        jump_settle_ang_vel = 1.5          # rad/s roll+pitch rate ceiling for the same
+        # [prior] first_jump_delay_steps stayed at the inherited 55 (0.275s). A 1s pre-jump idle (200) was
         # tried and BROKE from-scratch discovery (iter774 flight=0 vs the proven run's 0.914 by
         # iter500): 1s of standing rewards makes "don't jump" too comfortable -> the policy never
         # risks the squat-then-push (same failure mode as Jun09_11-29-05 strong default_pos/yaw).
