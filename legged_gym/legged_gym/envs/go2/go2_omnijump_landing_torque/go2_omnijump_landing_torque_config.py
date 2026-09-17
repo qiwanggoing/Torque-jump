@@ -496,6 +496,11 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
         # second, which made not jumping comfortable and broke discovery. This only moves the arming time.
         first_jump_delay_steps = int(os.environ.get("JUMP_DELAY", "120"))
         jump_settle_steps = int(os.environ.get("JUMP_SETTLE", "10"))   # consecutive settled substeps before arming
+        # ⭐2026-09-17 NO SQUAT, NO TAKEOFF (user). See go2_omnijump_torque._update_jump_state: an unload
+        # without a held squat voids the attempt instead of ending the load phase. Without it the settled
+        # stance kills discovery -- the policy picks its feet up a few steps after arming, stance_squat
+        # collapses to 0.001 (vs 0.026), the squat gate never qualifies and every jump reward stays locked.
+        require_squat_before_takeoff = bool(int(os.environ.get("REQ_SQUAT", "1")))
         jump_settle_lin_vel = 0.3          # m/s horizontal base speed below which the stance counts as settled
         jump_settle_ang_vel = 1.5          # rad/s roll+pitch rate ceiling for the same
         # [prior] first_jump_delay_steps stayed at the inherited 55 (0.275s). A 1s pre-jump idle (200) was

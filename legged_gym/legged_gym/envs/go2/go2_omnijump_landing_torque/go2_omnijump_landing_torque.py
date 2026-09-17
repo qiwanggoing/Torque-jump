@@ -1202,6 +1202,10 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
         # window instead of popping straight back up the instant pose_err first dips under thr.
         not_in_pose_yet = (~self.squat_qualified) if thr > 0.0 else torch.ones_like(self.jumping_state)
         active = self.jumping_state & (~self.has_taken_off) & not_in_pose_yet
+        # ON THE GROUND only (2026-09-17): with require_squat_before_takeoff a no-squat unload no longer
+        # ends the load phase, so without this a tucked-in-the-air pose could farm the squat kernel.
+        if bool(getattr(self.cfg.rewards, "require_squat_before_takeoff", False)):
+            active = active & torch.any(self.contact_forces[:, self.feet_indices, 2] > 1.0, dim=1)
         return active.float() * reward
 
     def _reward_base_ang_vel_xy(self):

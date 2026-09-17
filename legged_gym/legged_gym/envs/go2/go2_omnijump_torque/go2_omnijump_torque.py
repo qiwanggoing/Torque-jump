@@ -589,6 +589,21 @@ class GO2OmniJumpTorque(GO2Torque):
             & (~self.has_taken_off)
             & torch.all(~contact_filt, dim=1)
         )
+        # NO SQUAT, NO TAKEOFF (2026-09-17). Lifting the feet used to be impossible right after the jump
+        # armed, because the robot was still compressed from the spawn drop -- that drop was doing the
+        # countermovement for free, and the load phase is where `stance_squat` (the primary early driver,
+        # weight 3.0) is paid. Once the jump starts from a SETTLED stance, the policy just picks its feet up
+        # a few steps after arming (measured: jump_flight_rate 1.00 with peak 0.31 = standing height,
+        # stance_squat 0.001 vs 0.026 before), which ends the load phase, leaves the squat gate unqualified
+        # and locks the ENTIRE jump-reward chain -- so it parks on the +0.09/s of standing rewards instead.
+        # With this, an unload without a held squat CANCELS the attempt: the env re-arms (after the settle
+        # gate) and stance_squat keeps paying toward the squat pose meanwhile, which is the gradient the
+        # drop used to hand over. require_squat_before_takeoff = False keeps the old behaviour.
+        if bool(getattr(self.cfg.rewards, "require_squat_before_takeoff", False)):
+            no_squat = self.just_took_off & (~self._squat_deep_enough())
+            if torch.any(no_squat):
+                self.jumping_state[no_squat] = False     # attempt voided; the settle gate re-arms it
+                self.just_took_off[no_squat] = False
         self.has_taken_off |= self.just_took_off
         self.airborne = self.jumping_state & self.has_taken_off & (~self.has_landed) & (~any_foot_contact)
         self.airborne_time += self.airborne.float() * self.dt
