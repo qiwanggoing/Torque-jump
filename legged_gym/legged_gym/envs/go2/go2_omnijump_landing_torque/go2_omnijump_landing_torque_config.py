@@ -36,6 +36,8 @@ Curriculum
   → the same rewards now drive directed (forward / diagonal) jumps.
 """
 
+import os
+
 from legged_gym.envs.go2.go2_omnijump_curriculum_torque.go2_omnijump_curriculum_torque_config import (
     GO2OmniJumpCurriculumTorqueCfg,
     GO2OmniJumpCurriculumTorqueCfgPPO,
@@ -53,7 +55,11 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
         # 0.42 -> 0.35 (2026-09-17): standing height is ~0.30, so this cuts the free fall at episode start
         # from ~0.16 s to ~0.10 s. Paired with first_jump_delay_steps / jump_settle_steps below so the jump
         # starts from a settled stance instead of ~0.1 s after the robot lands from the spawn drop.
-        pos = [0.0, 0.0, 0.35]
+        # DIAGNOSTIC HOOK (2026-09-17): SPAWN_Z / JUMP_DELAY / JUMP_SETTLE let one code tree run the
+        # stance A/B without a second checkout (same precedent as SKIP_PD_FADE). Defaults = the committed
+        # settled-stance values; the A/B sets SPAWN_Z=0.42 on one card and JUMP_DELAY=55 JUMP_SETTLE=0 on
+        # the other to find which half of the change stopped from-scratch discovery.
+        pos = [0.0, 0.0, float(os.environ.get("SPAWN_Z", "0.35"))]
 
     class env(GO2OmniJumpCurriculumTorqueCfg.env):
         # ATANASSOV-STYLE OBSERVATION HISTORY -- restored VERBATIM from commit 9ef99da (2026-08-18).
@@ -488,8 +494,8 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
         # loaded and the base calm for jump_settle_steps), and init_state.pos drops to 0.35 to shorten the fall.
         # NOTE what this deliberately does NOT repeat: the June 1 s idle paid standing REWARD for a whole
         # second, which made not jumping comfortable and broke discovery. This only moves the arming time.
-        first_jump_delay_steps = 120
-        jump_settle_steps = 10             # consecutive settled substeps (0.05 s) before the jump may arm
+        first_jump_delay_steps = int(os.environ.get("JUMP_DELAY", "120"))
+        jump_settle_steps = int(os.environ.get("JUMP_SETTLE", "10"))   # consecutive settled substeps before arming
         jump_settle_lin_vel = 0.3          # m/s horizontal base speed below which the stance counts as settled
         jump_settle_ang_vel = 1.5          # rad/s roll+pitch rate ceiling for the same
         # [prior] first_jump_delay_steps stayed at the inherited 55 (0.275s). A 1s pre-jump idle (200) was
