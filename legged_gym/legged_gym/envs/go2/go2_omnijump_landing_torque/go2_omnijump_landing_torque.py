@@ -27,6 +27,7 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
         "landing_position",
         "projected_landing",
         "forward_reach",     # distance-progressive EFFORT reward (farther = more), decoupled from precise landing
+        "successful_distance",  # distance paid ONLY on a completed, successful jump (see the reward)
         "foot_contact_sync",
         "stance_squat",
         "base_ang_vel_xy",   # landing stability: flight+landing roll/pitch ω damping
@@ -57,6 +58,7 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
         "landing_position": 1,
         "projected_landing": 1,
         "forward_reach": 1,
+        "successful_distance": 1,
         "four_leg_push": 1,
         "clean_takeoff_bonus": 0,   # active from step 1 (soft positive bonus = discovery-safe)
         "stand_no_takeoff": 0,      # stage 0; real gate is _takeoff_omega_on inside the reward (post-discovery)
@@ -393,6 +395,14 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
             self.jump_target_hits += hit.float()
             # remember this jump's commanded distance (for the far-band advance gate)
             self._last_jump_cmd_dx[self.just_landed] = torch.norm(self.commands[self.just_landed, 0:2], dim=1)
+            # flight distance ALONG the commanded direction, kept for _reward_successful_distance
+            if not hasattr(self, "last_flight_along_cmd"):
+                self.last_flight_along_cmd = torch.zeros(self.num_envs, device=self.device)
+            _vec = self.landing_root_xy - self.takeoff_root_xy
+            _cmd = self.landing_target[:, :2] - self.takeoff_root_xy
+            _dir = _cmd / torch.norm(_cmd, dim=1, keepdim=True).clamp(min=1e-3)
+            _along = (_vec * _dir).sum(dim=1)
+            self.last_flight_along_cmd = torch.where(self.just_landed, _along, self.last_flight_along_cmd)
             # RISING-FLOOR curriculum: score only the jumps whose COMMAND sits in the bottom band
             # [floor, floor + dx_floor_band]; that band's hit rate is what unlocks the next floor step.
             if bool(getattr(self.cfg.commands, "dx_floor_curriculum", False)) and not getattr(self.cfg.test, "use_test", False):
@@ -1232,6 +1242,28 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
         lr_stagger = (contact[:, 0] != contact[:, 1]).float() + (contact[:, 2] != contact[:, 3]).float()
         active = (self.jumping_state & (~self.has_taken_off)) | self.landing
         return active.float() * 0.5 * lr_stagger        # [0,1]: 0 = both pairs L-R synced, 1 = both staggered
+
+    def _reward_successful_distance(self):
+        """DISTANCE THAT ONLY COUNTS IF YOU LAND IT (user 2026-09-19).
+
+        Every distance term we had -- forward_reach, projected_landing, takeoff_velocity_match -- is paid
+        in the AIR, so a jump that crashes afterwards still collects it, while a failed landing costs the
+        successful_jump bonus and ends the episode. Measured on rw_slowfade, +10 cm of reach is worth about
+        +0.1/s of forward_reach against -0.22/s for a failed landing, so unless a longer jump lands ~80% of
+        the time the risk-adjusted gradient points DOWN -- and that is exactly what the run did once the
+        drop was gone: flight 0.46 -> 0.30 -> 0.11 while success held at 0.85-0.93 and total reward fell
+        17.3 -> 9.4. Paying the distance ONLY on a completed, successful jump flips it: a short safe hop
+        earns almost nothing here, so the optimum becomes "as far as you can still land".
+
+        Paid once, on the step last_jump_success is latched, on the flight distance ALONG the commanded
+        direction (creep before takeoff is excluded, same as the takeoff anchor), clipped at the command so
+        overshooting is not paid for.
+        """
+        flown = getattr(self, "last_flight_along_cmd", None)
+        if flown is None:
+            return torch.zeros(self.num_envs, device=self.device)
+        cap = float(getattr(self.cfg.rewards, "successful_distance_cap", 1.2))
+        return self.last_jump_success.float() * torch.clamp(flown, min=0.0, max=cap)
 
     def _reward_stance_squat(self):
         # Pose-guided countermovement (GUIDE to the target, don't block cheats). The earlier

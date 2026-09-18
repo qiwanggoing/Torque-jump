@@ -888,7 +888,15 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
             # successful_jump, the only term that requires surviving the landing, at 4.2%. With a crash also
             # ending the episode, "jump smaller and land safely" maximises expected return, which is exactly
             # what the policy did (peak 0.41 -> 0.28 over 1000 iters, then off the gate cliff).
-            successful_jump = float(os.environ.get("SUCC_W", "2500.0"))          # Jun23_01-23-30 baseline (reverted). Sparse so weight is big but earned
+            # ⭐2026-09-19 DISTANCE THAT ONLY COUNTS IF YOU LAND IT (user). Paid once at a successful finish,
+            # proportional to the flight distance along the command (see _reward_successful_distance).
+            # At 1200 a 0.5 m landed jump is worth 600 against the 1500 fixed bonus, so distance is a third
+            # of the landed payoff -- enough to beat "hop short and stay safe", which is what killed the
+            # distance on rw_slowfade (flight 0.46 -> 0.11 with success still 0.85).
+            successful_distance = float(os.environ.get("SUCC_DIST_W", "1200.0"))
+            successful_jump = float(os.environ.get("SUCC_W", "1500.0"))   # 2500 -> 1500 (2026-09-19): the
+                                             # fixed part shrinks, the distance-conditioned part below takes the rest,
+                                             # so a SHORT safe hop is no longer the best-paid outcome.          # Jun23_01-23-30 baseline (reverted). Sparse so weight is big but earned
                                              # modest (~0.25; also graded by height_score). Coupled to landing accuracy
                                              # via _get_successful_jump_velocity_score (success_landing_min_score floor).
             landing_position = 8.0           # 5 -> 8: BOOST (with projected_landing 15) so jump-DISTANCE/accuracy OUTRANKS height
