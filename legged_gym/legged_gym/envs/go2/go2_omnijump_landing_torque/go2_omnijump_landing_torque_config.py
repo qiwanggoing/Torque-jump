@@ -722,6 +722,10 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
         # 2.18 m/s / 44.7 deg launch. keep_s1 never tripped it because it peaked at ~0.49; these runs peak
         # lower precisely because the spawn drop is being removed. 0.33 sits just under the lowest command.
         successful_jump_min_peak_height = 0.30  # 0.38 -> 0.30 (2026-09-18), same cliff reasoning as landing_real_jump_min_peak
+        # ⭐2026-09-18 0.05 (inherited default) -> 0.03. successful_jump is now 2500, and with the peak gate
+        # softened to 0.30 a low hop would still collect exp(-(0.14)^2/0.05) = 68% of the bonus, i.e. the
+        # bigger success reward would have paid for SMALL safe jumps. At 0.03 that drops to 37%.
+        success_height_sigma = 0.03
                                                 # (= command floor 0.40; kills the low-jump shortcut)
         # REVERTED to True (the decouple test did NOT fix the collapse -- root was default_pos taxing the jump,
         # now fixed by converting default_pos to a reward). Back to the baseline: successful_jump =
@@ -877,7 +881,14 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
                                              # base_ang_vel_xy -0.4 (the real flight-penalty killer), now reverted to -0.15 -> a mild 20 should keep
                                              # discovery. If 20 is too mild (still farms height / 1.1 plateau holds) go lower or add a non-vanishing
                                              # far-accuracy pull. WATCH iter~500 flight recovers; if flight 0, 20 is still too low -> revert to 25.
-            successful_jump = 1000.0          # Jun23_01-23-30 baseline (reverted). Sparse so weight is big but earned
+            # ⭐2026-09-18 1000 -> 2500 (user: "is the reward big enough?"). Reward share measured in the
+            # healthy window of st5_s1 (succ 0.69): forward_reach 24.2%, landing_position 21.8%,
+            # projected_landing 14.7%, projected_peak 10.9%, takeoff_velocity_match 8.6% -- ALL paid before
+            # or at touchdown, i.e. a jump that crashes afterwards still collects them -- against
+            # successful_jump, the only term that requires surviving the landing, at 4.2%. With a crash also
+            # ending the episode, "jump smaller and land safely" maximises expected return, which is exactly
+            # what the policy did (peak 0.41 -> 0.28 over 1000 iters, then off the gate cliff).
+            successful_jump = float(os.environ.get("SUCC_W", "2500.0"))          # Jun23_01-23-30 baseline (reverted). Sparse so weight is big but earned
                                              # modest (~0.25; also graded by height_score). Coupled to landing accuracy
                                              # via _get_successful_jump_velocity_score (success_landing_min_score floor).
             landing_position = 8.0           # 5 -> 8: BOOST (with projected_landing 15) so jump-DISTANCE/accuracy OUTRANKS height
