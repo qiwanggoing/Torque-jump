@@ -444,7 +444,15 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
             # so the trade has to come from the command range, not from the policy. 0.45 -> vz_req 1.71 (was 1.98).
             # Comes WITH landing_real_jump_min_peak and projected_landing_min_height 0.40 -> 0.35: at peak ~0.43
             # the old 0.40 gates would delete the landing/reach rewards (or leave a few ms of payment window).
-            jump_height = [0.35, 0.45]   # [prior] 0.60 -> 0.50 (2026-07-10, RE-APPLY the LAUNCH-ANGLE fix): 0.60 launched at
+            # ⭐2026-09-18 BACK to [0.40, 0.50] (user). The launch-angle cut bought ~6 cm of ballistic range
+            # (45 deg vs 51 deg at |v| 2.48) but it costs the LANDING under the settled stance: measured on
+            # st4_s2/model_1400, every one of 755 landings satisfied the success criterion at touchdown and
+            # NONE completed -- termination was collision 880 / roll 0 / timeout 0 with landing_step_counter
+            # 0 of the 150 needed, i.e. a thigh or the base hits the ground at touchdown. Without the spawn
+            # drop the peak is only ~0.44 (keep_s1 peaked 0.49 and landed 0.98 of its jumps), the arc is too
+            # flat to get the legs out, and with success impossible the landing skill never trains at all --
+            # both st4 runs then died as the drop ramped away (peak 0.40 -> 0.13 by iter 1800).
+            jump_height = [0.40, 0.50]   # [prior] 0.60 -> 0.50 (2026-07-10, RE-APPLY the LAUNCH-ANGLE fix): 0.60 launched at
             lin_vel_x = [0.0, 0.0]       # repurposed: landing dx (m). Stage 1 = land in place.
             lin_vel_y = [0.0, 0.0]       # repurposed: landing dy (m). Stage 1 = land in place.
             ang_vel_yaw = [0.0, 0.0]
@@ -553,7 +561,7 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
         # the pre-discovery policy a cheap basin. Set it back to 0.30 only together with an honest,
         # batch-weighted discovery latch of its own (see _squat_gate_scale).
         squat_gate_floor = 0.0
-        landing_real_jump_min_peak = 0.35   # 0.40 -> 0.35 (2026-09-16): follows jump_height [0.35,0.45], peak ~0.43
+        landing_real_jump_min_peak = 0.40   # back to 0.40 with jump_height [0.40, 0.50] (2026-09-18)
         # [prior] peak gate for the landing_position reward
                                             # (omnijump squat settles ~0.31, real jump peaks ~0.56)
         landing_buffer_steps = 150          # was 25 (=0.125s, inherited). A jump only "finishes" (success
@@ -586,7 +594,7 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
         # Force False here so the airborne-only gate actually takes effect (yaw damp in the air only, as
         # intended). The linear-velocity reward that also reads this flag is weight 0, so this is a no-op there.
         tracking_linear_velocity_all_time = False
-        projected_landing_min_height = 0.35 # 0.40 -> 0.35 (2026-09-16, with jump_height [0.35,0.45]): at peak ~0.43
+        projected_landing_min_height = 0.40 # back to 0.40 with jump_height [0.40, 0.50] (2026-09-18)
                                             # a 0.40 gate leaves almost no payment window above it.
                                             # [prior] instantaneous height gate for the DENSE projected_landing:
                                             # blocks the legs-tucked sprawl farm (body ~0.13, feet off ground)
@@ -705,7 +713,7 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
         # same checkpoint, evaluated deterministically, flew 0.540 m at command 0.5 with hit 0.74 and a clean
         # 2.18 m/s / 44.7 deg launch. keep_s1 never tripped it because it peaked at ~0.49; these runs peak
         # lower precisely because the spawn drop is being removed. 0.33 sits just under the lowest command.
-        successful_jump_min_peak_height = 0.33  # [prior] 0.40, and 0.30 before that
+        successful_jump_min_peak_height = 0.38  # just under the lowest height command (0.40), see above
                                                 # (= command floor 0.40; kills the low-jump shortcut)
         # REVERTED to True (the decouple test did NOT fix the collapse -- root was default_pos taxing the jump,
         # now fixed by converting default_pos to a reward). Back to the baseline: successful_jump =
