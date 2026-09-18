@@ -697,7 +697,15 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
                                             # 0.9 -> dof_pos_limits starts penalizing in the last 10% before the
                                             # hard URDF limit, so the over-deep squat stops before jamming the "wall".
         squat_gate_height = 0.24            # must dip base to <=0.24m (idle ~0.31) to unlock jump rewards
-        successful_jump_min_peak_height = 0.40  # was 0.30: a ~0.34 "low pop" no longer counts as success
+        # ⭐2026-09-18 0.40 -> 0.33: this gate was MISSED when jump_height dropped to [0.35, 0.45] for the
+        # launch angle (landing_real_jump_min_peak and projected_landing_min_height were moved to 0.35, this
+        # one was not). A correctly executed 0.35-height command peaks at 0.36-0.38 and was being scored as a
+        # FAILED jump, and since the episode ends on the first success-or-failure, every episode ended as a
+        # failure with no post-landing phase at all: st3_s2 read successful_jump_rate EXACTLY 0.000 while the
+        # same checkpoint, evaluated deterministically, flew 0.540 m at command 0.5 with hit 0.74 and a clean
+        # 2.18 m/s / 44.7 deg launch. keep_s1 never tripped it because it peaked at ~0.49; these runs peak
+        # lower precisely because the spawn drop is being removed. 0.33 sits just under the lowest command.
+        successful_jump_min_peak_height = 0.33  # [prior] 0.40, and 0.30 before that
                                                 # (= command floor 0.40; kills the low-jump shortcut)
         # REVERTED to True (the decouple test did NOT fix the collapse -- root was default_pos taxing the jump,
         # now fixed by converting default_pos to a reward). Back to the baseline: successful_jump =
