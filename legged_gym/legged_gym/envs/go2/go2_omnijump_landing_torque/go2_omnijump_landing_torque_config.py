@@ -561,7 +561,14 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
         # the pre-discovery policy a cheap basin. Set it back to 0.30 only together with an honest,
         # batch-weighted discovery latch of its own (see _squat_gate_scale).
         squat_gate_floor = 0.0
-        landing_real_jump_min_peak = 0.40   # back to 0.40 with jump_height [0.40, 0.50] (2026-09-18)
+        # ⭐2026-09-18 0.40 -> 0.30. These gates are all-or-nothing and st5_s1 drifted straight through them:
+        # a failed landing ends the episode, so with success around 0.5 a SMALLER jump is the better bet and
+        # the peak shrank 0.41 -> 0.36 -> 0.28 over iter 7000-8000; the moment it crossed the gate every jump
+        # reward vanished at once (squatQ 0.54 -> 0.000, peak -> 0, value_loss 0.105 -> 0.008) and it never
+        # jumped again. Noise was NOT involved (0.075-0.077 the whole time, under the 0.08 ceiling). At 0.30
+        # the drift still pays something and projected_peak, which rewards hitting the commanded 0.40-0.50,
+        # can pull the height back up instead of facing a cliff.
+        landing_real_jump_min_peak = 0.30
         # [prior] peak gate for the landing_position reward
                                             # (omnijump squat settles ~0.31, real jump peaks ~0.56)
         landing_buffer_steps = 150          # was 25 (=0.125s, inherited). A jump only "finishes" (success
@@ -594,7 +601,8 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
         # Force False here so the airborne-only gate actually takes effect (yaw damp in the air only, as
         # intended). The linear-velocity reward that also reads this flag is weight 0, so this is a no-op there.
         tracking_linear_velocity_all_time = False
-        projected_landing_min_height = 0.40 # back to 0.40 with jump_height [0.40, 0.50] (2026-09-18)
+        projected_landing_min_height = 0.30 # 0.40 -> 0.30 (2026-09-18), same cliff reasoning (this one also
+                                            # gates the dense forward_reach/projected_landing payment window)
                                             # a 0.40 gate leaves almost no payment window above it.
                                             # [prior] instantaneous height gate for the DENSE projected_landing:
                                             # blocks the legs-tucked sprawl farm (body ~0.13, feet off ground)
@@ -713,7 +721,7 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
         # same checkpoint, evaluated deterministically, flew 0.540 m at command 0.5 with hit 0.74 and a clean
         # 2.18 m/s / 44.7 deg launch. keep_s1 never tripped it because it peaked at ~0.49; these runs peak
         # lower precisely because the spawn drop is being removed. 0.33 sits just under the lowest command.
-        successful_jump_min_peak_height = 0.38  # just under the lowest height command (0.40), see above
+        successful_jump_min_peak_height = 0.30  # 0.38 -> 0.30 (2026-09-18), same cliff reasoning as landing_real_jump_min_peak
                                                 # (= command floor 0.40; kills the low-jump shortcut)
         # REVERTED to True (the decouple test did NOT fix the collapse -- root was default_pos taxing the jump,
         # now fixed by converting default_pos to a reward). Back to the baseline: successful_jump =
