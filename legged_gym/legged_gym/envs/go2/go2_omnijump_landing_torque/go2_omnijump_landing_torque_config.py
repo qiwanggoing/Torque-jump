@@ -898,7 +898,15 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
                                              # The earlier 20->10 HALVING was to curb a "precise-but-topple" farm -- but stability is now SOLVED
                                              # (succ 0.90 via landing-focused pitch), so the topple risk is gone and boosting AIM is safe; it now
                                              # drives the forward launch toward the target. Discovery-safe (gated on a real jump peak>=0.40).
-            projected_peak = 20.0            # 25 -> 20: modest OVERALL height trim. Run trend showed the policy FARMS height (projected_peak
+            # ⭐2026-09-19 PEAK_W hook. MEASURED on pdfloor20_s1/model_7000: the policy does NOT track the
+            # height command at all (commanded 0.40/0.45/0.50 -> actual peak 0.472/0.474/0.477, a 5 mm
+            # spread), so this term is not doing task work -- it is a flat "jumping high pays" drive, and
+            # it is what keeps the launch at 54.7 deg. An actuator-limit probe (scale one limit x1.2 and
+            # re-measure takeoff velocity) showed the policy itself flattens to 47 deg the moment calf
+            # torque is loosened, i.e. the angle is a REWARD preference, not a physical lock; at the
+            # measured |v| = 2.38 m/s, 54.7 -> 45 deg is +6% range for free. Gates are safe: the three
+            # peak gates sit at 0.30 and a 48 deg launch still peaks ~0.46.
+            projected_peak = float(os.environ.get("PEAK_W", "20.0"))  # 25 -> 20: modest OVERALL height trim. Run trend showed the policy FARMS height (projected_peak
                                              # rose 0.30->0.50 while landing accuracy collapsed to ~0 once far accuracy got hard) -- height is
                                              # the biggest reward AND paid regardless of landing, so the policy dumps accuracy for it. A mild 20%
                                              # cut eases that without gating. NOTE: an earlier 25->15 broke discovery, but that was BUNDLED with
