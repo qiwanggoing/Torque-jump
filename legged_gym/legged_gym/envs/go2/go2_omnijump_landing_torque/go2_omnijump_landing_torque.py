@@ -687,6 +687,9 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
         # REAL curriculum state (curriculum_pd_prior is unreliable): general_scale ramps 0->1 (warmup->x0),
         # pd_alpha = 0.5*(1-general_scale). Watch this to SEE when PD actually fades (target: 1.0 by ~iter1200).
         self.extras["episode"]["curriculum_general_scale"] = torch.tensor(float(self.general_scale), device=self.device)
+        # The ACTUAL blend weight after the pd_fade_floor (route A keeps it at pd_prior_weight*floor
+        # forever; route B decays it to 0). Read this, not general_scale, to tell the two arms apart.
+        self.extras["episode"]["curriculum_pd_alpha"] = self.pd_prior_alpha.float().mean().detach()
 
         # --- RELIABLE REACH (dx limit): the farthest commanded distance the policy still lands STABLY
         #     (hit + upright). Bin the finished jumps by commanded distance, keep a slow per-bin EMA of the

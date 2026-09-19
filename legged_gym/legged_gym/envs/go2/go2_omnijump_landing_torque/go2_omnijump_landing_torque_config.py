@@ -168,6 +168,21 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
         x0 = int(os.environ.get("GROWTH_X0", "70400"))  # DIAGNOSTIC HOOK 2026-09-17: PD fade end                 # 纯力矩 iter1000 (user). fade期 freq100->200 => step/iter 96->48,积分得【fade完成iter = 200 +
                                    # (x0-19200)/64】. 实测x0=48000->iter650✓,要iter1000 -> x0=70400. fade跨度iter200->1000(800iter).
 
+        # ⭐2026-09-19 PD FLOOR (user, route A "PD-assisted"). The fade normally ends at pd_alpha = 0
+        # (pure torque). pd_fade_floor stops it EARLY at a fraction of full PD authority:
+        #     pd_alpha = pd_prior_weight * max(pd_fade_floor, 1 - general_scale)
+        # pd_prior_weight = 0.5, so PD_FLOOR=0.2 -> pd_alpha decays 0.5 -> 0.10 and STAYS there
+        # (RL residual keeps 0.90). DEFAULT 0.0 = the committed pure-torque behaviour, unchanged.
+        # ⚠️ The floor is applied to pd_alpha ONLY, never to general_scale -- general_scale also drives
+        # control freq (100->200 Hz), the torque-limit scale and the stance-curriculum latch
+        # (general_scale >= 0.999). Capping general_scale would freeze all three at 80%.
+        # WHY: pure torque from scratch is impossible (run Sep19_07-38-26, SKIP_PD_FADE=1: 10000 iters,
+        # squatQ/succ/peak all 0.000) and the full fade to 0 costs distance. Route A keeps a 20% PD
+        # assist and optimises for reach; route B (PD_FLOOR=0) is the pure-torque control arm. Both
+        # must run with the SAME config+seed or the comparison is worthless -- a live PD prior inflates
+        # dx (see the pd-fade-inflates-dx finding).
+        pd_fade_floor = float(os.environ.get("PD_FLOOR", "0.0"))
+
     class commands(GO2OmniJumpCurriculumTorqueCfg.commands):
         # Landing-point task: commands[0:2] repurposed velocity -> landing displacement (m).
         # Stage 1 keeps the displacement at [0,0] (land in place == proven vertical jump).

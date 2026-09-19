@@ -324,8 +324,12 @@ class GO2OmniJumpCurriculumTorque(GO2OmniJumpTorque):
         self._update_default_joint_pd_target()
         action_scale, _, _ = self._control_curriculum_values()
 
-        # PD fades from pd_prior_weight → 0; RL grows from rl_prior_weight → 1.0
-        pd_alpha = float(self.cfg.control.pd_prior_weight) * max(0.0, 1.0 - float(self.general_scale))
+        # PD fades from pd_prior_weight → pd_prior_weight*pd_fade_floor; RL grows to 1 - that.
+        # pd_fade_floor = 0 (default) -> the original fade to pure torque. 0.2 -> the fade STOPS at 20%
+        # of full PD authority (pd_alpha 0.5 -> 0.10), i.e. a permanent PD assist. Floor applies to
+        # pd_alpha ONLY -- general_scale still reaches 1 (freq 200 Hz, full torque scale, stance latch).
+        pd_floor = max(0.0, min(1.0, float(getattr(self.cfg.growth, "pd_fade_floor", 0.0))))
+        pd_alpha = float(self.cfg.control.pd_prior_weight) * max(pd_floor, 1.0 - float(self.general_scale))
         rl_alpha = 1.0 - pd_alpha
         # NO PD IN THE LOAD PHASE (2026-09-17). The PD prior is a phase-scheduled keyframe reference whose
         # LOAD keyframe is the squat, so while it is alive the crouch is done FOR the policy -- which is why
