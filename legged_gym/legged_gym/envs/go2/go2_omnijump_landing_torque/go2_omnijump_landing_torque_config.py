@@ -251,7 +251,13 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
         # stages. The two-stage version was written first ([0.3,0.6] -> [0.6,1.0]) and dropped: reach is ~0.58,
         # so stage B would have made every command unreachable in a single step -- exactly the cliff that
         # killed advcurr_hist / sd02_hist. See dx_floor_* below and _maybe_raise_dx_floor.
-        landing_disp_x_stage2 = [0.0, 1.0]
+        # ⭐2026-09-19 DX_MIN (user): cut the trivial near commands out of the draw. With the rising floor
+        # parked at 0.000 for every run so far, dx is drawn UNIFORMLY from this range -- so ~30% of every
+        # batch was a 0-0.3 m command the policy already lands at will, propping up the average hit rate
+        # (0.16-0.19) while the far band is never hit (landing_farband_hit_smooth = 0.000 through 5500
+        # iters of pdfloor20_s1). DX_MIN=0.3 spends that third of the batch on distances that are actually
+        # hard. DEFAULT 0.0 = unchanged.
+        landing_disp_x_stage2 = [float(os.environ.get("DX_MIN", "0.0")), 1.0]
         dx_stage_b_range = [0.6, 1.0]           # STAGE B -- opened by the gate below (user 2026-09-16)
         dx_stage_auto = False                   # OFF: superseded by the rising-floor curriculum (dx_floor_*)
                                                 # [prior] OFF while landing_dx_curriculum is on -- the two would both
@@ -267,8 +273,11 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
         # frontier, converging on the farthest reachable distance. Self-limiting: the floor can only move
         # while the band above it is still being hit, so it stalls just under the reach instead of walking
         # into the "nothing is reachable" cliff. The far commands stay in the band throughout.
-        dx_floor_curriculum = True
-        dx_floor_start = 0.0                    # commands start at the full [0.0, 1.0]
+        # DX_FLOOR_CURR=0 turns the rising floor off: with a fixed [DX_MIN, 1.0] range the floor would
+        # both score a band that gets no samples and (once it ever advanced) redraw dx_floor_keep_near_frac
+        # of the batch from [0, floor] -- i.e. put the near commands DX_MIN just removed straight back.
+        dx_floor_curriculum = bool(int(os.environ.get("DX_FLOOR_CURR", "1")))
+        dx_floor_start = float(os.environ.get("DX_MIN", "0.0"))   # the floor starts where the draw starts
         dx_floor_step = 0.10                    # delete this much off the bottom per advance
         dx_floor_band = 0.10                    # the bottom band whose hit rate is scored
         dx_floor_hit_gate = 0.85                # band hit rate (landing err <= tol AND a real jump) to advance
