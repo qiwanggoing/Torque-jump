@@ -1199,7 +1199,18 @@ class GO2OmniJumpTorque(GO2Torque):
         projected = base_height + torch.clamp(vz, min=0.0) ** 2 / (2.0 * 9.81)
         target = self.commands[:, 3]
         sigma = max(float(getattr(self.cfg.rewards, "projected_peak_sigma", 0.05)), 1e-4)
-        reward = torch.exp(-torch.square(projected - target) / sigma)
+        # ONE-SIDED (2026-09-20): with the two-sided kernel this term is a height CAP -- exceeding the
+        # commanded apex is punished exactly like falling short, and the apex is what a longer jump needs
+        # (45 deg ballistics: rise = range/4). Measured: peak sat at 0.474 for commands 0.40/0.45/0.50
+        # (5 mm spread) because at sigma=0.05 the worst command in the [0.40,0.50] range still pays 90%,
+        # and halving the weight (PEAK_W 20 -> 12) moved reach 0.61 -> 0.82 m. One-sided keeps the FLOOR
+        # (jump at least this high = the discovery driver that broke when this term was cut to 15) and
+        # drops the ceiling.
+        if bool(getattr(self.cfg.rewards, "projected_peak_one_sided", False)):
+            err = torch.clamp(target - projected, min=0.0)
+        else:
+            err = projected - target
+        reward = torch.exp(-torch.square(err) / sigma)
         return ascending_f * reward
 
     def _reward_takeoff_impulse(self):

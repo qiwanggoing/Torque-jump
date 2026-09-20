@@ -157,8 +157,13 @@ def main():
         float(env.cfg.growth.warmup_steps), float(env.cfg.growth.x0),
         float(env.start_freq), float(env.max_freq),
         float(env.dt), int(train_cfg.runner.num_steps_per_env))))
-    _pd_a = float(env.cfg.control.pd_prior_weight) * max(0.0, 1.0 - min(1.0, max(0.0,
-        (REPLAY_STEP - float(env.cfg.growth.warmup_steps)) / max(1.0, float(env.cfg.growth.x0) - float(env.cfg.growth.warmup_steps)))))
+    # MUST match the env's own formula, INCLUDING pd_fade_floor (PD_FLOOR): without the floor term this
+    # print said "pd_alpha=0.000" for a PD_FLOOR=0.2 model that is actually running at 0.100, which reads
+    # exactly like "the PD scaffold is off" when it is not.
+    _gs = min(1.0, max(0.0, (REPLAY_STEP - float(env.cfg.growth.warmup_steps))
+                       / max(1.0, float(env.cfg.growth.x0) - float(env.cfg.growth.warmup_steps))))
+    _floor = max(0.0, min(1.0, float(getattr(env.cfg.growth, "pd_fade_floor", 0.0))))
+    _pd_a = float(env.cfg.control.pd_prior_weight) * max(_floor, 1.0 - _gs)
     print(f"[play] {os.path.basename(_resume_path)} -> iter {ckpt_iter}: step_count={REPLAY_STEP} "
           f"(non-linear fade-correct), replay pd_alpha={_pd_a:.3f}")
 

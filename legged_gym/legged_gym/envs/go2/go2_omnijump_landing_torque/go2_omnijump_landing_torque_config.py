@@ -625,6 +625,9 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
         # Force False here so the airborne-only gate actually takes effect (yaw damp in the air only, as
         # intended). The linear-velocity reward that also reads this flag is weight 0, so this is a no-op there.
         tracking_linear_velocity_all_time = False
+        # PEAK_ONESIDE=1 -> projected_peak only penalizes UNDER-shooting the commanded apex (a floor),
+        # never exceeding it (a cap). The cap is what pinned peak at 0.474 for every command.
+        projected_peak_one_sided = bool(int(os.environ.get("PEAK_ONESIDE", "0")))
         projected_landing_min_height = 0.30 # 0.40 -> 0.30 (2026-09-18), same cliff reasoning (this one also
                                             # gates the dense forward_reach/projected_landing payment window)
                                             # a 0.40 gate leaves almost no payment window above it.
