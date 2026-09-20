@@ -772,6 +772,9 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
         # The jump itself keeps the base default_pos weight (no extra tax). 1.0 = off. Read in _reward_default_pos,
         # gated post-discovery on _takeoff_omega_on (succ_ema>=0.80). WATCH noise_std (default_pos -0.7 ran away
         # once); if the stand still sprawls, raise; if discovery/jumping suffers, lower toward 1.0.
+        # STAND_ANCHOR=1 -> actually APPLY default_pos_prejump_scale in the landing override (it was dead
+        # config: the override ignored it, so nothing held the pre-jump stance). Default 0 = unchanged.
+        default_pos_prejump_apply = bool(int(os.environ.get("STAND_ANCHOR", "0")))
         default_pos_prejump_scale = 3.0
         # stand_no_takeoff penalty: ignore the first N env-steps of each episode so the SPAWN drop (init base
         # 0.42 -> natural rest ~0.30 free-fall, not a hop) is not penalized; the time-based jump reflex (the

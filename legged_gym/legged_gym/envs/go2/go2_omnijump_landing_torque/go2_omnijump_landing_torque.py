@@ -1208,6 +1208,16 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
         # q_ground to launch) and the squat-DOWN (mid-fold). NOTE: memory says -0.7 once caused noise runaway --
         # watch noise_std; raise back toward -0.7/-1.0 if the pose anchor gets too loose.
         l1 = torch.sum(torch.abs(self.dof_pos - self.default_joint_pd_target), dim=1)
+        # ⭐2026-09-20 PRE-JUMP STANCE (STAND_ANCHOR). The pose target is already the STANDING pose while
+        # not jumping (_update_default_joint_pd_target: use_default_pose -> default_dof_pos), but at -0.5
+        # it does not hold the stance: measured on dx03_s1/model_15000 the base sinks 0.348 -> 0.095 m over
+        # the 120-substep arming delay, i.e. it lies down and jumps out of a fully folded pose. The base
+        # class has a default_pos_prejump_scale knob (config: 3.0) for exactly this, but THIS override --
+        # the one the landing task actually runs -- never applied it. Scale the penalty up only while NOT
+        # in a jump cycle: a real stance anchor before the jump, zero extra tax on the jump itself.
+        scale = float(getattr(self.cfg.rewards, "default_pos_prejump_scale", 1.0))
+        if scale != 1.0 and bool(getattr(self.cfg.rewards, "default_pos_prejump_apply", False)):
+            l1 = torch.where(~self.jumping_state, l1 * scale, l1)
         pushoff = self.jumping_state & (~self.has_taken_off) & (self.root_states[:, 9] > 0.0)
         squat_down = self.jumping_state & (~self.has_taken_off) & (~self._squat_deep_enough())
         return torch.where(pushoff | squat_down, torch.zeros_like(l1), l1)
