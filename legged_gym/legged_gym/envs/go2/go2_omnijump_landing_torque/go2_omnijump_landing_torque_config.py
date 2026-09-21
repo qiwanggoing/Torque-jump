@@ -123,6 +123,18 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
         # REQUIRES A RETRAIN: old checkpoints were trained against the walls.
         official_dof_pos_limits = True
 
+        # ⭐2026-09-21 BASE_PENALTY=1: move the trunk from the TERMINATE list to the PENALIZE list, so a
+        # belly touch costs reward (through the existing `collision` term, -3.0) instead of ending the
+        # episode. WHY ASK: the no-curriculum probe at 3000 iters ends 100% of its episodes on trunk
+        # contact -- on the jump command it TUCKS its legs instead of pushing, free-falls 0.285 -> 0.093 m
+        # and slams the trunk at a median 1580 N, so it never experiences anything after a failed jump.
+        # ⚠️ The contacts are real slams (only 1% under 50 N), not brushes, and removing the hard stop
+        # re-opens the face-plant / splay basin this project has been bitten by twice (@3000, @4900), so
+        # this is an EXPERIMENT, not a default. BASE_PENALTY=0 (default) keeps the committed behaviour.
+        if bool(int(os.environ.get("BASE_PENALTY", "0"))):
+            penalize_contacts_on = ["thigh", "calf", "hip", "base"]
+            terminate_after_contacts_on = []
+
     class domain_rand(GO2OmniJumpCurriculumTorqueCfg.domain_rand):
         # RE-CENTER base-mass DR on the URDF-nominal robot (2026-07-05). The inherited range
         # [-1, +5] (mean +2kg) was HEAVY-BIASED: the mass-BLIND policy (mass not in obs) tunes ONE
