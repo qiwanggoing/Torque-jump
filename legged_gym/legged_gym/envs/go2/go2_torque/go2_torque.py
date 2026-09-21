@@ -203,16 +203,27 @@ class GO2Torque(LeggedRobot):
                                        np.random.uniform(com_rng_y[0], com_rng_y[1]),
                                        np.random.uniform(com_rng_z[0], com_rng_z[1])])
 
-            # Add a point mass to the base
-            props[0].mass += rnd_mass
+            # Add a point mass to the base.
+            # ⚠️2026-09-21 BUG FIX (sim2real). Two errors here doubled the trunk's rotational inertia in
+            # EVERY randomized env, i.e. in all training:
+            #   1) `props[0].inertia.x += ...` ADDED the recomputed TOTAL inertia on top of the existing
+            #      one instead of replacing it. Measured with added_mass_range=[0,0]: Ixx/Iyy/Izz went
+            #      0.02448/0.09808/0.10700 -> 0.04896/0.19615/0.21400, exactly x2.00.
+            #   2) update_inertia() was handed props[0].mass AFTER the point mass had been added, so the
+            #      point mass was counted twice in the composite.
+            # The real robot has the nominal inertia, and so does any eval with randomize_base_mass off --
+            # which is why play_landing at nominal mass could not complete a single jump with a policy that
+            # trained fine (it was a different robot: half the trunk inertia it learned on).
+            mass_prev = props[0].mass
             com_prev = np.array([props[0].com.x, props[0].com.y, props[0].com.z])
             inertia_prev = np.array([[props[0].inertia.x.x, props[0].inertia.x.y, props[0].inertia.x.z],
                                      [props[0].inertia.y.x, props[0].inertia.y.y, props[0].inertia.y.z],
                                      [props[0].inertia.z.x, props[0].inertia.z.y, props[0].inertia.z.z]])
-            intertia, com = update_inertia(inertia_prev, props[0].mass, com_prev, rnd_mass, point_mass_pos)
-            props[0].inertia.x += gymapi.Vec3(intertia[0, 0], intertia[0, 1], intertia[0, 2])
-            props[0].inertia.y += gymapi.Vec3(intertia[1, 0], intertia[1, 1], intertia[1, 2])
-            props[0].inertia.z += gymapi.Vec3(intertia[2, 0], intertia[2, 1], intertia[2, 2])
+            props[0].mass += rnd_mass
+            intertia, com = update_inertia(inertia_prev, mass_prev, com_prev, rnd_mass, point_mass_pos)
+            props[0].inertia.x = gymapi.Vec3(intertia[0, 0], intertia[0, 1], intertia[0, 2])
+            props[0].inertia.y = gymapi.Vec3(intertia[1, 0], intertia[1, 1], intertia[1, 2])
+            props[0].inertia.z = gymapi.Vec3(intertia[2, 0], intertia[2, 1], intertia[2, 2])
             props[0].com = gymapi.Vec3(com[0], com[1], com[2])
             for i in range(len(props)):
                 props[i].mass += np.random.uniform(rng[0] / 16, rng[1] / 16)
