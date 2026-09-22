@@ -1021,7 +1021,13 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
                                              # complement to clean_landing for the post-touchdown shuffle (lifting a foot
                                              # in the settle now costs this). MODERATE: a big value also pays the pre-jump
                                              # STAND -> could make "don't jump" comfy (discovery risk). Watch jump_flight_rate.
-            landing_stability = 1.0          # RE-ENABLED to BRAKE the landing momentum: per-step trace showed the
+            # ⭐2026-09-22 LAND_* hooks (user: "加强 landing stability"). Measured across the finished
+            # inertiafix_s1 run, landing quality degrades monotonically while distance grows: time to
+            # stand again after touchdown 0.49 s (ckpt 8600) -> 1.26 s (15000), post-landing drift
+            # 0.22 -> 0.42 m, lowest base height after touchdown 0.166 -> 0.110. The reason is the
+            # balance: landing_stability earns 1.1% of the positive reward and landing_impact is OFF,
+            # while the distance terms earn >50% -- so a harder landing is essentially free.
+            landing_stability = float(os.environ.get("LAND_STAB_W", "1.0"))          # RE-ENABLED to BRAKE the landing momentum: per-step trace showed the
                                              # robot lands at vx~1.3 m/s, bounces (all feet off, +0.06m) and coasts
                                              # ~0.30m forward to a stop (the "post-landing slide"). This rewards LOW
                                              # base velocity during the landing buffer -> absorb/stop on the spot.
@@ -1056,7 +1062,7 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
             #      (strengthened below); landing-POINT by projected_landing + landing_position (kept / revived).
             joint_angle_aerial = 0.0
             joint_angle_prelanding = 0.0
-            joint_angle_landing = 0.0
+            joint_angle_landing = float(os.environ.get("LAND_POSE_W", "0.0"))   # pose guidance back to the ground stance
             # ---- post-PD pose-holding (rear legs drifted once PD faded to 0) ----
             default_pos = -0.5              # HALVED penalty (was -1.0). At -1.0 it was the DOMINANT term (-0.81/s =
                                              # 57% of ALL penalties) and TAXED the jump (a jump deviates from the pose
@@ -1097,7 +1103,8 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
                                              # Fix for the over-deep squat (base ~0.13) jamming the knees to the
                                              # "wall" + stalling, which also dropped peak. Stops the dip ~10% short
                                              # of the hard limit -> smoother push, should recover height. Tunable.
-            landing_impact = 0.0             # DISABLED (user: "没什么用"). Was -2.0 (Olsen soft-impact). Landing
+            landing_impact = -float(os.environ.get("LAND_IMPACT_W", "0.0"))   # positive magnitude x negative scale
+            _landing_impact_note = 0.0       # DISABLED (user: "没什么用"). Was -2.0 (Olsen soft-impact). Landing
                                              # cushion now handled by landing_stability (brake, sigma fix) + the
                                              # touchdown dynamics; this term wasn't earning its keep. (Aside: it also
                                              # risks suppressing height -- softer impact = jump lower -- which fights
