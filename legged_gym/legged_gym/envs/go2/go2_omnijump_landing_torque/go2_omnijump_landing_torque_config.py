@@ -269,7 +269,14 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
         # (0.16-0.19) while the far band is never hit (landing_farband_hit_smooth = 0.000 through 5500
         # iters of pdfloor20_s1). DX_MIN=0.3 spends that third of the batch on distances that are actually
         # hard. DEFAULT 0.0 = unchanged.
-        landing_disp_x_stage2 = [float(os.environ.get("DX_MIN", "0.0")), 1.0]
+        # ⭐2026-09-22 DX_MAX (user): reproduce the 4600-era command scheme. That line trained on a FIXED
+        # [0.5, 1.5] range with no curriculum -- every command far, the top half beyond reach -- and it is
+        # the single biggest reach gain this project ever measured (deterministic reach 0.72 -> 0.95 m,
+        # "0.8 m was curriculum parking, not a physical ceiling"). The mechanism: when every command is out
+        # of reach, "try to go farther" always has a gradient; with [0.3, 1.0] half the commands are already
+        # satisfied, so that pressure disappears once they are hit.
+        landing_disp_x_stage2 = [float(os.environ.get("DX_MIN", "0.0")),
+                                 float(os.environ.get("DX_MAX", "1.0"))]
         dx_stage_b_range = [0.6, 1.0]           # STAGE B -- opened by the gate below (user 2026-09-16)
         dx_stage_auto = False                   # OFF: superseded by the rising-floor curriculum (dx_floor_*)
                                                 # [prior] OFF while landing_dx_curriculum is on -- the two would both
