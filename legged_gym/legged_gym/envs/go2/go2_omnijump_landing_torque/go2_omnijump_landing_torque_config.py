@@ -771,6 +771,11 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
         # ⭐2026-09-18 0.05 (inherited default) -> 0.03. successful_jump is now 2500, and with the peak gate
         # softened to 0.30 a low hop would still collect exp(-(0.14)^2/0.05) = 68% of the bonus, i.e. the
         # bigger success reward would have paid for SMALL safe jumps. At 0.03 that drops to 37%.
+        # SUCC_LAND_SIGMA > 0 multiplies the successful_jump bonus by exp(-landing_err^2 / sigma^2), so the
+        # one big sparse "the jump worked" reward also requires landing ON the commanded point. 0 = off
+        # (committed behaviour). 0.30 costs a 0.34 m miss ~72% of the bonus and a 0.10 m miss only ~11%.
+        success_landing_sigma = float(os.environ.get("SUCC_LAND_SIGMA", "0.0"))
+        success_landing_after_discovery = True
         success_height_sigma = 0.03
                                                 # (= command floor 0.40; kills the low-jump shortcut)
         # REVERTED to True (the decouple test did NOT fix the collapse -- root was default_pos taxing the jump,

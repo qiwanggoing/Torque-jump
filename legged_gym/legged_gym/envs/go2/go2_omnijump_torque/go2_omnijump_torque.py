@@ -771,6 +771,25 @@ class GO2OmniJumpTorque(GO2Torque):
             success_velocity_score = self._get_successful_jump_velocity_score()
             if not getattr(self.cfg.rewards, "success_use_velocity_score", False):
                 success_velocity_score = torch.ones_like(success_velocity_score)
+            # ⭐2026-09-22 LANDING ACCURACY IN THE SUCCESS BONUS (user). successful_jump is the ONE sparse
+            # "the whole jump worked" reward (weight 1500, one shot per completed jump), and it did not
+            # look at WHERE the robot landed: success x height only. The inherited velocity score cannot
+            # substitute -- it compares avg_vel (m/s) with commands[:,:2], which in this task is a landing
+            # DISPLACEMENT in metres, so it is a near-constant.
+            # Measured on inertiafix_s1/model_8600: commands 0.35 -> 1.05 produced 0.567 -> 0.688 m of
+            # flight (slope 0.17 instead of 1.0) -- the policy jumps ~0.65 m no matter what is asked and
+            # collects the bonus every time. Multiplying the bonus by a landing-accuracy kernel makes the
+            # biggest sparse reward mean what its name says.
+            land_sigma = float(getattr(self.cfg.rewards, "success_landing_sigma", 0.0))
+            if land_sigma > 1e-6 and hasattr(self, "landing_target"):
+                land_err = torch.norm(self.root_states[:, :2] - self.landing_target[:, :2], dim=1)
+                land_score = torch.exp(-torch.square(land_err) / (land_sigma ** 2))
+                # DISCOVERY-SAFE: before the success latch opens, early jumps land anywhere and this would
+                # zero out the only "you did it" signal. Same gate as grounded_jump / the omega damping.
+                if getattr(self.cfg.rewards, "success_landing_after_discovery", True) and not getattr(
+                        self, "_takeoff_omega_on", False):
+                    land_score = torch.ones_like(land_score)
+                success_velocity_score = success_velocity_score * land_score
             combined_score = height_score * success_velocity_score
 
             self.pending_velocity_score = torch.where(
