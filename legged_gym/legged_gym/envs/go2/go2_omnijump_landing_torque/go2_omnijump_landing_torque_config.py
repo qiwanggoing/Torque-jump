@@ -88,7 +88,12 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
         # a SHORT stack of PRIVILEGED frames instead (same c_frame_stack=3 as the working my_go2_jump).
         #   priv frame(121) = stacked_frame(49) + extras(32) + priv_extra(40)
         #   priv_extra(40)  = root_z1 + base_lin_vel3 + feet_pos_local12 + feet_vel12 + feet_forces12
-        c_frame_stack = 3
+        # DIAGNOSTIC HOOK (2026-09-24): C_STACK runs the symmetric-critic A/B from one code tree, same
+        # precedent as NET / PD_FLOOR. Default 3 keeps the trained configuration byte-identical.
+        # C_STACK=20 gives the critic the SAME history length as the actor while keeping its privileged
+        # frame content, i.e. critic obs = 121 x 20 = 2420. sym_loss only permutes the ACTOR observation
+        # (ppo.py builds obs_perm_mat from obs_permutation and never touches critic_obs), so this is safe.
+        c_frame_stack = int(os.environ.get("C_STACK", "3"))
         single_num_privileged_obs = num_stacked_frame + num_single_extras + 40      # 49+32+40 = 121
         num_privileged_obs = c_frame_stack * single_num_privileged_obs              # 3*121 = 363
 
