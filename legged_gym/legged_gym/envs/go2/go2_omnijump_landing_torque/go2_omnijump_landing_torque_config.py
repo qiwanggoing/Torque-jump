@@ -1223,6 +1223,15 @@ class GO2OmniJumpLandingTorqueCfgPPO(GO2OmniJumpCurriculumTorqueCfgPPO):
         # 0 -> ActorCritic never builds comp_head, comp_forward returns None, and the runner skips
         # feeding env.comp_torque. Was 12 (a deterministic PD-mimic head, never part of the PPO action).
         aux_head_dim = 0
+        # DIAGNOSTIC HOOK (2026-09-23): NET lets one code tree run the network-width A/B without a second
+        # checkout, same precedent as PD_FLOOR / STANCE_CURR. The inherited width is [256,256,256], which
+        # is the narrowest first layer of the three code bases this work builds on ([512,256,128] in the
+        # legged_gym base, in my_go2_jump and in Omni-Jump) while carrying the LARGEST observation (1012
+        # against 600). Default keeps the trained configuration byte-identical; NET=512,256,128 tests it.
+        _net = os.environ.get("NET", "")
+        if _net:
+            actor_hidden_dims = [int(x) for x in _net.split(",")]
+            critic_hidden_dims = [int(x) for x in _net.split(",")]
 
     class algorithm(GO2OmniJumpCurriculumTorqueCfgPPO.algorithm):
         # sym_loss BACK ON (2026-08-21) -- Step 1b, and it is a BUG FIX, not a tuning knob.
