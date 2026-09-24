@@ -145,6 +145,39 @@ def main():
     ckpt_iter = int(os.path.basename(_resume_path).replace('model_', '').replace('.pt', ''))
     # REPLAY_STEP (= train's step_count at ckpt_iter) computed AFTER make_env — needs env.dt/start_freq/max_freq.
 
+    # ARCHITECTURE FROM THE CHECKPOINT (2026-09-24). The layer widths and the critic's history length are
+    # written into the weight shapes, so read them from the file instead of relying on the caller to pass
+    # the matching NET / C_STACK. Getting either wrong used to fail deep inside load_state_dict with a wall
+    # of size-mismatch errors; now a variant checkpoint just plays.
+    try:
+        import torch as _t
+        _sd = _t.load(_resume_path, map_location='cpu')['model_state_dict']
+
+        def _dims(prefix):
+            idx = sorted({int(k.split('.')[1]) for k in _sd if k.startswith(prefix + '.') and k.endswith('.weight')})
+            return [int(_sd['%s.%d.weight' % (prefix, i)].shape[0]) for i in idx[:-1]], \
+                   int(_sd['%s.%d.weight' % (prefix, idx[0])].shape[1])
+        _a_dims, _a_in = _dims('actor')
+        _c_dims, _c_in = _dims('critic')
+        if list(train_cfg.policy.actor_hidden_dims) != _a_dims:
+            print(f"[play] actor hidden dims {list(train_cfg.policy.actor_hidden_dims)} -> {_a_dims} (from checkpoint)")
+            train_cfg.policy.actor_hidden_dims = _a_dims
+        if list(train_cfg.policy.critic_hidden_dims) != _c_dims:
+            print(f"[play] critic hidden dims {list(train_cfg.policy.critic_hidden_dims)} -> {_c_dims} (from checkpoint)")
+            train_cfg.policy.critic_hidden_dims = _c_dims
+        _per = int(getattr(env_cfg.env, 'single_num_privileged_obs', 0))
+        if _per > 0 and _c_in % _per == 0:
+            _cs = _c_in // _per
+            if int(getattr(env_cfg.env, 'c_frame_stack', 0)) != _cs:
+                print(f"[play] c_frame_stack {env_cfg.env.c_frame_stack} -> {_cs} (from checkpoint)")
+                env_cfg.env.c_frame_stack = _cs
+                env_cfg.env.num_privileged_obs = _cs * _per
+        if _a_in != int(env_cfg.env.num_observations):
+            print(f"[play] WARNING: checkpoint actor expects {_a_in} observations, env builds "
+                  f"{env_cfg.env.num_observations} -- this one really is a different task/layout")
+    except Exception as _e:
+        print(f"[play] could not read the architecture from the checkpoint ({_e}); using the config as-is")
+
     env, _ = task_registry.make_env(name=args.task, args=args, env_cfg=env_cfg)
     ppo_runner, _ = task_registry.make_alg_runner(env=env, name=args.task, args=args, train_cfg=train_cfg)
     policy = ppo_runner.get_inference_policy(device=env.device)

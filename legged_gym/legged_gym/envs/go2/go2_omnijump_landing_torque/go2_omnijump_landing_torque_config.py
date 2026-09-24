@@ -500,7 +500,15 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
             # drop the peak is only ~0.44 (keep_s1 peaked 0.49 and landed 0.98 of its jumps), the arc is too
             # flat to get the legs out, and with success impossible the landing skill never trains at all --
             # both st4 runs then died as the drop ramped away (peak 0.40 -> 0.13 by iter 1800).
-            jump_height = [0.40, 0.50]   # [prior] 0.60 -> 0.50 (2026-07-10, RE-APPLY the LAUNCH-ANGLE fix): 0.60 launched at
+            # ⭐2026-09-24 HFIX. MEASURED on inertiafix_s1/model_13000: sweeping the height command from
+            # 0.35 to 0.60 m moves the achieved peak by 5 mm (0.554 -> 0.559) and the launch angle by
+            # 0.4 deg, i.e. the policy ignores it -- the actuators are saturated and there is one
+            # achievable trajectory per commanded distance. HFIX pins the command to a constant so it
+            # carries no information, which is what "the task is a landing point, not a height" means,
+            # without disturbing the observation layout or the mirror permutation. Unset = old range.
+            _hfix = os.environ.get("HFIX", "")
+            jump_height = ([float(_hfix), float(_hfix)] if _hfix else
+                           [0.40, 0.50])   # [prior] 0.60 -> 0.50 (2026-07-10, RE-APPLY the LAUNCH-ANGLE fix): 0.60 launched at
             lin_vel_x = [0.0, 0.0]       # repurposed: landing dx (m). Stage 1 = land in place.
             lin_vel_y = [0.0, 0.0]       # repurposed: landing dy (m). Stage 1 = land in place.
             ang_vel_yaw = [0.0, 0.0]
