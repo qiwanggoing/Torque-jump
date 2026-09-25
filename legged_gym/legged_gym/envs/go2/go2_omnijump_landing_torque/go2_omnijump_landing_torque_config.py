@@ -593,6 +593,8 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
         # require_squat_before_takeoff a missed hold means no takeoff at all. The stance curriculum is the
         # thing that teaches the policy to own the crouch now.
         pd_off_in_load = bool(int(os.environ.get("PD_OFF_LOAD", "0")))
+        # SUCCDIST_CAP=1 -> successful_distance stops paying past the commanded distance (see the reward).
+        successful_distance_clip_cmd = bool(int(os.environ.get("SUCCDIST_CAP", "0")))
         squat_pay_after_qualified = bool(int(os.environ.get("SQUAT_PAY_HELD", "1")))
         jump_settle_lin_vel = 0.3          # m/s horizontal base speed below which the stance counts as settled
         jump_settle_ang_vel = 1.5          # rad/s roll+pitch rate ceiling for the same

@@ -1276,7 +1276,19 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
         if flown is None:
             return torch.zeros(self.num_envs, device=self.device)
         cap = float(getattr(self.cfg.rewards, "successful_distance_cap", 1.2))
-        return self.last_jump_success.float() * torch.clamp(flown, min=0.0, max=cap)
+        paid = torch.clamp(flown, min=0.0, max=cap)
+        # ⭐2026-09-25 CLIP AT THE COMMAND (SUCCDIST_CAP). The docstring above already says the payout is
+        # "clipped at the command so overshooting is not paid for" -- the code never did it. Measured
+        # consequence: last_jump_success carries NO landing-accuracy condition (success_landing_sigma is
+        # 0, so the land_score multiplier is skipped), so at a 0.30 m command a jump of 0.85 m collected
+        # 0.85 here while the correct 0.30 m jump collected 0.30. Overshooting a near command was worth
+        # +0.55 of the second-largest positive term and cost nothing, which is the standing incentive not
+        # to track. forward_reach already clips the same way (min(reach, cmd_dist)); this makes the two
+        # consistent and keeps the intended "as far as you can still land".
+        if bool(getattr(self.cfg.rewards, "successful_distance_clip_cmd", False)):
+            cmd_d = torch.norm(self.landing_target[:, :2] - self.takeoff_root_xy, dim=1)
+            paid = torch.minimum(paid, cmd_d)
+        return self.last_jump_success.float() * paid
 
     def _reward_stance_squat(self):
         # Pose-guided countermovement (GUIDE to the target, don't block cheats). The earlier
