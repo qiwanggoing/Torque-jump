@@ -1,4 +1,5 @@
 import numpy as np
+import os
 import torch
 from isaacgym.torch_utils import torch_rand_float
 
@@ -338,9 +339,40 @@ class GO2OmniJumpCurriculumTorque(GO2OmniJumpTorque):
         # stance never exposed this because the 0.42 m spawn drop did the crouch in every episode forever.
         # Zeroing pd_alpha for the load phase only (arming -> takeoff) means the policy owns the crouch from
         # iteration 0 and there is no handover cliff; standing, push, flight and landing keep their PD.
-        if bool(getattr(self.cfg.rewards, "pd_off_in_load", False)):
-            load = (self.jumping_state & (~self.has_taken_off)).float()
-            pd_alpha_t = torch.full((self.num_envs,), pd_alpha, device=self.device) * (1.0 - load)
+        # DIAGNOSTIC HOOK (2026-09-30): PD_OFF_PHASE suppresses the scaffold in ONE named phase so that a
+        # TRAINED policy can be re-evaluated without it, phase by phase. This answers "what is the scaffold
+        # doing for this policy now", which is a different question from "was the scaffold needed to learn
+        # the policy". Unset -> the pd_off_in_load path below is used unchanged, so training is unaffected.
+        # Per-env multipliers on pd_alpha. None everywhere -> the scalar path, bit-identical to the
+        # trained configuration. Three independent sources, composed:
+        #   PD_OFF_PHASE  diagnostic, suppresses the scaffold in one named phase (evaluation only);
+        #   pd_off_in_load  the older binary load-phase switch;
+        #   _load_pd_scale  the closed-loop load-phase withdrawal (see _update_load_pd_fade).
+        _mult = None
+        _off = str(os.environ.get("PD_OFF_PHASE", "")).strip().lower()
+        if _off:
+            jm, to = self.jumping_state, self.has_taken_off
+            sel = {
+                "stand":      (~jm),
+                "load":       (jm & (~to)),
+                "flight":     self.airborne,
+                "prelanding": getattr(self, "prelanding", torch.zeros_like(jm)),
+                "landing":    self.landing,
+                "all":        torch.ones_like(jm),
+            }.get(_off)
+            if sel is None:
+                raise ValueError("PD_OFF_PHASE must be one of stand/load/flight/prelanding/landing/all")
+            _mult = 1.0 - sel.float()
+        elif bool(getattr(self.cfg.rewards, "pd_off_in_load", False)):
+            _mult = 1.0 - (self.jumping_state & (~self.has_taken_off)).float()
+
+        _lf = float(getattr(self, "_load_pd_scale", 1.0))
+        if _lf < 1.0:
+            _load_m = 1.0 - (self.jumping_state & (~self.has_taken_off)).float() * (1.0 - _lf)
+            _mult = _load_m if _mult is None else _mult * _load_m
+
+        if _mult is not None:
+            pd_alpha_t = pd_alpha * _mult
             rl_alpha_t = 1.0 - pd_alpha_t
         else:
             pd_alpha_t = None
@@ -360,6 +392,17 @@ class GO2OmniJumpCurriculumTorque(GO2OmniJumpTorque):
         # PD_full (UNWEIGHTED): both the stabiliser head's BC target and the α-weighted scaffold.
         pd_full = self.p_gains * (self.default_joint_pd_target - self.dof_pos) - self.d_gains * self.dof_vel
 
+        # ⭐2026-09-30 BUGFIX. pd_alpha_t / rl_alpha_t used to be written ONLY into pd_prior_alpha /
+        # rl_prior_alpha, which are the observation and logging buffers -- they never reached the torque,
+        # which always used the SCALAR pd_alpha. So pd_off_in_load never suppressed any PD: it only told
+        # the policy (observation index 31) that the scaffold was off while the scaffold stayed on. The
+        # st2_s1 / st2_s2 runs recorded as "pd_off_in_load failed" therefore never ran the condition they
+        # were meant to test. Below, the per-env weights are used when they exist. With neither
+        # PD_OFF_PHASE nor pd_off_in_load set, pd_alpha_t is None and the scalars are used exactly as
+        # before, so the trained configuration is bit-identical.
+        _pd_w = pd_alpha_t.view(-1, 1) if pd_alpha_t is not None else pd_alpha
+        _rl_w = rl_alpha_t.view(-1, 1) if rl_alpha_t is not None else rl_alpha
+
         if getattr(self.cfg.control, "aux_stabilizer_head", False):
             # === Step H (final): τ_comp is a DETERMINISTIC PD-mimic FED BY THE RUNNER (env.comp_torque),
             # NOT a PPO action -> PPO over τ_jump (= `actions` here, 12-dim) is byte-identical to single-head.
@@ -369,24 +412,25 @@ class GO2OmniJumpCurriculumTorque(GO2OmniJumpTorque):
             #   └ (pd_w−pd_alpha)·τ_comp : stabiliser (BC→PD) TAKES OVER PD's share, 0 (early) → 0.5 (late).
             scale = self.current_torque_limit_scale
             pd_w = float(self.cfg.control.pd_prior_weight)          # 0.5
-            comp_weight = max(0.0, pd_w - pd_alpha)                  # 0 (early, gscale=0) -> pd_w (late)
-            tau_jump = residual_torques * rl_alpha * scale           # residual = actions·τlim (full τ_jump)
+            comp_weight = (torch.clamp(pd_w - _pd_w, min=0.0) if pd_alpha_t is not None
+                           else max(0.0, pd_w - pd_alpha))           # 0 (early, gscale=0) -> pd_w (late)
+            tau_jump = residual_torques * _rl_w * scale              # residual = actions·τlim (full τ_jump)
             comp_raw = getattr(self, "comp_torque", None)            # runner-fed τ_comp (raw action, 12-dim)
             if comp_raw is not None:
                 tau_comp = comp_raw * torques_limits_eff * scale
             else:
                 tau_comp = torch.zeros_like(tau_jump)                # reset step before runner sets it
             self.residual_torques_action = tau_jump
-            self.pd_prior_torques = pd_alpha * pd_full
-            self.torques_action = tau_jump + pd_alpha * pd_full + comp_weight * tau_comp
+            self.pd_prior_torques = _pd_w * pd_full
+            self.torques_action = tau_jump + _pd_w * pd_full + comp_weight * tau_comp
             # BC target in RAW-ACTION space (unit-consistent with comp_head): the raw action that
             # reproduces PD_full through τ_comp's own (torque_limit·scale) gain.
             denom = torch.clamp(torques_limits_eff * scale, min=1e-6)
             self.pd_action_target = (pd_full / denom).detach()
         else:
             # === original single-head convex blend (num_actions=12 tasks: UNCHANGED) ===
-            self.residual_torques_action = residual_torques * rl_alpha * self.current_torque_limit_scale
-            self.pd_prior_torques = pd_full * pd_alpha
+            self.residual_torques_action = residual_torques * _rl_w * self.current_torque_limit_scale
+            self.pd_prior_torques = pd_full * _pd_w
             self.torques_action = self.residual_torques_action + self.pd_prior_torques
         torques_limits = torch.clamp(self.torque_limits, min=1e-6).clone()
 
