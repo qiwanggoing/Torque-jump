@@ -588,6 +588,11 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
         ref_track_joint_sigma_land = float(os.environ.get("REF_SIG_JOINT_LAND", "2.0"))
         ref_track_height_sigma     = float(os.environ.get("REF_SIG_H", "0.02"))
         ref_track_ori_sigma        = float(os.environ.get("REF_SIG_ORI", "0.10"))
+        # VELOCITY kernel. Mean over the 3 axes, so the sigma reads as "per-axis velocity error at
+        # which the term falls to 1/e". 0.30 is a deliberate compromise: the reference's across-command
+        # spread at takeoff is 0.52 m/s of vx, so 0.30 still DISCRIMINATES commands (being one full
+        # command-step off scores 0.37) while keeping gradient for a policy that is 1 m/s off (0.025).
+        ref_track_vel_sigma        = float(os.environ.get("REF_SIG_VEL", "0.30"))
         stand_still_lin_sigma = 0.03
         stand_still_ang_sigma = 0.10
         landing_stability_lin_sigma = 2.0   # was effectively 0.25 (floored to ~0 for real landing |v|, no gradient)
@@ -1141,6 +1146,7 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
             ref_joint       = float(os.environ.get("REF_JOINT_W", "0.0"))
             ref_base_height = float(os.environ.get("REF_BASE_H_W", "0.0"))
             ref_base_ori    = float(os.environ.get("REF_ORI_W", "0.0"))
+            ref_base_vel    = float(os.environ.get("REF_VEL_W", "0.0"))   # the command-carrying term, see the reward
             stand_pose = float(os.environ.get("STAND_POSE_W", "0.0"))
             stand_still = float(os.environ.get("STAND_STILL_W", "0.0"))   # 0 = absent; the pre-jump sink fix
             landing_stability = float(os.environ.get("LAND_STAB_W", "1.0"))          # RE-ENABLED to BRAKE the landing momentum: per-step trace showed the

@@ -57,6 +57,7 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
         "ref_joint",            # commanded-reference tracking ("+tracking reward" arm); OFF unless REF_JOINT_W > 0
         "ref_base_height",      # ditto, base height;      OFF unless REF_BASE_H_W > 0
         "ref_base_ori",         # ditto, base pitch/roll;  OFF unless REF_ORI_W > 0
+        "ref_base_vel",         # ditto, base linear velocity -- the COMMAND-CARRYING one; OFF unless REF_VEL_W > 0
     }   # clean_landing REMOVED (detector never armed -> ~0). Post-landing slide handled by landing_stability
         # (brake momentum) + disable_jump_on_landing (no commanded re-jump); error obs is real-time (no obs-hold).
 
@@ -80,6 +81,7 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
         "ref_joint": 0,
         "ref_base_height": 0,
         "ref_base_ori": 0,
+        "ref_base_vel": 0,
         "foot_contact_sync": 0,
         "stance_squat": 0,
         "base_ang_vel_xy": 0,   # active from step 1 (curriculum disabled = one-stage)
@@ -954,7 +956,7 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
         # Read before _prepare_reward_function, so the zero scales have not been popped yet.
         _sc = self.cfg.rewards.scales
         _need_rew = any(abs(float(getattr(_sc, _n, 0.0))) > 0.0
-                        for _n in ("ref_joint", "ref_base_height", "ref_base_ori"))
+                        for _n in ("ref_joint", "ref_base_height", "ref_base_ori", "ref_base_vel"))
         if not (bool(getattr(self.cfg.env, "ref_preview_obs", False)) or _need_rew):
             return
         path = getattr(self.cfg.env, "ref_file", "") or os.path.join(
@@ -1081,6 +1083,32 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
         err = (torch.square(pitch - self.ref_base_table[cb, s, 4])
                + torch.square(roll - self.ref_base_table[cb, s, 5]))
         sig = max(float(getattr(self.cfg.rewards, "ref_track_ori_sigma", 0.10)), 1e-6)
+        return (self.ref_mode > 0).float() * torch.exp(-err / (sig * sig))
+
+    def _reward_ref_base_vel(self):
+        """Track the reference's base LINEAR VELOCITY. This is the term that carries the COMMAND.
+
+        Measured on commanded_ref_14700.npz, as across-command spread divided by over-jump range:
+        vx 0.294, vy 0.378, pitch 0.211, roll 0.335, q 0.121, z 0.077, vz 0.059 -- and in absolute
+        terms the takeoff vx spans 0.863 -> 1.903 m/s from cmd 0.30 to 0.90 (2.2x) while z spans
+        3.5 cm and vz 0.16 m/s. So height / joint / attitude tracking is almost command-INVARIANT:
+        on its own that set is fully satisfiable by a jump-IN-PLACE with the right crouch-extend-
+        attitude profile, which is cheaper than also travelling, so it COMPETES with distance
+        instead of guiding it. Oct07_21-09-14_reftrack_s1 (REF_BASE_H_W=12 / REF_ORI_W=12 /
+        REF_JOINT_W=8, no velocity term) did exactly that at iters 1000-1600: peak_height_error
+        0.029 and jump_landing_rate 0.992 matched the control, but clean_reach 0.138 vs 0.416 and
+        landing_hit_rate 0.000 vs 0.157 while its own mean_reward was the HIGHEST of the three runs.
+
+        WORLD frame, matching extract_ref.py, which recorded root_states[:, 7:10]. The lateral
+        command is [0, 0] for the whole run -- the [stage2] handover that would open dy to +-0.30
+        has never fired in any run, sstill6's full 20000 iterations included -- so the jump is
+        purely +x and the world frame is the consistent comparison.
+        """
+        if getattr(self, "ref_base_table", None) is None:
+            return torch.zeros(self.num_envs, device=self.device)
+        cb, s = self._ref_slot(0)
+        err = torch.mean(torch.square(self.root_states[:, 7:10] - self.ref_base_table[cb, s, 1:4]), dim=1)
+        sig = max(float(getattr(self.cfg.rewards, "ref_track_vel_sigma", 0.30)), 1e-6)
         return (self.ref_mode > 0).float() * torch.exp(-err / (sig * sig))
 
     def _post_physics_step_callback(self):
