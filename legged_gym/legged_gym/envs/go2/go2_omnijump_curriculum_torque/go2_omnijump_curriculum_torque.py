@@ -368,7 +368,14 @@ class GO2OmniJumpCurriculumTorque(GO2OmniJumpTorque):
 
         _lf = float(getattr(self, "_load_pd_scale", 1.0))
         if _lf < 1.0:
-            _load_m = 1.0 - (self.jumping_state & (~self.has_taken_off)).float() * (1.0 - _lf)
+            # scope=load  -> scale the LOAD phase only; every other phase keeps pd_alpha (= 0.10 at the
+            #                PD_FLOOR endpoint), so the controller is pure torque in one phase of five.
+            # scope=all   -> scale EVERY phase, so pd_alpha itself goes to a true 0 and the endpoint is
+            #                pure torque throughout. The floor is still what carries early training.
+            if str(getattr(self.cfg.rewards, "pd_fade_scope", "load")).strip().lower() == "all":
+                _load_m = torch.full_like(self.jumping_state, _lf, dtype=torch.float)
+            else:
+                _load_m = 1.0 - (self.jumping_state & (~self.has_taken_off)).float() * (1.0 - _lf)
             _mult = _load_m if _mult is None else _mult * _load_m
 
         if _mult is not None:

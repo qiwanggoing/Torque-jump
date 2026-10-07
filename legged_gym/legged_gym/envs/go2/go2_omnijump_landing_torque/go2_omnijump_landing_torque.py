@@ -7,10 +7,14 @@ observation, dense projected-landing + sparse landing-position rewards).
 """
 
 import math
+import os
+
+import numpy as np
 
 import torch
 from isaacgym.torch_utils import get_euler_xyz, quat_apply
 
+from legged_gym import LEGGED_GYM_ROOT_DIR
 from legged_gym.envs.go2.go2_omnijump_curriculum_torque.go2_omnijump_curriculum_torque import (
     GO2OmniJumpCurriculumTorque,
 )
@@ -25,12 +29,15 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
     # Inherit the proven jump-driving reward set and add the two landing terms.
     ACTIVE_REWARD_WHITELIST = GO2OmniJumpCurriculumTorque.ACTIVE_REWARD_WHITELIST | {
         "landing_position",
+        "stand_pose",      # positive STAND-phase posture+height guidance (discovery-gated inside the reward)
+        "stand_still",     # STAND-phase velocity brake, landing_stability with the gate swapped
         "projected_landing",
         "forward_reach",     # distance-progressive EFFORT reward (farther = more), decoupled from precise landing
         "successful_distance",  # distance paid ONLY on a completed, successful jump (see the reward)
         "foot_contact_sync",
         "stance_squat",
         "base_ang_vel_xy",   # landing stability: flight+landing roll/pitch ω damping
+        "base_yaw_rate",     # yaw-spin suppression during the push (see the reward); OFF unless YAW_RATE_W > 0
         "landing_impact",    # landing stability: touchdown force-spike penalty
         "pitch_level",       # landing stability: pitch-specific tilt penalty
         "dof_pos_limits",    # penalize folding joints to the limit (over-deep squat hits the "wall")
@@ -47,6 +54,9 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
                                 # messy still allowed) -- replaces the hard clean_takeoff_terminate that killed discovery.
         "stand_no_takeoff",     # HARD penalty: cmd4=0 (STAND) but all feet leave the ground (a hop) -> punish ->
                                 # cmd4 becomes the real stand/jump switch. Gated post-discovery + grace (skips spawn drop).
+        "ref_joint",            # commanded-reference tracking ("+tracking reward" arm); OFF unless REF_JOINT_W > 0
+        "ref_base_height",      # ditto, base height;      OFF unless REF_BASE_H_W > 0
+        "ref_base_ori",         # ditto, base pitch/roll;  OFF unless REF_ORI_W > 0
     }   # clean_landing REMOVED (detector never armed -> ~0). Post-landing slide handled by landing_stability
         # (brake momentum) + disable_jump_on_landing (no commanded re-jump); error obs is real-time (no obs-hold).
 
@@ -56,15 +66,24 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
     REWARD_START_STAGES = {
         **GO2OmniJumpCurriculumTorque.REWARD_START_STAGES,
         "landing_position": 1,
+        "stand_pose": 0,          # stage 0; the real gate is the succ-EMA latch inside the reward
+        "stand_still": 0,         # stage 0; same succ-EMA latch inside the reward
         "projected_landing": 1,
         "forward_reach": 1,
         "successful_distance": 1,
         "four_leg_push": 1,
         "clean_takeoff_bonus": 0,   # active from step 1 (soft positive bonus = discovery-safe)
         "stand_no_takeoff": 0,      # stage 0; real gate is _takeoff_omega_on inside the reward (post-discovery)
+        # stage 0, but the REAL gate is the reference clock: the ref_* rewards return 0 unless
+        # ref_mode > 0, i.e. only between the unload and the end of the landing window. A standing
+        # robot is never compared against a preparation-phase reference.
+        "ref_joint": 0,
+        "ref_base_height": 0,
+        "ref_base_ori": 0,
         "foot_contact_sync": 0,
         "stance_squat": 0,
         "base_ang_vel_xy": 0,   # active from step 1 (curriculum disabled = one-stage)
+        "base_yaw_rate": 0,     # stage 0; the real gate is the succ-EMA latch inside the reward
         "landing_impact": 0,
         "pitch_level": 0,
         "dof_pos_limits": 0,
@@ -170,6 +189,17 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
         self._dx_floor_hit = 0.0
         self._dx_floor_last_step = 0
         self._takeoff_omega_on = False
+        # LOAD-PHASE PD FADE state (see load_pd_fade in the config). scale 1.0 = scaffold intact in the
+        # load phase; 0.0 = the policy owns the countermovement alone. During TRAINING this is only ever
+        # moved by the closed loop. LOAD_PD_SCALE sets the STARTING value, which an EVALUATION needs:
+        # a faded run ends at 0.0, but a fresh process re-inits to 1.0 and the closed loop cannot move it
+        # inside a 1700-step eval (it needs the EMA plus a 20000-step hold), so evaluating a faded policy
+        # without this would hand it a full load-phase scaffold it was never trained with.
+        self._load_pd_scale = float(os.environ.get("LOAD_PD_SCALE", "1.0"))
+        self._load_sq_ema = 0.0
+        self._load_hit_ema = 0.0     # task-side guard signal (see _update_load_pd_fade)
+        self._load_hit_ref = 0.0     # latched at the first advance; 0 = not latched yet
+        self._load_fade_last_step = 0
         # HONEST far-band mastery: decaying accumulators for a TRUSTWORTHY smoothed far-band hit rate
         # (per-batch far_n ~0.1 -> landing_stable_hit_rate is pure noise). See _log_jump_episode_stats.
         self._farband_hit_acc = 0.0
@@ -199,6 +229,7 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
             self.motor_fatigue = torch.zeros(self.num_envs, self.num_dofs, dtype=torch.float, device=self.device)
         if not hasattr(self, "torques"):
             self.torques = torch.zeros(self.num_envs, self.num_dofs, dtype=torch.float, device=self.device)
+        self._build_ref_table()
         self._prime_history(torch.arange(self.num_envs, device=self.device))
 
     # ------------------------------------------------------------------ #
@@ -653,6 +684,15 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
         self._maybe_hand_over_to_stage2()
         jump_den = torch.clamp(self.jump_starts[env_ids], min=1.0)
         self.extras["episode"]["landing_hit_rate"] = torch.mean(self.jump_target_hits[env_ids] / jump_den)
+        # ⭐2026-10-02 BUGFIX. This call used to sit ABOVE the landing_hit_rate write. extras["episode"] is
+        # wiped at the top of every reset (legged_robot.py), so the guard read a dict in which that key did
+        # not exist yet and never would -- _load_hit_ema stayed 0.0, _load_hit_ref latched to 0.0, and the
+        # guard's `_load_hit_ref > 0.0` test was false forever. The withdrawal therefore ran as an
+        # unconditional timer: allfade_s1 kept stepping down through hit 0.24 -> 0.098 and killed the jump
+        # outright at alpha_PD 0.01 (iter 9250, squatQ/flight/peak/hit all 0). The squat EMA was written
+        # before the call and did read fine, which is what made the log line diagnostic: squat_ema=0.829
+        # next to hit_ema=0.000. Keep this call AFTER every episode metric the guard reads.
+        self._update_load_pd_fade(env_ids)
         # COMBINED curriculum gate metric: a jump counts ONLY if the SAME jump BOTH landed on target
         # (jump_target_hits) AND ended in a stable/successful landing (successful_jumps). Single-jump
         # episodes -> each count is 0/1, so the AND of (>=1) is "this episode's jump did both". This
@@ -690,6 +730,14 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
         # The ACTUAL blend weight after the pd_fade_floor (route A keeps it at pd_prior_weight*floor
         # forever; route B decays it to 0). Read this, not general_scale, to tell the two arms apart.
         self.extras["episode"]["curriculum_pd_alpha"] = self.pd_prior_alpha.float().mean().detach()
+        self.extras["episode"]["curriculum_load_pd_scale"] = torch.tensor(
+            float(getattr(self, "_load_pd_scale", 1.0)), device=self.device)
+        self.extras["episode"]["load_fade_squat_ema"] = torch.tensor(
+            float(getattr(self, "_load_sq_ema", 0.0)), device=self.device)
+        self.extras["episode"]["load_fade_hit_ema"] = torch.tensor(
+            float(getattr(self, "_load_hit_ema", 0.0)), device=self.device)
+        self.extras["episode"]["load_fade_hit_ref"] = torch.tensor(
+            float(getattr(self, "_load_hit_ref", 0.0)), device=self.device)
 
         # --- RELIABLE REACH (dx limit): the farthest commanded distance the policy still lands STABLY
         #     (hit + upright). Bin the finished jumps by commanded distance, keep a slow per-bin EMA of the
@@ -708,6 +756,76 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
         ok = self._reach_bin_ema >= thr
         reliable = float(centers[ok].max().item()) if bool(ok.any()) else 0.0
         self.extras["episode"]["reliable_reach_dx"] = torch.tensor(reliable, dtype=torch.float, device=self.device)
+
+    def _update_load_pd_fade(self, env_ids):
+        """Closed-loop withdrawal of the PD scaffold from the LOAD phase only.
+
+        Preconditions (all three, or nothing moves):
+          * load_pd_fade enabled;
+          * the success latch is open, so the policy already jumps -- this keeps discovery untouched;
+          * the global PD fade has finished (general_scale >= 0.999), so only ONE crutch is being
+            withdrawn at a time. stcurr_s1 lost the jump by taking two away together.
+
+        The loop reads squat_qualified_rate, the rate at which jumps actually reach and hold the loaded
+        crouch, because that is the quantity the load-phase scaffold is propping up. Step DOWN while it
+        holds above load_fade_gate, step BACK UP if it falls below load_fade_back. The value at which it
+        stalls is the measurement: it is how much of the countermovement the policy can produce alone.
+        """
+        if not bool(getattr(self.cfg.rewards, "load_pd_fade", False)):
+            return
+        ep = self.extras.get("episode", {})
+        if len(env_ids) == 0:
+            return
+        # The EMAs are WARMED UP from iteration 0, ahead of the gates below. They used to sit behind
+        # them, which meant the hit EMA only started climbing from 0 at the instant the first step-down
+        # fired -- so _load_hit_ref latched a cold-start value (measured: 0.013 against a true level of
+        # ~0.24) and the guard threshold 0.6*ref came out near zero, i.e. unreachable. Observing is not
+        # the same decision as acting: accumulate always, gate only the step-down.
+        # batch-weighted EMA so the time constant does not depend on how many envs happened to reset
+        a = 0.05 * float(len(env_ids)) / float(self.num_envs)
+        if "squat_qualified_rate" in ep:
+            self._load_sq_ema = (1.0 - a) * self._load_sq_ema + a * float(ep["squat_qualified_rate"])
+        if "landing_hit_rate" in ep:
+            self._load_hit_ema = (1.0 - a) * self._load_hit_ema + a * float(ep["landing_hit_rate"])
+        if not getattr(self, "_takeoff_omega_on", False):
+            return
+        if float(getattr(self, "general_scale", 1.0)) < 0.999:
+            return
+        hold = int(getattr(self.cfg.rewards, "load_fade_hold", 20000))
+        if int(self.common_step_counter) - int(self._load_fade_last_step) < hold:
+            return
+        gate = float(getattr(self.cfg.rewards, "load_fade_gate", 0.90))
+        back = float(getattr(self.cfg.rewards, "load_fade_back", 0.75))
+        step = float(getattr(self.cfg.rewards, "load_fade_step", 0.05))
+        timed = bool(getattr(self.cfg.rewards, "load_fade_timed", False))
+        guard = float(getattr(self.cfg.rewards, "load_fade_guard", 0.0))
+        prev = self._load_pd_scale
+
+        if timed:
+            # Latch the reference on the first advance, once the policy is at its pre-withdrawal level.
+            if self._load_hit_ref <= 0.0:
+                self._load_hit_ref = self._load_hit_ema
+            if guard > 0.0 and self._load_hit_ref > 0.0 \
+                    and self._load_hit_ema < guard * self._load_hit_ref:
+                # Task performance has fallen below the guard: hold this scale and re-arm the timer so
+                # the missed advances do not all fire at once when it recovers.
+                self._load_fade_last_step = int(self.common_step_counter)
+                print(f"\n[load_fade] step {self.common_step_counter}: PAUSED at "
+                      f"{self._load_pd_scale:.2f}  (hit_ema={self._load_hit_ema:.3f} < "
+                      f"{guard:.2f}*{self._load_hit_ref:.3f})", flush=True)
+                return
+            if self._load_pd_scale > 0.0:
+                self._load_pd_scale = max(0.0, self._load_pd_scale - step)
+        elif self._load_sq_ema >= gate and self._load_pd_scale > 0.0:
+            self._load_pd_scale = max(0.0, self._load_pd_scale - step)
+        elif self._load_sq_ema < back and self._load_pd_scale < 1.0:
+            self._load_pd_scale = min(1.0, self._load_pd_scale + step)
+
+        if self._load_pd_scale != prev:
+            self._load_fade_last_step = int(self.common_step_counter)
+            print(f"\n[load_fade] step {self.common_step_counter}: load_pd_scale "
+                  f"{prev:.2f} -> {self._load_pd_scale:.2f}  (squat_ema={self._load_sq_ema:.3f}, "
+                  f"hit_ema={self._load_hit_ema:.3f}, ref={self._load_hit_ref:.3f})", flush=True)
 
     def _update_dx_curriculum(self):
         # Advance the forward dx range ONLY once the policy has TRULY mastered the far end of the
@@ -815,6 +933,161 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
         )
         return torch.nan_to_num(frame, nan=0.0, posinf=100.0, neginf=-100.0)
 
+    # ------------------------------------------------------------------ #
+    # Command-conditioned motion reference R(phi, c)  (REF_PREVIEW_OBS)
+    # ------------------------------------------------------------------ #
+    # cmd bins 0.30..0.90 @0.01 | phi grid over the preparation | post-takeoff steps.
+    # REF_NPRE=200 puts one grid cell at ~0.36 control steps (K is 70-82), so the lookup quantisation
+    # (0.013 rad worst case, measured against ref_query.py) stays below the jump-to-jump spread of the
+    # reference itself (0.034 rad).
+    REF_NC, REF_NPRE, REF_NPOST = 61, 200, 171
+
+    def _build_ref_table(self):
+        """Pre-interpolate commanded_ref_14700.npz onto a dense (cmd_bin, s, 12) table so the runtime
+        lookup is a single gather. Time axis: s in [0, REF_NPRE) is phi = (steps since unload)/K(c) over
+        the preparation, s = REF_NPRE + k is k steps after takeoff. Values are already referenced to
+        default_dof_pos, exactly like the pd_target_obs block."""
+        self.ref_table = None
+        self.ref_base_table = None
+        # The table serves TWO independent arms of the reference study, so build it if EITHER is on:
+        # the preview observation ("+trajectory input") or any tracking reward ("+tracking reward").
+        # Read before _prepare_reward_function, so the zero scales have not been popped yet.
+        _sc = self.cfg.rewards.scales
+        _need_rew = any(abs(float(getattr(_sc, _n, 0.0))) > 0.0
+                        for _n in ("ref_joint", "ref_base_height", "ref_base_ori"))
+        if not (bool(getattr(self.cfg.env, "ref_preview_obs", False)) or _need_rew):
+            return
+        path = getattr(self.cfg.env, "ref_file", "") or os.path.join(
+            LEGGED_GYM_ROOT_DIR, "resources", "references", "commanded_ref_14700.npz")
+        d = np.load(path)
+        anchors = d["cmd"]; pre_idx = int(d["pre"][0])
+        q = [d["q_%.2f" % c] for c in anchors]
+        bs = [d["base_%.2f" % c] for c in anchors]      # (z, vx, vy, vz, pitch, roll), project sign convention
+        K = np.array([d["unload_%.2f" % c][0] for c in anchors])
+        cb = np.linspace(float(anchors[0]), float(anchors[-1]), self.REF_NC)
+        S = self.REF_NPRE + self.REF_NPOST
+        tab = np.zeros((self.REF_NC, S, 12), dtype=np.float32)
+        btab = np.zeros((self.REF_NC, S, 6), dtype=np.float32)
+        Kb = np.zeros(self.REF_NC, dtype=np.float32)
+        W = q[0].shape[0]
+        for i, c in enumerate(cb):
+            j = int(np.clip(np.searchsorted(anchors, c) - 1, 0, len(anchors) - 2))
+            w = (c - anchors[j]) / (anchors[j + 1] - anchors[j])
+            Kb[i] = (1 - w) * K[j] + w * K[j + 1]
+            for m, wm in ((j, 1.0 - w), (j + 1, w)):
+                if wm == 0.0:
+                    continue
+                # preparation: phi-normalised so takeoff lands at phi=1 for BOTH anchors
+                phi = np.arange(self.REF_NPRE) / float(self.REF_NPRE - 1)
+                idx = pre_idx - K[m] + phi * K[m]
+                # flight + landing: absolute steps since takeoff
+                idx = np.concatenate([idx, pre_idx + np.arange(self.REF_NPOST)])
+                i0 = np.clip(np.floor(idx).astype(int), 0, W - 1)
+                i1 = np.clip(i0 + 1, 0, W - 1)
+                f = (idx - i0)[:, None]
+                tab[i] += wm * ((1.0 - f) * q[m][i0] + f * q[m][i1]).astype(np.float32)
+                btab[i] += wm * ((1.0 - f) * bs[m][i0] + f * bs[m][i1]).astype(np.float32)
+        tab -= self.default_dof_pos.squeeze(0).cpu().numpy()[None, None, :]
+        self.ref_table = torch.tensor(tab, dtype=torch.float, device=self.device)
+        # base stays in PHYSICAL units (not default-referenced): z in m, pitch/roll in rad.
+        self.ref_base_table = torch.tensor(btab, dtype=torch.float, device=self.device)
+        self.ref_K = torch.tensor(Kb, dtype=torch.float, device=self.device).clamp(min=1.0)
+        self.ref_k = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
+        self.ref_mode = torch.zeros(self.num_envs, dtype=torch.uint8, device=self.device)  # 0 idle 1 prep 2 flight
+        print("[ref] %s | %d cmd bins %.2f..%.2f | unload->takeoff %.1f..%.1f steps | horizons %s"
+              % (os.path.basename(path), self.REF_NC, cb[0], cb[-1], Kb.min(), Kb.max(),
+                 tuple(self.cfg.env.ref_preview_h)))
+
+    def _update_ref_clock(self):
+        """Two anchors, both observable online: the unload (phase_loaded, latched so a flickering vz
+        cannot re-trigger it) starts the preparation clock, and the REAL takeoff re-syncs it. Clamping
+        phi at 1 means a policy slower than the reference just sits on the reference's takeoff frame
+        instead of running past it."""
+        start = self.phase_loaded & (self.ref_mode == 0)
+        self.ref_mode[start] = 1
+        self.ref_k[start] = 0
+        took = self.just_took_off & (self.ref_mode == 1)
+        self.ref_mode[took] = 2
+        self.ref_k[took] = 0
+        self.ref_k += (self.ref_mode > 0).long()
+        idle = ~self.jumping_state
+        self.ref_mode[idle] = 0
+        self.ref_k[idle] = 0
+
+    def _ref_slot(self, h=0):
+        """(cmd_bin, time_slot) into the dense reference table, h policy steps ahead of the clock.
+        SINGLE SOURCE OF TRUTH for the indexing: the preview observation and the tracking rewards must
+        never disagree about where on the reference we are. h=0 is "right now".
+
+        A horizon is allowed to CROSS the reference's takeoff: if k+h runs past K(c) the lookup spills
+        into the post-takeoff branch at (k+h-K) steps, so the policy actually sees the tuck coming.
+        Only the CLOCK itself (ref_k / ref_mode) is clamped -- a policy slower than the reference stays
+        at phi=1 until it really leaves the ground, but its preview still shows what the reference is
+        doing by then."""
+        cb = ((self.commands[:, 0] - 0.30) / 0.01).round().clamp(0, self.REF_NC - 1).long()
+        K = self.ref_K[cb]
+        k = (self.ref_k + int(h)).float()
+        pre = torch.where(k > K,
+                          float(self.REF_NPRE) + (k - K),
+                          (k / K).clamp(min=0.0) * float(self.REF_NPRE - 1))
+        post = float(self.REF_NPRE) + k
+        s = torch.where(self.ref_mode == 2, post, pre)
+        s = s.clamp(0.0, float(self.REF_NPRE + self.REF_NPOST - 1)).round().long()
+        return cb, s
+
+    def _ref_preview(self):
+        out = []
+        for h in self.cfg.env.ref_preview_h:
+            cb, s = self._ref_slot(h)
+            out.append(self.ref_table[cb, s])
+        return torch.cat(out, dim=-1) * self.obs_scales.dof_pos
+
+    # ------------------------------------------------------------------------------------------
+    # Commanded-reference TRACKING rewards = the "+tracking reward" arm of the reference study.
+    # All three are masked by (ref_mode > 0): the reference only exists between the unload and the
+    # end of the landing window, so a standing robot is never scored against a preparation pose.
+    # Sigmas live in cfg.rewards (ref_track_*); see the comment there for why base << joint << landing.
+    # ------------------------------------------------------------------------------------------
+    def _reward_ref_joint(self):
+        if getattr(self, "ref_table", None) is None:
+            return torch.zeros(self.num_envs, device=self.device)
+        cb, s = self._ref_slot(0)
+        # the table is stored default-referenced, exactly like the pd_target_obs block
+        err = torch.mean(torch.square((self.dof_pos - self.default_dof_pos) - self.ref_table[cb, s]), dim=1)
+        sig_p = float(getattr(self.cfg.rewards, "ref_track_joint_sigma", 0.2))
+        sig_l = float(getattr(self.cfg.rewards, "ref_track_joint_sigma_land", 2.0))
+        sig = torch.where(self.landing, torch.full_like(err, sig_l), torch.full_like(err, sig_p))
+        return (self.ref_mode > 0).float() * torch.exp(-err / torch.square(sig))
+
+    def _reward_ref_base_height(self):
+        if getattr(self, "ref_base_table", None) is None:
+            return torch.zeros(self.num_envs, device=self.device)
+        cb, s = self._ref_slot(0)
+        # The reference recorded ABSOLUTE root z on flat ground (env_origins z = 0), so the
+        # terrain-relative height is the comparable quantity here.
+        z = self.root_states[:, 2] - self.env_origins[:, 2]
+        sig = max(float(getattr(self.cfg.rewards, "ref_track_height_sigma", 0.02)), 1e-6)
+        err = torch.square(z - self.ref_base_table[cb, s, 0])
+        return (self.ref_mode > 0).float() * torch.exp(-err / (sig * sig))
+
+    def _reward_ref_base_ori(self):
+        if getattr(self, "ref_base_table", None) is None:
+            return torch.zeros(self.num_envs, device=self.device)
+        cb, s = self._ref_slot(0)
+        # Project convention (scripts/pitch_sign_check.py): pitch = asin(projected_gravity[0]),
+        # POSITIVE = NOSE-DOWN; roll = asin(projected_gravity[1]). extract_ref.py stored both this way.
+        pitch = torch.asin(self.projected_gravity[:, 0].clamp(-1.0, 1.0))
+        roll = torch.asin(self.projected_gravity[:, 1].clamp(-1.0, 1.0))
+        err = (torch.square(pitch - self.ref_base_table[cb, s, 4])
+               + torch.square(roll - self.ref_base_table[cb, s, 5]))
+        sig = max(float(getattr(self.cfg.rewards, "ref_track_ori_sigma", 0.10)), 1e-6)
+        return (self.ref_mode > 0).float() * torch.exp(-err / (sig * sig))
+
+    def _post_physics_step_callback(self):
+        super()._post_physics_step_callback()          # ends in _update_jump_state(): phases are fresh
+        if getattr(self, "ref_table", None) is not None:
+            self._update_ref_clock()
+
     def _get_single_extras(self):
         """CURRENT-only (NOT stacked) extras (32): command (Atanassov keeps g single) + torque-control
         specifics (raw torques / motor fatigue / PD blend) that don't belong in the kinematic history."""
@@ -849,6 +1122,21 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
             ),
             dim=-1,
         )
+        if bool(getattr(self.cfg.env, "pd_target_obs", False)):
+            # WHERE the scaffold pulls, not just how hard. Same scaling and the same mirror parity as
+            # dof_pos, and referenced to default_dof_pos so it is a pure "reference pose" signal rather
+            # than a tracking error -- the current pose is already in the stacked frame, so the policy
+            # can form the error itself. This is the reference at time t; a preview would append the
+            # same quantity at t+k.
+            pd_ref = (self.default_joint_pd_target - self.default_dof_pos) * self.obs_scales.dof_pos
+            extras = torch.cat((extras, pd_ref), dim=-1)                                       # 12
+        # Gate on the CONFIG FLAG, not on the table: since the tracking rewards also need the table,
+        # "table exists" no longer implies "the preview is part of the observation". num_single_extras
+        # only counts the preview when ref_preview_obs is set, so keying off the table instead would
+        # silently add 12*len(horizons) dims to the frame and blow up the history ring.
+        if bool(getattr(self.cfg.env, "ref_preview_obs", False)) and getattr(self, "ref_table", None) is not None:
+            # the reference at k, k+h1, k+h2 ... -> 12 per horizon, same scaling/parity as pd_ref above
+            extras = torch.cat((extras, self._ref_preview()), dim=-1)
         return torch.nan_to_num(extras, nan=0.0, posinf=100.0, neginf=-100.0)
 
     def _get_privileged_frame(self):
@@ -1290,6 +1578,71 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
             paid = torch.minimum(paid, cmd_d)
         return self.last_jump_success.float() * paid
 
+    def _reward_stand_pose(self):
+        """Positive guidance for the STAND phase -- before the jump is armed and after the landing
+        buffer releases. Measured on allfade2_pdtgt_s1 that phase had almost nothing pulling for it:
+        maintain_contact 1.6% (feet-down only, blind to posture), default_hip_pos 0.8% (4 hip joints),
+        and the whole posture job left to default_pos, an L1 PENALTY of -0.807 -- the single largest
+        negative term. memory's rule for exactly this shape: a penalty is "it hurts when you drift",
+        and the policy buys the cheapest painkiller, which is not the pose we want. So: pay for being
+        in the pose instead of punishing leaving it.
+
+        Target is the FULL pose AND the trunk height, multiplied -- not a single scalar. Rewarding
+        base_z alone is degenerate (face-plant and leg-splay both lower it); requiring the default
+        joint pose at the same time leaves essentially one satisfying configuration.
+
+        ⚠️ DISCOVERY GATE. Paying anything for standing still is the known way to kill this task --
+        stand_no_takeoff was deleted and first_jump_delay 55->200 was reverted for exactly this
+        ("1s 站立小正奖让'不跳'太舒服"). So it pays NOTHING until the success latch has opened, i.e.
+        only once the policy already jumps reliably. STAND_POSE_W=0 (default) -> term is absent.
+        """
+        if not getattr(self, "_takeoff_omega_on", False):
+            return torch.zeros(self.num_envs, device=self.device)
+        active = (~self.jumping_state).float()
+        pose_err = torch.sum(torch.abs(self.dof_pos - self.default_dof_pos), dim=1)
+        height_err = torch.abs(self.root_states[:, 2] - float(self.cfg.rewards.base_height_target))
+        sigma = max(float(getattr(self.cfg.rewards, "stand_pose_sigma", 2.0)), 1e-4)
+        gain = float(getattr(self.cfg.rewards, "stand_pose_height_gain", 10.0))
+        return active * torch.exp(-pose_err / sigma) * torch.exp(-gain * height_err)
+
+    def _reward_stand_still(self):
+        """STAND-phase velocity brake -- `landing_stability` with the gate swapped to the stand phase.
+
+        WHY a second stand term instead of folding this into stand_pose: measured on
+        fadehalf_standpose_s1/model_18000, the pre-jump base sinks MONOTONICALLY (meas_prejump:
+        0.331 -> 0.291 -> 0.274 -> 0.252 -> 0.228 m over 110 substeps, still falling at 395) while
+        `stand_pose` was live the whole time. A position/pose target cannot distinguish "sitting at
+        the wrong height" from "on the way down": both collect the same exp(-|z-z*|). The landing
+        buffer does NOT have this problem, and the structural difference is that `landing_stability`
+        pays for LOW VELOCITY. So pay for stillness here too, as its own weightable term, exactly as
+        the landing side keeps landing_stability separate from default_pos.
+
+        ⚠️ SIGMAS ARE DELIBERATELY ~60x TIGHTER THAN THE LANDING ONES. landing_stability uses
+        lin 2.0 / ang 1.0 because a real landing has |v| ~ 1.3; a quiet stance has |v| ~ 0.1-0.3, so
+        those sigmas give exp(-0.09/2.0) = 0.96 -- pinned at 1, zero gradient. That is precisely how
+        the LAND_STAB_W=5.0 experiment failed (5x the weight bought a 13% change in the underlying
+        quantity and cost 82% of the far-band hit rate): the term was saturated, so re-weighting it
+        could not do anything. At lin 0.03 a 0.2 m/s sink gives exp(-1.33) = 0.26 -- real gradient
+        across the range the stance actually lives in.
+
+        ⚠️ DISCOVERY GATE, same as stand_pose. Paying for standing STILL is paying for not jumping,
+        which is the known way to kill this task (stand_no_takeoff deleted; first_jump_delay 55->200
+        reverted). Nothing is paid until the success latch opens. STAND_STILL_W=0 (default) -> absent.
+
+        Gate is `~jumping_state`, so it does NOT cover the load/push phase -- deliberately: the push
+        must produce velocity. Note that measurement also found 0.1325 m of LATERAL travel during
+        load+push (vs 0.0788 m for the slow-fade run), so part of the visible pre-jump instability
+        lives in a phase this term cannot reach.
+        """
+        if not getattr(self, "_takeoff_omega_on", False):
+            return torch.zeros(self.num_envs, device=self.device)
+        active = (~self.jumping_state).float()
+        lin = torch.sum(torch.square(self.base_lin_vel), dim=1)
+        ang = torch.sum(torch.square(self.base_ang_vel[:, :2]), dim=1)
+        lin_sigma = max(float(getattr(self.cfg.rewards, "stand_still_lin_sigma", 0.03)), 1e-4)
+        ang_sigma = max(float(getattr(self.cfg.rewards, "stand_still_ang_sigma", 0.10)), 1e-4)
+        return active * torch.exp(-lin / lin_sigma) * torch.exp(-ang / ang_sigma)
+
     def _reward_stance_squat(self):
         # Pose-guided countermovement (GUIDE to the target, don't block cheats). The earlier
         # height-based version rewarded "base_z low", which is degenerate -- a single scalar that
@@ -1350,6 +1703,26 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
             return float(getattr(self.cfg.rewards, "takeoff_omega_gain", 4.0)) * active * ang_vel_sq
         active = (self.airborne | self.prelanding | self.landing).float()
         return active * ang_vel_sq
+
+    def _reward_base_yaw_rate(self):
+        # YAW-SPIN suppression. base_ang_vel_xy deliberately EXCLUDES w_z so that a commanded yaw
+        # stays available, and the only other yaw term (tracking_angular_velocity) is gated
+        # airborne-only, because paying for stillness on the ground once collapsed discovery. Nothing
+        # therefore constrains yaw while the feet can still push. Measured on two repeats of this
+        # configuration: the robot leaves the ground at 2.88 rad/s of yaw rate and turns 57 deg in
+        # flight, while the reported checkpoint leaves at 0.02 rad/s and turns 5 deg -- the reward set
+        # does not decide which of the two it gets. The spin is imparted during the push (the
+        # arm->takeoff yaw change is only 9 deg), so the penalty has to act while the feet are loaded:
+        # damping w_z in flight cannot remove angular momentum that is already there.
+        #
+        # Same phases and the same post-discovery latch as base_ang_vel_xy, and a separate term rather
+        # than an extra axis inside it, so the magnitude of that working term is untouched and this one
+        # can be tuned or disabled on its own. OFF by default (YAW_RATE_W=0) -> the reported
+        # configuration is byte-identical.
+        if not getattr(self, "_takeoff_omega_on", False):
+            return torch.zeros(self.num_envs, device=self.device)
+        active = (self.phase_extended | self.airborne | self.prelanding | self.landing).float()
+        return active * torch.square(self.base_ang_vel[:, 2])
 
     def _reward_landing_impact(self):
         # Landing-stability lever borrowed from Olsen 2025 (papers: Ground force L2 / Soft impact):

@@ -79,7 +79,26 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
         #   redundancy); we additionally keep the self-generated raw torques single, because stacking
         #   240 dims of them was one of the suspects when the first flatten-everything version died.
         num_stacked_frame = 49
-        num_single_extras = 32
+        # PD_TARGET_OBS=1 appends the PD scaffold's CURRENT phase target to the extras (12 dims,
+        # expressed as target - default_dof_pos, the same scaling as dof_pos). Today the policy observes
+        # pd_prior_alpha -- HOW HARD the scaffold pulls -- but never WHERE it pulls, so it is trained its
+        # whole life against a force whose direction it cannot see. That is the cheapest possible version
+        # of a reference observation: the quantity already exists every step (it is what pd_full tracks),
+        # it costs nothing to compute, and it is exactly the "reference at time t" that a reference
+        # preview would extend into the future. 0 (default) -> 1012-dim, bit-identical to the trained line.
+        pd_target_obs = bool(int(os.environ.get("PD_TARGET_OBS", "0")))
+        # REF_PREVIEW_OBS=1 additionally appends a PREVIEW of the command-conditioned motion reference
+        # R(phi, c) extracted from model_14700 (paper_tools/commanded_ref_14700.npz): the reference joint
+        # pose at k, k+h1, k+h2 ... steps ahead, 12 dims per horizon, expressed exactly like pd_target_obs
+        # (target - default_dof_pos, dof_pos scaling, same mirror parity). pd_target_obs gives the scaffold
+        # pose at time t; this gives where the MOTION goes next, which is the "+trajectory input" arm of the
+        # reference study. The reference clock is anchored on the unload event (phase_loaded) and re-synced
+        # at the real takeoff -- see _update_ref_clock. 0 (default) -> bit-identical to the trained line.
+        ref_preview_obs = bool(int(os.environ.get("REF_PREVIEW_OBS", "0")))
+        ref_preview_h = tuple(int(x) for x in os.environ.get("REF_PREVIEW", "0,10,30").split(",") if x != "")
+        ref_file = os.environ.get("REF_FILE", "")   # "" -> resources/references/commanded_ref_14700.npz
+        num_single_extras = (32 + (12 if pd_target_obs else 0)
+                             + (12 * len(ref_preview_h) if ref_preview_obs else 0))
         history_length = 20
         num_observations = history_length * num_stacked_frame + num_single_extras   # 49*20 + 32 = 1012
         # ⭐ ASYMMETRIC CRITIC -- this is the change that actually fixed history here. A critic fed the
@@ -118,6 +137,18 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
         # and the sym_loss permutations are identical; only the comp_head weights disappear, which means
         # old checkpoints will NOT load (train from scratch).
         aux_stabilizer_head = False
+
+        # ABLATION HOOK (2026-09-30): PD_W sets the PD scaffold's FULL-AUTHORITY weight, the w in
+        #     pd_alpha = w * max(PD_FLOOR, 1 - general_scale),   rl_alpha = 1 - pd_alpha
+        # Same precedent as PD_FLOOR / STANCE_CURR / NET / YAW_RATE_W: the default restates the
+        # inherited value so the reported configuration is byte-identical.
+        #   PD_W=0.5 PD_FLOOR=0.2  -> pd_alpha 0.50 -> 0.10   (the reported controller)
+        #   PD_W=0.5 PD_FLOOR=0    -> pd_alpha 0.50 -> 0      (fade-to-zero arm; already measured,
+        #                                                      512 envs x 1700 steps, ZERO take-offs)
+        #   PD_W=0                 -> pd_alpha 0, rl_alpha 1 throughout  (NO-SCAFFOLD arm)
+        # Only the third arm tests whether the INITIAL 0.5 assist matters; the floor arm tests only
+        # whether the ENDPOINT can be zero. See the thesis ablation section.
+        pd_prior_weight = float(os.environ.get("PD_W", "0.5"))
 
     class asset(GO2OmniJumpCurriculumTorqueCfg.asset):
         # 2026-08-07: use the REAL Go2 joint ranges instead of the SATA URDF's truncated thigh
@@ -179,7 +210,13 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
         # on (general_scale 0.45) -> the reach it found was PD-assisted, not the real pure-torque reach.
         # REVERTED to the Jun23_01-23-30 baseline (user): SLOW gradual fade -- full PD until ~iter200, then a
         # long ramp to pure torque by ~iter1200 (step ~96/iter -> warmup 19200 ~iter200, x0 115200 ~iter1200).
-        warmup_steps = 19200       # full PD 到 iter200. ⚠️step/iter 非线性! step()内 `while current_dt·freq<1` 每env.step跑
+        # DIAGNOSTIC HOOK (2026-10-01): GROWTH_WARMUP was hard-coded. ⚠️ step/iter is NOT constant:
+        # steps_per_iter = 9600/freq and freq ramps 100->200 Hz across the fade, so 96 -> 48.
+        # Converting a desired schedule to steps:  warmup_iters = warmup_steps/96
+        #                                          fade_iters   = (x0 - warmup_steps)/64
+        # Default 19200/140800 -> 200 + 1900 = iter 2100, which matches the measured value on the
+        # sls15 line (global fade done at iter ~2099, read back from the loadfade log).
+        warmup_steps = int(os.environ.get("GROWTH_WARMUP", "19200"))  # full PD 到 iter200
                                    # 200/freq个substep(每个substep step_count+=1): warmup期 general_scale=0/freq=100 -> 2/env.step
                                    # = 96/iter -> warmup19200=iter200. fade末 freq=200 -> 1/env.step=48/iter. (旧注释"96/iter"只对warmup期.)
         x0 = int(os.environ.get("GROWTH_X0", "70400"))  # DIAGNOSTIC HOOK 2026-09-17: PD fade end                 # 纯力矩 iter1000 (user). fade期 freq100->200 => step/iter 96->48,积分得【fade完成iter = 200 +
@@ -532,6 +569,27 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
         # landing_stability BRAKE kernel widths (read by _reward_landing_stability). MOVED here from class scales
         # where they were dead (cfg.rewards.<name> missing -> default 0.25 -> brake reward ~0 at landing speeds).
         # Loosened so the brake has gradient: |v|~2.5 -> exp(-2.5^2/2.0)~0.04 rising to 1.0 as it stops on the spot.
+        # stand_pose kernel (see _reward_stand_pose): full-pose L1 width and trunk-height gain.
+        stand_pose_sigma = 2.0
+        stand_pose_height_gain = 10.0
+        # stand_still: the STAND-phase velocity brake. ~60x tighter than the landing sigmas
+        # (lin 2.0 / ang 1.0) because a stance lives at |v| ~ 0.1-0.3, not 1.3 -- loose sigmas
+        # pin the term at 1.0 and it has no gradient, which is how LAND_STAB_W=5.0 failed.
+        # ---- commanded-reference tracking kernels (read by the ref_* rewards) ----------------------
+        # Ratios follow the literature survey in papers/REFERENCE_HOW_THEY_BUILD_IT_2026-10-07.md:
+        # the BASE is tracked ~10x tighter than the joints (Wang 2025 sigma_base 0.02 vs sigma_joint 0.2;
+        # Fuchioka 2023 base w0.60 vs joint w0.20) and the joints are relaxed another ~10x at touchdown
+        # (Wang's landing sigma 2.0; the defense slide already says "weaker joint tracking around touchdown").
+        # This is NOT style: the extracted reference already consumes 93-100% of the T-N envelope on all 12
+        # joints (paper_tools/reference_trajectory_14700_2026-10-06.md), so there is no torque headroom left
+        # for a tight joint track -- and its landing pose leans on the mechanical limits, which we do not
+        # want to force the policy to reproduce.
+        ref_track_joint_sigma      = float(os.environ.get("REF_SIG_JOINT", "0.2"))
+        ref_track_joint_sigma_land = float(os.environ.get("REF_SIG_JOINT_LAND", "2.0"))
+        ref_track_height_sigma     = float(os.environ.get("REF_SIG_H", "0.02"))
+        ref_track_ori_sigma        = float(os.environ.get("REF_SIG_ORI", "0.10"))
+        stand_still_lin_sigma = 0.03
+        stand_still_ang_sigma = 0.10
         landing_stability_lin_sigma = 2.0   # was effectively 0.25 (floored to ~0 for real landing |v|, no gradient)
         landing_stability_ang_sigma = 1.0   # was effectively 0.5
         four_leg_push_force_floor = 200.0   # N: total vertical GRF below which four_leg_push is NOT graded -> only the
@@ -556,7 +614,10 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
         # ω penalty that also covers the PUSH -> kill the nose-down spin at the SOURCE (takeoff) so the body
         # flies level and lands flat. succ-rate gate (not a fixed step) = adapts to discovery speed, never
         # blocks the messy from-scratch pushes (an ungated strong ω penalty broke discovery, iter526 flight0).
-        takeoff_omega_succ_gate = 0.80     # latch the stronger ω penalty once succ_rate EMA clears this
+        # DIAGNOSTIC HOOK (2026-10-02): OMEGA_GATE lets a smoke test open the success latch immediately
+        # (0.0), which is the precondition the load-phase fade waits on -- otherwise a short run can never
+        # reach a [load_fade] line and the guard cannot be verified. Default 0.80 = unchanged.
+        takeoff_omega_succ_gate = float(os.environ.get("OMEGA_GATE", "0.80"))  # latch the stronger ω penalty once succ_rate EMA clears this
         takeoff_omega_gain = 4.0           # post-gate multiplier on base_ang_vel_xy (-0.15 -> ~-0.6 effective)
         # HARD pitch termination (see check_termination): end the episode if the base pitches NOSE-DOWN beyond
         # this (projected_gravity[:,0], ~sin(tilt)) AT TOUCHDOWN (the landing phase). Forces a level touchdown
@@ -593,6 +654,35 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
         # require_squat_before_takeoff a missed hold means no takeoff at all. The stance curriculum is the
         # thing that teaches the policy to own the crouch now.
         pd_off_in_load = bool(int(os.environ.get("PD_OFF_LOAD", "0")))
+        # ⭐2026-09-30 LOAD-PHASE PD FADE (route to pure torque). Measured motivation: on model_14700 the
+        # scaffold supplies only 9.6% of the load-phase torque magnitude, yet suppressing it in that phase
+        # alone drops the policy from 1027 recorded touchdowns to 1. Every other phase degrades smoothly
+        # (landing 0.85, stand 0.80, prelanding 0.75, flight 0.56, against 0.87 intact). The load phase is
+        # the only CLIFF, because require_squat_before_takeoff makes a missed hold void the takeoff
+        # outright. A global fade to zero removes that one gated thing at the same time as four ungated
+        # ones, which is the shape of every recorded pd_prior -> 0 failure.
+        # So: fade the LOAD phase on its own, closed loop, only after the success latch AND after the
+        # global fade is done (one crutch at a time), stepping down while the squat rate holds and
+        # stepping back up if it falls. Where it stalls is the pure-torque limit of the countermovement.
+        # LOAD_FADE=0 (default) -> load_pd_scale stays 1.0 -> bit-identical to the trained configuration.
+        load_pd_fade   = bool(int(os.environ.get("LOAD_FADE", "0")))
+        load_fade_gate = float(os.environ.get("LOAD_FADE_GATE", "0.90"))   # squat EMA needed to step DOWN
+        load_fade_back = float(os.environ.get("LOAD_FADE_BACK", "0.75"))   # squat EMA below which we step UP
+        load_fade_step = float(os.environ.get("LOAD_FADE_STEP", "0.05"))   # load_pd_scale delta per advance
+        load_fade_hold = int(os.environ.get("LOAD_FADE_HOLD", "20000"))    # env steps between advances
+        # ---- 2026-10-01: all-phase withdrawal, timed, with a guard that actually fires ----------------
+        # PD_FADE_SCOPE=all applies the scale to EVERY phase, not just load, so alpha_PD goes to a true 0
+        # instead of stalling at pd_prior_weight*PD_FLOOR = 0.10 in stand/flight/prelanding/landing.
+        pd_fade_scope = str(os.environ.get("PD_FADE_SCOPE", "load")).strip().lower()  # load | all
+        # LOAD_FADE_TIMED=1 advances on the clock alone. The squat-EMA loop it replaces never once bound:
+        # across all 20 advances of loadfade_s1 the EMA stayed above the 0.90 gate and never came near the
+        # 0.75 back-off, so the "closed loop" was already a timer -- while the quantity that actually
+        # degraded (commanded-distance tracking, span +0.72 -> +0.21 m) was invisible to it.
+        load_fade_timed = bool(int(os.environ.get("LOAD_FADE_TIMED", "0")))
+        # The guard that replaces it: hold a hit-rate EMA, latch its value at the first advance as the
+        # reference, and PAUSE (do not advance, do not back off) whenever it drops below this fraction of
+        # that reference. 0.0 disables it. This watches the task, not a binary posture gate.
+        load_fade_guard = float(os.environ.get("LOAD_FADE_GUARD", "0.0"))
         # SUCCDIST_CAP=1 -> successful_distance stops paying past the commanded distance (see the reward).
         successful_distance_clip_cmd = bool(int(os.environ.get("SUCCDIST_CAP", "0")))
         squat_pay_after_qualified = bool(int(os.environ.get("SQUAT_PAY_HELD", "1")))
@@ -1042,6 +1132,17 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
             # 0.22 -> 0.42 m, lowest base height after touchdown 0.166 -> 0.110. The reason is the
             # balance: landing_stability earns 1.1% of the positive reward and landing_impact is OFF,
             # while the distance terms earn >50% -- so a harder landing is essentially free.
+            # STAND-phase posture+height, positive, discovery-gated. 0 = absent (default).
+            # ---- commanded-reference tracking = the "+tracking reward" arm of the reference study.
+            # All three default to 0.0 = absent, so merging this is a no-op for every existing run.
+            # They are independent of REF_PREVIEW_OBS (the "+trajectory input" arm): the reference
+            # table is built whenever EITHER the preview or any of these weights is on, so the four
+            # arms of the study (none / input / reward / both) are all reachable from env vars.
+            ref_joint       = float(os.environ.get("REF_JOINT_W", "0.0"))
+            ref_base_height = float(os.environ.get("REF_BASE_H_W", "0.0"))
+            ref_base_ori    = float(os.environ.get("REF_ORI_W", "0.0"))
+            stand_pose = float(os.environ.get("STAND_POSE_W", "0.0"))
+            stand_still = float(os.environ.get("STAND_STILL_W", "0.0"))   # 0 = absent; the pre-jump sink fix
             landing_stability = float(os.environ.get("LAND_STAB_W", "1.0"))          # RE-ENABLED to BRAKE the landing momentum: per-step trace showed the
                                              # robot lands at vx~1.3 m/s, bounces (all feet off, +0.06m) and coasts
                                              # ~0.30m forward to a stop (the "post-landing slide"). This rewards LOW
@@ -1105,6 +1206,12 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
                                              # attitude for jump magnitude). Vertical (Stage1) jump wants body level throughout.
                                              # the main landing-stability lever after joint_angle_landing removed. (pitch also via pitch_level.)
             # ---- (1)+(2) landing stability from the papers: stop "lands then flips" ----
+            # YAW-SPIN penalty, off by default. Two repeats of this configuration degenerated into a
+            # jump that leaves the ground spinning at ~2.9 rad/s and turns ~57 deg in the air, because
+            # no term constrains yaw while the feet can push. YAW_RATE_W=0.3 is the first value to try
+            # (base_ang_vel_xy sits at -0.15 and is multiplied by 4 after the latch). Same precedent as
+            # PD_FLOOR / SUCC_LAND_SIGMA: default 0 keeps the reported run reproducible.
+            base_yaw_rate = -float(os.environ.get("YAW_RATE_W", "0.0"))
             base_ang_vel_xy = -0.15          # REVERTED -0.4 -> -0.15: -0.4 penalized the MESSY exploratory flight so hard that "don't jump"
                                              #     won -> discovery died (flight 0 at iter526). -0.15 is the discovery-proven value. The nose-down
                                              #     ROTATION is a LATE concern -> if needed, re-add stronger damping GATED to post-discovery, not step 1.
@@ -1146,6 +1253,14 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
             "rew_landing_position",
             "rew_foot_contact_sync",
             "rew_stance_squat",     # countermovement shaping — watch vs successful_jump_rate
+            # 2026-10-02: these were ACTIVE all along (verified live scale + episode_sums) but absent
+            # from this print list, so the stdout breakdown showed 22 of 25 terms and the landing /
+            # distance balance could not be read without opening tensorboard.
+            "rew_landing_stability",
+            "rew_forward_reach",
+            "rew_successful_distance",
+            "rew_stand_pose",
+            "rew_stand_still",
             # inherited-active but missing from the parent's print list — surface them
             "rew_base_ang_vel_xy",   # (1) flight+landing roll/pitch ω damping — the anti-tumble lever
             "rew_landing_impact",    # (2) touchdown force-spike penalty — cushion vs slam
@@ -1222,6 +1337,15 @@ def _mirror_obs_permutation(history_length, frame_dim, extras_dim):
         + legs(19, flip_hip=False)                 # motor_fatigue  (magnitude -> NO sign flip)
         + [(31, 1)]                                # pd_prior_alpha
     )
+    # Every optional extras block appended after pd_prior_alpha is a 12-vector of JOINT ANGLES
+    # (PD_TARGET_OBS' phase target, then one block per REF_PREVIEW horizon), so they all mirror
+    # exactly like dof_pos: legs swap, hip/abduction flips sign. Counting blocks instead of testing
+    # `extras_dim >= 44` keeps this correct for any number of preview horizons, and is identical to
+    # the old branch for 32 (0 blocks) and 44 (1 block). The assert below catches a layout mismatch.
+    n_leg_blocks = (extras_dim - 32) // 12
+    assert extras_dim == 32 + 12 * n_leg_blocks, f"extras_dim {extras_dim} is not 32 + 12k"
+    for _b in range(n_leg_blocks):
+        extras = extras + legs(32 + 12 * _b)
     assert len(frame) == frame_dim, f"frame perm {len(frame)} != {frame_dim}"
     assert len(extras) == extras_dim, f"extras perm {len(extras)} != {extras_dim}"
 
@@ -1265,7 +1389,15 @@ class GO2OmniJumpLandingTorqueCfgPPO(GO2OmniJumpCurriculumTorqueCfgPPO):
         # so it is not tiled again. This also settles "is sym_loss load-bearing for discovery?" in the other
         # direction: Aug18 discovered at iter650 with sym fully OFF.
         sym_loss = True
-        sym_coef = 1.0   # LEFT-RIGHT mirror symmetry (front-rear is handled by pushoff_leg_sync, not sym_loss)
+        # SYM_COEF hook (2026-10-04). Default 1.0 = the trained configuration, unchanged. Raising it
+        # strengthens the EQUIVARIANCE constraint pi(mirror(s)) == mirror(pi(s)), i.e. it removes any
+        # left/right PREFERENCE from the policy. ⚠️ It does NOT add a lateral restoring force: an
+        # equivariant policy can still swing sideways if the lateral mode is unstable, and the
+        # pre-takeoff lateral excursion is FREE anyway because landing_target[.,1] is anchored at
+        # takeoff_y + cmd_y (the same anchor that makes forward creep worth zero). Measured on
+        # fadehalf/model_18000: 0.1325 m lateral vs 0.1478 m forward during LOAD+PUSH, and |dy| is
+        # UNSIGNED so "always one side" vs "random side" is still unmeasured.
+        sym_coef = float(os.environ.get("SYM_COEF", "1.0"))   # LEFT-RIGHT mirror symmetry (front-rear is handled by pushoff_leg_sync, not sym_loss)
         frame_stack = 1  # the map below is ALREADY full-length -- do NOT let ppo.py tile it
         obs_permutation = _mirror_obs_permutation(
             GO2OmniJumpLandingTorqueCfg.env.history_length,
