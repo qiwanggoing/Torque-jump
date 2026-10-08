@@ -202,6 +202,14 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
         self._load_hit_ema = 0.0     # task-side guard signal (see _update_load_pd_fade)
         self._load_hit_ref = 0.0     # latched at the first advance; 0 = not latched yet
         self._load_fade_last_step = 0
+        # ⭐STAND BEFORE YOU JUMP -- see go2_omnijump_torque._update_jump_state and
+        # _update_stand_arm_height. STAND_ARM_H0 is the STARTING arming height, which an EVALUATION
+        # needs for the same reason LOAD_PD_SCALE does: a ramped run ends high, a fresh process
+        # re-inits, and the closed loop cannot move it inside a short eval.
+        self._stand_arm_h = float(os.environ.get("STAND_ARM_H0", "0.0"))
+        self._arm_hit_ema = 0.0      # task-side guard signal (same role as _load_hit_ema)
+        self._arm_hit_ref = 0.0      # latched at the first advance; 0 = not latched yet
+        self._arm_last_step = 0
         # HONEST far-band mastery: decaying accumulators for a TRUSTWORTHY smoothed far-band hit rate
         # (per-batch far_n ~0.1 -> landing_stable_hit_rate is pure noise). See _log_jump_episode_stats.
         self._farband_hit_acc = 0.0
@@ -695,6 +703,7 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
         # before the call and did read fine, which is what made the log line diagnostic: squat_ema=0.829
         # next to hit_ema=0.000. Keep this call AFTER every episode metric the guard reads.
         self._update_load_pd_fade(env_ids)
+        self._update_stand_arm_height(env_ids)
         # COMBINED curriculum gate metric: a jump counts ONLY if the SAME jump BOTH landed on target
         # (jump_target_hits) AND ended in a stable/successful landing (successful_jumps). Single-jump
         # episodes -> each count is 0/1, so the AND of (>=1) is "this episode's jump did both". This
@@ -738,6 +747,12 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
             float(getattr(self, "_load_sq_ema", 0.0)), device=self.device)
         self.extras["episode"]["load_fade_hit_ema"] = torch.tensor(
             float(getattr(self, "_load_hit_ema", 0.0)), device=self.device)
+        # The arming-height gate. This is the MEASUREMENT of the stand-before-jump arm: the height it
+        # stalls at is how tall a stance the policy can hold and still make the jump.
+        self.extras["episode"]["curriculum_stand_arm_h"] = torch.tensor(
+            float(getattr(self, "_stand_arm_h", 0.0)), device=self.device)
+        self.extras["episode"]["stand_arm_hit_ema"] = torch.tensor(
+            float(getattr(self, "_arm_hit_ema", 0.0)), device=self.device)
         self.extras["episode"]["load_fade_hit_ref"] = torch.tensor(
             float(getattr(self, "_load_hit_ref", 0.0)), device=self.device)
 
@@ -828,6 +843,68 @@ class GO2OmniJumpLandingTorque(GO2OmniJumpCurriculumTorque):
             print(f"\n[load_fade] step {self.common_step_counter}: load_pd_scale "
                   f"{prev:.2f} -> {self._load_pd_scale:.2f}  (squat_ema={self._load_sq_ema:.3f}, "
                   f"hit_ema={self._load_hit_ema:.3f}, ref={self._load_hit_ref:.3f})", flush=True)
+
+    def _update_stand_arm_height(self, env_ids):
+        """Raise the pre-jump ARMING HEIGHT until the policy stops standing up for free.
+
+        Shape copied from _update_load_pd_fade: step UP while the task holds, step BACK DOWN when it
+        does not. Stepping back down is what keeps a hard gate from deadlocking the jump -- a height
+        the policy can never reach means it never arms, never jumps, and earns no jump reward at all,
+        which is the clean_takeoff death spiral (see project_collapse_clean_takeoff_gate). The height
+        it stalls at IS the result.
+
+        Preconditions, all three or nothing moves:
+          * stand_arm_min_height > 0 (0 = feature off, every other task unaffected);
+          * the success latch is open, so the policy already jumps -- discovery is never gated;
+          * general_scale >= 0.999, so the PD scaffold has finished fading. One crutch at a time:
+            stcurr_s1 lost the jump by withdrawing two together.
+        """
+        target = float(getattr(self.cfg.rewards, "stand_arm_min_height", 0.0))
+        if target <= 0.0 or len(env_ids) == 0:
+            return
+        ep = self.extras.get("episode", {})
+        # Warm the EMA from iteration 0, AHEAD of the gates below -- the load_fade bug was exactly this
+        # (the guard EMA sat behind the gates, latched a cold-start reference and never armed).
+        a = 0.05 * float(len(env_ids)) / float(self.num_envs)
+        if "landing_hit_rate" in ep:
+            self._arm_hit_ema = (1.0 - a) * self._arm_hit_ema + a * float(ep["landing_hit_rate"])
+        if not getattr(self, "_takeoff_omega_on", False):
+            return
+        if float(getattr(self, "general_scale", 1.0)) < 0.999:
+            return
+        # ONE CRUTCH AT A TIME. general_scale only covers the GLOBAL PD fade; when load_pd_fade is on,
+        # the load-phase scaffold is still being withdrawn well after that (measured on sstill6: iter
+        # 2498-4748, while general_scale hits 1.0 by ~1200). Advancing the arming height during that
+        # withdrawal would take two crutches away together, which is how stcurr_s1 lost the jump.
+        if bool(getattr(self.cfg.rewards, "load_pd_fade", False)) \
+                and float(getattr(self, "_load_pd_scale", 0.0)) > 0.0:
+            return
+        hold = int(getattr(self.cfg.rewards, "stand_arm_hold", 12000))
+        if int(self.common_step_counter) - int(self._arm_last_step) < hold:
+            return
+        step = float(getattr(self.cfg.rewards, "stand_arm_step", 0.01))
+        guard = float(getattr(self.cfg.rewards, "stand_arm_guard", 0.85))
+        # The FIRST advance jumps straight to stand_arm_h_start instead of crawling up from 0: at
+        # STAND_ARM_HOLD=12000 common steps (= 500 iterations at num_steps_per_env=24) a 0.01 step
+        # would need 15000 iterations to reach 0.30, i.e. the gate would never actually bind inside a
+        # 20000-iteration run. Pick a start the policy ALREADY clears for free (refprev2 measured
+        # 0.274-0.295 m at ck14400-17600) so the first advance costs nothing and only the steps above
+        # it are a real demand. Starting there from iteration 0 instead would gate DISCOVERY, which is
+        # why this lives behind the latch + general_scale preconditions rather than in __init__.
+        start = float(getattr(self.cfg.rewards, "stand_arm_h_start", 0.0))
+        if self._arm_hit_ref <= 0.0:
+            self._arm_hit_ref = self._arm_hit_ema
+        prev = self._stand_arm_h
+        if guard > 0.0 and self._arm_hit_ref > 0.0 and self._arm_hit_ema < guard * self._arm_hit_ref:
+            self._stand_arm_h = max(0.0, self._stand_arm_h - step)
+        elif self._stand_arm_h < target:
+            nxt = max(self._stand_arm_h + step, start) if self._stand_arm_h <= 0.0 else self._stand_arm_h + step
+            self._stand_arm_h = min(target, nxt)
+        self._arm_last_step = int(self.common_step_counter)
+        if self._stand_arm_h != prev:
+            print(f"\n[stand_arm] step {self.common_step_counter}: arm_height "
+                  f"{prev:.3f} -> {self._stand_arm_h:.3f} m  (hit_ema={self._arm_hit_ema:.3f}, "
+                  f"ref={self._arm_hit_ref:.3f}, target={target:.3f})", flush=True)
 
     def _update_dx_curriculum(self):
         # Advance the forward dx range ONLY once the policy has TRULY mastered the far end of the

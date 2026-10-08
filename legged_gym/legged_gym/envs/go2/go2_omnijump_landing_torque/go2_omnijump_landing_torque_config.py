@@ -595,6 +595,20 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
         ref_track_vel_sigma        = float(os.environ.get("REF_SIG_VEL", "0.30"))
         stand_still_lin_sigma = 0.03
         stand_still_ang_sigma = 0.10
+        # ⭐STAND BEFORE YOU JUMP (2026-10-08, user). A HARD arming gate on base height, because the
+        # reward route has no leverage here: stand_pose + stand_still together span only 2.4-7.7% of
+        # mean_reward and the pre-jump window is a minority of their active samples, so <=4% of the
+        # return is at stake -- while refprev2's pre-jump stance decayed 0.295 -> 0.223 m. The gate
+        # puts the whole jump return behind standing up instead. See
+        # go2_omnijump_torque._update_jump_state and _update_stand_arm_height.
+        # STAND_ARM_H = 0 keeps the feature OFF (default), so every existing run is bit-identical.
+        stand_arm_min_height = float(os.environ.get("STAND_ARM_H", "0.0"))    # TARGET arming height (m)
+        stand_arm_step  = float(os.environ.get("STAND_ARM_STEP", "0.01"))     # per advance
+        stand_arm_h_start = float(os.environ.get("STAND_ARM_HSTART", "0.0"))  # value of the FIRST advance
+        stand_arm_hold  = int(os.environ.get("STAND_ARM_HOLD", "12000"))      # steps between advances
+        # Step BACK DOWN when landing_hit_rate falls under guard * (its level at the first advance).
+        # Without the step-back a gate the policy cannot clear means it never arms and never jumps.
+        stand_arm_guard = float(os.environ.get("STAND_ARM_GUARD", "0.85"))
         landing_stability_lin_sigma = 2.0   # was effectively 0.25 (floored to ~0 for real landing |v|, no gradient)
         landing_stability_ang_sigma = 1.0   # was effectively 0.5
         four_leg_push_force_floor = 200.0   # N: total vertical GRF below which four_leg_push is NOT graded -> only the
@@ -1118,9 +1132,17 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
             # ---- air-time + stay-planted boosts (user) ----
             clean_takeoff_bonus = 0.0        # DELETED (2026-07-11): reward-distribution audit showed it was INERT
                                              # (contributed 0.0001 = 0.0% -> never actually firing). Removed.
-            stand_no_takeoff = 0.0           # DELETED (2026-07-11): jump-only config (jump_command_range=[1,1]) never
-                                             # commands stand, so this never fires (contributed -0.002). Removed.
-                                             # (was -5.0; only fired at cmd4<=0.5 which the jump-only config never samples.)
+            # ⭐REVIVED 2026-10-08 (user: "策略得学到这个"). It was switched off as DEAD CODE, not as a
+            # failure: the note below is right that jump_command_range=[1,1] never COMMANDS a stand, but
+            # it missed that single_jump_command_prob=1.0 holds cmd4=0 from the post-jump resample to the
+            # end of the episode -- so the stand command does occur, for roughly half of a 3.7 s episode,
+            # plus stand_command_prob_after_takeoff=0.20 of fresh resamples. It is also the one lever here
+            # that is discovery-safe by CONSTRUCTION: `cmd4 <= 0.5` is false for every jump episode, and
+            # the reward returns 0 until the success latch opens. 2026-06-24 verified it works (model_3000
+            # held a stand). Default 0.0 = OFF, so existing runs are unchanged.
+            stand_no_takeoff = float(os.environ.get("STAND_NO_TO_W", "0.0"))
+                                             # [prior] DELETED (2026-07-11): jump-only config (jump_command_range=[1,1])
+                                             # never commands stand, so this never fires (contributed -0.002).
             all_feet_airborne = 3.0          # 2.0 -> 3.0: more air-time pressure. Gated (squat_deep + height_progress)
                                              # so it can't be farmed by a tucked sprawl. The policy currently UNDERSHOOTS
                                              # the commanded apex (peak ~0.50 vs cmd ~0.55) -> this pushes it to the FULL

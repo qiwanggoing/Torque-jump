@@ -581,6 +581,22 @@ class GO2OmniJumpTorque(GO2Torque):
                 & (torch.norm(self.base_ang_vel[:, :2], dim=1) < float(getattr(self.cfg.rewards, "jump_settle_ang_vel", 1.5)))
             )
             settled_now = contact4 & calm
+            # ⭐STAND BEFORE YOU JUMP (2026-10-08, user). The gate above is contact + stillness ONLY --
+            # it has no height or posture term, so a robot SITTING in a collapsed squat passes it with full
+            # marks. Measured on refprev2 the pre-jump stance decays MONOTONICALLY 0.295 -> 0.223 m
+            # (ck14400 -> ck20000) while the hit rate saturates at ck17600: posture is the cheapest
+            # currency the policy owns, so it spends it buying task reward. The REWARD route cannot fix
+            # that -- stand_pose + stand_still together span only 2.4-7.7% of mean_reward and the pre-jump
+            # window is 1/6 to 1/2 of their active samples, so <=4% of the return is at stake, and raising
+            # their weight is exactly what broke discovery before (stand_no_takeoff, first_jump_delay 200).
+            # A HARD gate puts the WHOLE jump return behind standing up, competes for no weight, and can
+            # neither saturate nor fall into an exp() dead zone -- the shape of every lever that has
+            # actually worked here (REQ_SQUAT, clean_takeoff, run_up_step).
+            # Ramped AND stepped back by _update_stand_arm_height so it can never deadlock the jump.
+            arm_h = float(getattr(self, "_stand_arm_h", 0.0))
+            if arm_h > 0.0:
+                base_h = self.root_states[:, 2] - self.env_origins[:, 2]
+                settled_now = settled_now & (base_h > arm_h)
             self._settle_count = torch.where(settled_now, self._settle_count + 1,
                                              torch.zeros_like(self._settle_count))
             ready_to_jump = ready_to_jump & (self._settle_count >= settle_steps)
