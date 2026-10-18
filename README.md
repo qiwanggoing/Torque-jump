@@ -24,7 +24,7 @@ This repository also contains my follow-up study on a separate Go2 jumping contr
 
 The comparison shows a clear trade-off: the pure-torque policy settled more reliably and faster, while the thesis baseline landed closer to the target more often.
 
-[Watch the pure-torque jump demo](media/pure_torque_jump_demo.mp4)
+[Watch the pure-torque Go2 jump demo](media/go2_pure_torque_jump.mp4)
 
 The task and comparison details in this fork are my project work. The SATA framework and paper authorship are credited below.
 
