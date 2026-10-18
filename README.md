@@ -12,6 +12,24 @@ LI Peizhuo*. LI Hongyi*, Ge SUN, [Jin CHENG](https://jin-cheng.me), Xinrong YANG
 
 ---
 
+## Personal project: pure-torque Go2 jumping
+
+This repository also contains my follow-up study on a separate Go2 jumping controller. The policy uses **zero direct PD torque assistance** and a phase-dependent posture reference. I evaluated it against the thesis baseline with the same full domain-randomization protocol.
+
+| Measure | Thesis baseline | Pure-torque follow-up |
+|---|---:|---:|
+| Landing within 0.10 m | 87% | 65% |
+| Strict post-landing settling | 82% | 98% |
+| Mean settling time | 0.57 s | 0.39 s |
+
+The comparison shows a clear trade-off: the pure-torque policy settled more reliably and faster, while the thesis baseline landed closer to the target more often.
+
+[Watch the pure-torque jump demo](media/pure_torque_jump_demo.mp4)
+
+The task and comparison details in this fork are my project work. The SATA framework and paper authorship are credited below.
+
+---
+
 ## 🧭 Overview
 
 **SATA** is a torque-based reinforcement learning framework inspired by how animals progressively acquire locomotion capabilities.  
