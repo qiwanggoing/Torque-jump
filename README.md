@@ -12,32 +12,24 @@ LI Peizhuo*. LI Hongyi*, Ge SUN, [Jin CHENG](https://jin-cheng.me), Xinrong YANG
 
 ---
 
-## Go2 commanded jumping: thesis baseline and pure-torque follow-up
+## Pure-torque Go2 commanded jumping
 
-My project studies a Unitree Go2 performing a command-conditioned single jump in Isaac Gym. I trained the policies with PPO and evaluated how accurately the robot could reach its commanded landing point and recover to a stable stand. The work has two distinct stages: the controller developed for my thesis, followed by a separate pure-torque follow-up built on the SATA codebase.
+I developed and evaluated a command-conditioned single-jump controller for the Unitree Go2 in Isaac Gym using PPO. The policy controls the robot with **pure joint torque and zero direct PD torque assistance** (`α_PD = 0`) while using a phase-dependent posture reference to support the jump motion.
 
-### Thesis baseline
+I tested the controller under domain randomization of robot mass (±1 kg) and ground friction (0.5–1.25). A landing counted as a hit when touchdown was within 0.10 m of the target; post-landing recovery was assessed with a strict settling criterion.
 
-The thesis controller uses a phase-dependent posture reference and a residual PD contribution with a 0.10 blend weight. I evaluated it under domain randomization of robot mass (±1 kg) and ground friction (0.5–1.25) to test performance across changing physical conditions.
+| Evaluation measure | Result |
+|---|---:|
+| Landing hit rate (0.10 m tolerance) | 65% |
+| Mean landing error | 0.091 m |
+| Strict post-landing settling | 98% |
+| Mean settling time | 0.39 s |
 
-### Pure-torque follow-up
-
-The follow-up removes direct PD torque assistance while retaining a phase-dependent posture reference. I compared this policy with the thesis baseline using the same full domain-randomization evaluation protocol. A landing counted as a hit when the robot landed within 0.10 m of the target; post-landing settling was measured with a strict stability criterion.
-
-| Measure (full domain randomization) | Thesis baseline | Pure-torque follow-up |
-|---|---:|---:|
-| Landing hit rate (0.10 m tolerance) | **87%** | 65% |
-| Mean landing error | **0.064 m** | 0.091 m |
-| Strict post-landing settling | 82% | **98%** |
-| Mean settling time | 0.57 s | **0.39 s** |
-
-The comparison shows a clear trade-off. The thesis baseline reached the target more accurately, while the pure-torque policy settled more reliably and faster. The follow-up therefore demonstrates the benefit and cost of removing direct PD torque support under the tested conditions; it does not outperform the baseline on every measure.
-
-I also developed more than ten Python scripts to automate evaluation and analysis, including batch assessment across jump commands, phase-based motion analysis, per-joint torque–speed diagnostics, and sweeps with configurable domain-randomization conditions.
+I also developed more than ten Python scripts for automated evaluation and analysis, including batch assessment across jump commands, phase-based motion analysis, per-joint torque–speed diagnostics, and configurable domain-randomization sweeps.
 
 [Watch the pure-torque Go2 jump demo](media/go2_pure_torque_jump.mp4)
 
-The thesis task, follow-up controller, experiments, and analysis are my project work. The SATA framework and its published paper are the work of the authors credited above; this repository is a fork of their implementation.
+The controller, task implementation, experiments, and analysis are my project work. The SATA framework and its published paper are the work of the authors credited above; this repository is a fork of their implementation.
 
 ---
 
