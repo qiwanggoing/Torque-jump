@@ -1,24 +1,21 @@
-# Pure-Torque Commanded Jumping for Unitree Go2
+# Pure-Torque Go2 Jumping with Landing-Point Control
 
-I developed and evaluated a reinforcement-learning controller that lets a Unitree Go2 perform a commanded single jump, land near a target, and recover to a stable stand. The final policy uses **direct joint-torque control with zero PD torque assistance** (`α_PD = 0`). It uses a phase-dependent posture reference to guide the different parts of the jump.
+A quadruped jump is more than reaching a distance. The robot has to load its legs, push off, fly without ground contact, land near a requested point, absorb the impact, and stand again. I built a command-conditioned single-jump task for the Unitree Go2 around this full sequence: the policy receives a landing-distance command and must complete the jump and recovery.
 
-## My contribution
+I trained the controller with PPO in Isaac Gym. Its action directly controls the 12 joint torques, with **no PD torque assistance** (`α_PD = 0`). A phase-dependent posture reference guides the motion through loading, push-off, flight, pre-landing, and recovery; it does not add PD torque to the action. To check performance beyond one fixed setup, I also ran domain-randomized tests with robot mass varied by ±1 kg and ground friction from 0.5 to 1.25.
 
-- Implemented and trained the Go2 jumping task with PPO in Isaac Gym.
-- Developed the pure-torque controller and phase-dependent posture reference for take-off, flight, landing, and recovery.
-- Evaluated landing accuracy and post-landing stability under randomized robot mass and ground friction.
-- Wrote more than ten Python scripts for repeatable evaluation and diagnosis, including batch command sweeps, jump-phase analysis, joint torque–speed checks, and configurable randomization scans.
+I wrote more than ten Python tools to make the experiments repeatable and easier to diagnose. They include batch evaluation across jump commands, phase-by-phase motion analysis, joint torque–speed checks, and scans with configurable randomization conditions.
 
 ## Results
 
-The strongest command range was 0.80–0.90 m in the nominal simulation evaluation (fixed friction and +0.1 kg base mass). A landing counted as a hit when touchdown was within 0.10 m of the target; post-landing recovery used a strict settling criterion.
+The strongest landing accuracy was in the 0.80–0.90 m command range. The figures below are from the nominal simulation evaluation with fixed friction and a +0.1 kg base-mass offset. A hit means touchdown within 0.10 m of the target; settling uses the strict post-landing stability criterion.
 
 | Forward jump command | Landing hit rate | Mean landing error | Strict settling |
 |---:|---:|---:|---:|
 | 0.80 m | 98% | 0.053 m | 100% |
 | 0.90 m | 98% | 0.031 m | 100% |
 
-The policy was also stress-tested with domain randomization of robot mass (±1 kg) and ground friction (0.5–1.25). The table above reports the best-performing command bins under nominal simulation conditions, not the domain-randomized aggregate.
+At 1.00 m, the policy still settled in every tested episode, but target accuracy dropped to a 66% hit rate and 0.103 m mean error. This marks the edge of the tested command range rather than the controller's strongest result.
 
 ## Demo
 
