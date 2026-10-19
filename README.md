@@ -24,7 +24,9 @@ These results show that the robot can land and settle reliably with no direct PD
 
 ## Demo
 
-[Watch the pure-torque Go2 jump](media/go2_pure_torque_jump.mp4)
+<p align="center">
+  <video src="media/go2_pure_torque_jump.mp4" controls width="78%"></video>
+</p>
 
 ## Code
 
