@@ -11,16 +11,14 @@ I developed and evaluated a reinforcement-learning controller that lets a Unitre
 
 ## Results
 
-The final policy was evaluated under the full domain-randomization protocol: robot mass varied by ±1 kg and ground friction ranged from 0.5 to 1.25. A landing counted as a hit when the robot touched down within 0.10 m of its target. Post-landing recovery used a strict settling criterion.
+The strongest command range was 0.80–0.90 m in the nominal simulation evaluation (fixed friction and +0.1 kg base mass). A landing counted as a hit when touchdown was within 0.10 m of the target; post-landing recovery used a strict settling criterion.
 
-| Measure | Result |
-|---|---:|
-| Landing hit rate (0.10 m tolerance) | 65% |
-| Mean landing error | 0.091 m |
-| Strict post-landing settling | 98% |
-| Mean settling time | 0.39 s |
+| Forward jump command | Landing hit rate | Mean landing error | Strict settling |
+|---:|---:|---:|---:|
+| 0.80 m | 98% | 0.053 m | 100% |
+| 0.90 m | 98% | 0.031 m | 100% |
 
-These results show that the robot can land and settle reliably with no direct PD torque assistance, while target accuracy remains an important metric for further improvement.
+The policy was also stress-tested with domain randomization of robot mass (±1 kg) and ground friction (0.5–1.25). The table above reports the best-performing command bins under nominal simulation conditions, not the domain-randomized aggregate.
 
 ## Demo
 
