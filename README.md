@@ -32,8 +32,12 @@ These published distances give useful context for the scale of the task. They ar
 ## Demo
 
 <p align="center">
-  <video src="media/go2_pure_torque_jump.mp4" controls width="78%"></video>
+  <a href="media/go2_pure_torque_jump.mp4">
+    <img src="media/go2_pure_torque_jump.gif" width="78%" alt="Pure-torque Go2 jump simulation; click to open the full MP4 video">
+  </a>
 </p>
+
+Click the preview to open the full video.
 
 ## Code
 
