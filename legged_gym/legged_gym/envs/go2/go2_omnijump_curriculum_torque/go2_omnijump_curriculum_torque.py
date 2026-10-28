@@ -321,6 +321,17 @@ class GO2OmniJumpCurriculumTorque(GO2OmniJumpTorque):
             self.commands[env_ids, 4] = self.command_ranges["jump_command"][1]
 
     def _compute_torques(self, actions):
+        # ACTUATION LATENCY (my_go2_jump range_cmd_action_latency = [1, 3], default off here).
+        # Delays the TORQUE command only; the observation keeps the COMMANDED previous action, which
+        # is what my_go2_jump does as well (it delays actions_scaled on the way into the torque law
+        # and observes self.actions). This method is called once per SIM step from
+        # go2_torque.step()'s frequency-ramp loop, so the ring advances in sim steps -- the unit
+        # argument is written out at _latency_buf in go2_torque.py.
+        _lo_a, _hi_a = self._lat_range("DR_ACT_LAT")
+        if _hi_a > 0:
+            _act_d = self._latency_buf("act", actions[:, :12], _lo_a, _hi_a)
+            actions = torch.cat((_act_d, actions[:, 12:]), dim=-1) \
+                if actions.shape[1] > 12 else _act_d
         self._update_growth_scale()
         self._update_default_joint_pd_target()
         action_scale, _, _ = self._control_curriculum_values()

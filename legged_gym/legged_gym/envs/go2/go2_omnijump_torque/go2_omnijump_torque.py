@@ -858,6 +858,33 @@ class GO2OmniJumpTorque(GO2Torque):
             & (self.landing_step_counter >= max(int(self.cfg.rewards.landing_buffer_steps), 1))
         )
         pose_gate = getattr(self.cfg.rewards, "next_jump_requires_default_pose", False)
+        # ⭐刀1 "跳完必须站起来" (2026-10-16, user). successful_jump (weight 1500, the single largest
+        # sparse carrot) is decided at just_landed and the ONLY cancel during the landing buffer is
+        # excessive_tilt (|g_xy| > success_fallover_tilt, 0.4 ~ 24 deg here). A LEVEL belly-flat collapse
+        # is therefore paid in full. MEASURED at the LAST step of the buffer (scratchpad/bufend.py, 256
+        # env, pure torque, latch forced, ckpt 10000): arm D omniyaw finishes at p50 = 0.293 m against a
+        # 0.303 m default stance, but arm E omnidpr -- the arm that traded the stand/landing default_pos
+        # PENALTY for a weak exp reward -- finishes EVERY jump at 0.122-0.144 m and still books an 0.899
+        # success rate. It buys part of its score by lying down.
+        # GATE: at the finishing step, cancel pending_success if the base is below land_stand_min_height.
+        # Read at the buffer END, deliberately NOT landing_min_height (the running minimum): dipping low
+        # while absorbing touchdown is correct behaviour, failing to come back up is what we are pricing.
+        # DISCOVERY-SAFE: gated on the one-way succ-rate latch (_takeoff_omega_on), so a run is
+        # byte-identical to its no-gate twin until the latch opens.
+        # NO CURRICULUM SIDE EFFECTS in go2_omnijump_landing_torque (verified 2026-10-16): the per-env dx
+        # curriculum block is skipped (landing_dx_curriculum=False), the stage-2 handover is guarded off
+        # (landing_anchor_jump_start), and the RSI sweep that reads _succ_rate_ema is dead (rsi_prob=0).
+        # The latch is one-way, so a drop in successful_jump_rate cannot close the gate on itself.
+        # Default 0.0 = OFF = exact no-op, so every sibling task is untouched.
+        stand_min_h = float(getattr(self.cfg.rewards, "land_stand_min_height", 0.0))
+        if stand_min_h > 0.0 and getattr(self, "_takeoff_omega_on", False):
+            stand_ok = (self.root_states[:, 2] - self.env_origins[:, 2]) >= stand_min_h
+            self.pending_success &= ~(ready_to_finish & (~stand_ok))
+            if not hasattr(self, "_stand_gate_n"):
+                self._stand_gate_ok = torch.zeros((), dtype=torch.float, device=self.device)
+                self._stand_gate_n = torch.zeros((), dtype=torch.float, device=self.device)
+            self._stand_gate_ok += (ready_to_finish & stand_ok).sum().float()
+            self._stand_gate_n += ready_to_finish.sum().float()
         if torch.any(ready_to_finish):
             finish_ids = ready_to_finish.nonzero(as_tuple=False).flatten()
             self.last_jump_success[finish_ids] = self.pending_success[finish_ids]
