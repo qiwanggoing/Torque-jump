@@ -1,14 +1,7 @@
-# SATA
+# Torque-controlled jumping on Go2
 
-Official Implementation for **[SATA: Safe and Adaptive Torque-Based Locomotion Policies Inspired by Animal Learning](https://arxiv.org/abs/2502.12674)**
-
-Accepted at **Robotics: Science and Systems (RSS) 2025**
-
-LI Peizhuo*. LI Hongyi*, Ge SUN, [Jin CHENG](https://jin-cheng.me), Xinrong YANG, Guillaume BELLEGARDA, Milad SHAFIEE, [Yuhong CAO](https://www.yuhongcao.online), Auke IJSPEERT, [Guillaume SARTORETTI](https://cde.nus.edu.sg/me/staff/sartoretti-guillaume-a/)
-
-<p align="center">
-  <img src="sata_overview.png" width="100%" />
-</p>
+Commanded-distance jumping for the Unitree Go2 under **pure torque control** — no PD position
+target at deployment. Built on the SATA codebase (see [Based on](#based-on)).
 
 ---
 
@@ -27,14 +20,13 @@ LI Peizhuo*. LI Hongyi*, Ge SUN, [Jin CHENG](https://jin-cheng.me), Xinrong YANG
 
 ## 🧭 Overview
 
-**SATA** is a torque-based reinforcement learning framework inspired by how animals progressively acquire locomotion capabilities.  
-It introduces a biologically motivated **growth curriculum** that schedules torque limits and control frequency to evolve safely during training.
+The task trained here is `go2_omnijump_landing_torque`: the robot stands, is given a landing
+displacement command, and jumps to it — under pure torque, at 200 Hz, with the PD position prior
+faded out to zero (`0.5 -> 0`) before the policy is used. Its ancestor
+`go2_omnijump_curriculum_torque` is also in the tree.
 
----
-
-## 🦘 OmniJump Torque Task (this fork)
-
-This fork adds `go2_omnijump_curriculum_torque` — an omnidirectional jumping task built on top of the SATA torque framework. The goal is a policy that **survives the full PD prior fade-out** (PD weight `0.5 → 0`) and executes pure-torque jumps.
+The underlying torque control path and its growth curriculum, which schedules torque limits and
+control frequency over training, come from SATA ([Based on](#based-on)).
 
 ### Train and play
 
@@ -155,21 +147,20 @@ Single-frame, no stacking. `pd_alpha` is the only curriculum-aware channel.
    ```cmd
    python scripts/play.py --task=go2_torque
    ```
-## Troubleshooting:
-### Contact
-+ Corresponding author: CAO Yuhong: caoyuhong@nus.edu.sg
-+ Deployment: LI Peizhuo: lipeizhuo@u.nus.edu 
-+ Policy Learning in Sim: LI Hongyi: hongyi.li@u.nus.edu
+## Based on
 
+This repository is a fork. The jumping task, its rewards, the commanded reference and the
+measurements in [`RUNBOOK.md`](RUNBOOK.md) are work added on top of the stack below; everything else
+is the work of its original authors.
 
-### Issues
-You can create an issue if you meet any bugs, except:
-+ If you cannot run the [vanilla RSL's Legged Gym](https://github.com/leggedrobotics/legged_gym), it is expected that you first go to the vanilla Legged Gym repo for help.
-+ There can be CUDA-related errors when there are too many parallel environments on certain PC+GPU+driver combination: we cannot solve thiss, you can try to reduce num_envs.
-+ Our codebase is only for our hardware system showcased above. We are happy to make it serve as a reference for the community, but we won't tune it for your own robots.
+**SATA** — Safe and Adaptive Torque-Based Locomotion Policies Inspired by Animal Learning,
+Robotics: Science and Systems (RSS) 2025. The torque control path, the growth curriculum and the Go2
+assets come from it. Paper: [arXiv:2502.12674](https://arxiv.org/abs/2502.12674).
 
-## Credit
-If our work does help you, please consider citing us and the following works:
+<p align="center">
+  <img src="sata_overview.png" width="100%" />
+</p>
+
 ```bibtex
 @article{li2025sata,
   title={SATA: Safe and Adaptive Torque-Based Locomotion Policies Inspired by Animal Learning},
@@ -179,3 +170,9 @@ If our work does help you, please consider citing us and the following works:
 }
 ```
 
+**legged_gym** and **rsl_rl** — ETH Zurich / NVIDIA, BSD-3-Clause. Their licenses are retained at
+[`legged_gym/LICENSE`](legged_gym/LICENSE) and [`rsl_rl/LICENSE`](rsl_rl/LICENSE), together with the
+per-file copyright headers and the third-party asset and dependency licenses under
+`legged_gym/licenses/` and `rsl_rl/licenses/`.
+
+Isaac Gym Preview 4 is NVIDIA's and is not redistributed here; the install pipeline above fetches it.

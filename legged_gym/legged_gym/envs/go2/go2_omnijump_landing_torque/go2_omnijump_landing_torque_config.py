@@ -109,7 +109,7 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
         # preview would extend into the future. 0 (default) -> 1012-dim, bit-identical to the trained line.
         pd_target_obs = bool(int(os.environ.get("PD_TARGET_OBS", "0")))
         # REF_PREVIEW_OBS=1 additionally appends a PREVIEW of the command-conditioned motion reference
-        # R(phi, c) extracted from model_14700 (paper_tools/commanded_ref_14700.npz): the reference joint
+        # R(phi, c) extracted from model_14700 (resources/references/commanded_ref_14700.npz): the reference joint
         # pose at k, k+h1, k+h2 ... steps ahead, 12 dims per horizon, expressed exactly like pd_target_obs
         # (target - default_dof_pos, dof_pos scaling, same mirror parity). pd_target_obs gives the scaffold
         # pose at time t; this gives where the MOTION goes next, which is the "+trajectory input" arm of the
@@ -676,7 +676,7 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
         # Fuchioka 2023 base w0.60 vs joint w0.20) and the joints are relaxed another ~10x at touchdown
         # (Wang's landing sigma 2.0; the defense slide already says "weaker joint tracking around touchdown").
         # This is NOT style: the extracted reference already consumes 93-100% of the T-N envelope on all 12
-        # joints (paper_tools/reference_trajectory_14700_2026-10-06.md), so there is no torque headroom left
+        # joints (measured 2026-10-06 on model_14700), so there is no torque headroom left
         # for a tight joint track -- and its landing pose leans on the mechanical limits, which we do not
         # want to force the policy to reproduce.
         ref_track_joint_sigma      = float(os.environ.get("REF_SIG_JOINT", "0.2"))
@@ -1383,7 +1383,7 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
             # DEFAULT_POS_PEN_SCOPE=air in `class rewards`.
             #
             # ❌ w=6.0 SIZED BY SLOPE AND IT WAS WRONG (killed at iter 110, kept in
-            # xiaoyulong/killed_omnidpr_s1_w6_iter110). The slope argument: the penalty's slope is a
+            # run omnidpr_s1_w6, killed at iter 110). The slope argument: the penalty's slope is a
             # constant 1.5 in stand (0.5 x the prejump 3.0) and 0.5 in landing, while the reward's slope
             # at the measured operating point is w*exp(-L1/sigma)/sigma = 0.118w / 0.081w, so w=6.0
             # replaces the landing slope one-for-one and gives stand half its old pull. Matched-iteration

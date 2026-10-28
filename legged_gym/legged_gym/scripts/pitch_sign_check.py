@@ -3,7 +3,7 @@ takeoff-instant + flight pitch dynamics for ONE jump. Removes ambiguity before t
 _reward_base_ang_vel_xy / _reward_pitch_level.
 
 RUN
-  export PATH=/home/qiwang/miniconda3/envs/sata-clean/bin:$PATH ; export PYTHONNOUSERSITE=1
+  export PATH=<conda-env>/bin:$PATH ; export PYTHONNOUSERSITE=1
   cd ~/torque_jump2/SATA/legged_gym
   CURVE_DX=1.0 CURVE_HEIGHT=0.5 python legged_gym/scripts/pitch_sign_check.py \
       --task=go2_omnijump_landing_torque --headless --load_run=<run> --checkpoint=<N>

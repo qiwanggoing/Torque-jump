@@ -6,7 +6,7 @@ mean policy, comp_torque fed, pure-torque replay since all scanned ckpts are pas
 Per checkpoint it sweeps DX and prints one compact line; at the end it RANKS by reliability.
 
 RUN
-  export PATH=/home/qiwang/miniconda3/envs/sata/bin:$PATH
+  export PATH=<conda-env>/bin:$PATH
   cd ~/torque_jump2/SATA/legged_gym
   SCAN_RUN=Jul16_12-07-41_stage1_landing SCAN_START=3000 SCAN_END=5000 SCAN_STEP=100 \
   EVAL_DX_SWEEP=0.5,0.6,0.7,0.8,0.9,1.0,1.1,1.2 EVAL_HEIGHT=0.5 EVAL_N=256 EVAL_STEPS=700 \

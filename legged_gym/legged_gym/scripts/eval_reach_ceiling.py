@@ -24,7 +24,7 @@ FINDING (model_3000): wall at cmd 0.6->0.7. calf pinned ~130% (torque-speed curv
 
 RUN
 ---
-  export PATH=/home/qiwang/miniconda3/envs/sata/bin:$PATH
+  export PATH=<conda-env>/bin:$PATH
   cd ~/torque_jump2/SATA/legged_gym
   python legged_gym/scripts/eval_reach_ceiling.py --task=go2_omnijump_landing_torque --headless
   # optional overrides (env vars):

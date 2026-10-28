@@ -22,7 +22,6 @@ different configuration.
 | `legged_gym/legged_gym/scripts/eval_ckpt_scan_dr.py` | deterministic checkpoint scan with per-axis DR control |
 | `legged_gym/legged_gym/scripts/play_landing.py` | single-env GUI play + per-episode trace |
 | `legged_gym/resources/references/` | `commanded_ref_14700.npz` (default), `commanded_ref_sstill6.npz` |
-| `paper_tools/` | reference-trajectory extraction, `ref_query.py`, measurement scripts |
 | `deploy_mujoco/` | sim2sim |
 | `checkpoints/` | three committed models, §5 |
 | `README.md` | project + install pipeline |
@@ -461,8 +460,9 @@ Geometry 1012 = 980 + 32, i.e. `PD_TARGET_OBS` unset and no ref preview; otherwi
 
 `commanded_ref_14700.npz` contains `cmd`, `fs`, `pre`, `calf_range` and per-command
 `q / dq / tau / base / contact / q_std / unload` arrays. It carries **no source run or checkpoint
-field**; the attribution above rests on the filename, on the extraction tooling in `paper_tools/`,
-and on the file's `calf_range = [-2.7227, -0.83776]` matching the measurement below.
+field**; the attribution above rests on the filename and on the file's
+`calf_range = [-2.7227, -0.83776]` matching the measurement below. The extraction scripts that built
+it are not in the repository (§7).
 
 The extracted trajectory: a countermovement jump with a free-fall phase — unload, free fall 0.22 m,
 squat bottom at z = 0.079 m against 786 N (5.3 BW), launch |v| = 2.90 m/s at 49°. Cross-jump aligned
@@ -520,5 +520,29 @@ total.
 
 **Jump distance, measured as net flight from the takeoff anchor.** refprev2 0.763 m (reached by
 commanding cmd 1.7; cmd 1.0 gives 0.66), band512 0.654, omni180 0.630, landfix2 0.558. Measurement
-noise ±0.06, and these are not directly comparable to the 0.905 figure from `paper_tools/`, which
-uses a different caliper.
+noise ±0.06, and these are not directly comparable to the 0.905 figure quoted in §5, which uses a
+different caliper.
+
+---
+
+## 7. Measurements whose raw records are not in this repository
+
+The numbers in §1, §2 and §6 were produced by a set of measurement scripts and write-ups that were
+removed from the repository on 2026-10-28. They are retrievable from git history:
+
+    git show d81a246:paper_tools/<name>
+
+and the directory listing of what existed is `git show d81a246 --stat -- paper_tools/`. It held the
+reference-trajectory extraction chain (`extract_ref.py` -> `ref_traj_14700.npz` ->
+`build_commanded_ref.py` -> `commanded_ref_14700.npz`, plus `ref_query.py` and `check_ref.py`), about
+eighteen measurement scripts, and eleven dated write-ups from 2026-09-29 to 2026-10-07 that record
+the protocol behind each figure -- among them the reward shares of §6, the smoothness figures, the
+reference-trajectory description of §5, and the paper-baseline comparison.
+
+Consequences for anything built from here:
+
+* `resources/references/commanded_ref_14700.npz` is still present and is what the code loads, but
+  **the chain that derives it is not**, so the table cannot be re-derived or extended from a
+  checkpoint without recovering those scripts from history.
+* The figures quoted in this file cannot be re-checked against their original protocol from the
+  working tree alone.

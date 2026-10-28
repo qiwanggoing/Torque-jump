@@ -5,7 +5,7 @@ Answers: (1) which joints saturate (velocity AND torque) in the push, (2) how ji
 (3) how much each leg swings during FLIGHT (rear vs front). Saves a PNG + prints analysis.
 
 RUN
-  export PATH=/home/qiwang/miniconda3/envs/sata/bin:$PATH ; unset PYTHONNOUSERSITE
+  export PATH=<conda-env>/bin:$PATH ; unset PYTHONNOUSERSITE
   cd ~/torque_jump2/SATA/legged_gym
   CURVE_DX=1.2 CURVE_HEIGHT=0.5 python legged_gym/scripts/joint_time_curves.py \
       --task=go2_omnijump_landing_torque --headless \
