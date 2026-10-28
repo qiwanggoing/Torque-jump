@@ -12,6 +12,20 @@ LI Peizhuo*. LI Hongyi*, Ge SUN, [Jin CHENG](https://jin-cheng.me), Xinrong YANG
 
 ---
 
+> ### 👉 Working on the torque-jumping fork? Read [`RUNBOOK.md`](RUNBOOK.md) first.
+>
+> This fork is driven by **134 environment-variable knobs**, and nearly every one defaults to *the
+> old behaviour* — so a run that forgets an export is not an error, it is a silently different
+> experiment that finishes normally and gives you a number you will believe. `RUNBOOK.md` has the
+> knob tables, the **five evaluation traps** (each of which has already invalidated real results),
+> the state machine, the committed checkpoints in [`checkpoints/`](checkpoints/), and a list of
+> **verified dead ends** so you do not repeat them.
+>
+> Install/environment setup is below in this file and is current. Remote-box specifics are in
+> [`REMOTE_TRAINING.md`](REMOTE_TRAINING.md).
+
+---
+
 ## 🧭 Overview
 
 **SATA** is a torque-based reinforcement learning framework inspired by how animals progressively acquire locomotion capabilities.  
@@ -65,6 +79,13 @@ torques (12) + motor_fatigue (12) + pd_alpha (1)
 ```
 
 Single-frame, no stacking. `pd_alpha` is the only curriculum-aware channel.
+
+> ⚠️ **This 69-dim layout describes the flat-terrain ancestor only.** The jumping task
+> `go2_omnijump_landing_torque` stacks frames and adds extras: `frame(49) × 20 + extras`, where
+> `num_single_extras = 32 + 12·PD_TARGET_OBS + 12·len(REF_PREVIEW)`. With `PD_TARGET_OBS=1` and
+> `REF_PREVIEW=0,10,30` that is **actor 1060**, and the critic is asymmetric at **507**. A checkpoint
+> will not load if these do not match, which is the fastest way to notice a missing export.
+> See [`RUNBOOK.md`](RUNBOOK.md) §2.6.
 
 ---
 
