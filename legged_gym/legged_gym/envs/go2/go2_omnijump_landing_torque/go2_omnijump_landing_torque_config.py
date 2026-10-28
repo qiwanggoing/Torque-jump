@@ -78,7 +78,28 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
         #   + torques12 + motor_fatigue12 + pd_prior1 = 32. Atanassov keeps the command single (no 20x
         #   redundancy); we additionally keep the self-generated raw torques single, because stacking
         #   240 dims of them was one of the suspects when the first flatten-everything version died.
-        num_stacked_frame = 49
+        # GRF_OBS=1 appends the RAW vertical ground reaction force per foot (4) to the stacked frame.
+        # The frame already carries foot contact, but only as the BINARY `fz > 1.0 N` -- every bit of
+        # MAGNITUDE is quantised away, and the magnitude is where the jump phase lives: the push peaks
+        # at ~6.0 BW total while the unload drops to near zero, and both read as the same "1" today.
+        # This is the largest single information loss in the observation, it is a REAL sensor (the Go2
+        # has foot force sensing) rather than a feature we derive, and the phase falls out of it on its
+        # own -- `phase_loaded`, the unload event the whole reference clock is anchored on, is DEFINED by
+        # the contact force. Also covers three known blind spots: the landing impact spike (invisible
+        # now), the second-takeoff push, and the "slide without lifting the foot" creep that a 1 N
+        # threshold cannot see.
+        # In the STACKED frame, not the extras: the force window is only 66-119 ms, i.e. exactly the
+        # scale of the 20-frame / 0.10 s ring, so without the history the time structure -- the whole
+        # point -- is thrown away.
+        # ⚠️ NOISE IS MANDATORY. Isaac's contact_forces is a noiseless ideal; real foot force sensing is
+        # dirty, so shipping this noise-free would build in a sim2real trap (the binary channel is
+        # noise-free legitimately -- a threshold crossing is not). ⚠️ Normalised by ~1 body weight
+        # (150 N ~ 15.3 kg Go2) and clipped, or these 4 dims (0..1200 N) would dwarf every other dim.
+        grf_obs = bool(int(os.environ.get("GRF_OBS", "0")))
+        grf_obs_scale = 1.0 / float(os.environ.get("GRF_BW_N", "150.0"))   # -> units of body weight
+        grf_obs_clip_n = float(os.environ.get("GRF_CLIP_N", "1200.0"))     # ~8 BW per foot, generous
+        grf_obs_noise = float(os.environ.get("GRF_NOISE", "0.05"))         # SCALED units -> ~7.5 N
+        num_stacked_frame = 49 + (4 if grf_obs else 0)
         # PD_TARGET_OBS=1 appends the PD scaffold's CURRENT phase target to the extras (12 dims,
         # expressed as target - default_dof_pos, the same scaling as dof_pos). Today the policy observes
         # pd_prior_alpha -- HOW HARD the scaffold pulls -- but never WHERE it pulls, so it is trained its
@@ -97,7 +118,35 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
         ref_preview_obs = bool(int(os.environ.get("REF_PREVIEW_OBS", "0")))
         ref_preview_h = tuple(int(x) for x in os.environ.get("REF_PREVIEW", "0,10,30").split(",") if x != "")
         ref_file = os.environ.get("REF_FILE", "")   # "" -> resources/references/commanded_ref_14700.npz
-        num_single_extras = (32 + (12 if pd_target_obs else 0)
+        # ⭐2026-10-12 REF_SLOT_RADIUS. _ref_slot indexes the 61-bin table (cmd_x 0.30..0.90) by
+        # commands[0] ALONE. Under OMNI_DEG the command is polar -- commands[0] = r*cos(theta) -- so
+        # every lateral and backward draw falls below 0.30 and CLAMPS to bin 0, i.e. the 0.30 m FORWARD
+        # reference. Measured on omni180_s1 that is 75-80% of all draws, and the tracking slope collapsed
+        # to 0.541 (vs 0.796 for refprev2, whose clamp rate is 14.3%) while the intercept ROSE -- exactly
+        # what a command-INDEPENDENT constant reference predicts. Indexing by the command RADIUS instead
+        # keeps the reference's AMPLITUDE matched to "how far" for every heading, so the clamp rate goes
+        # to 0 whenever DX_MAX <= 0.90. LIMITATION: the table's joint pattern is still a FORWARD jump, so
+        # a side/backward command gets the right amplitude with the wrong pattern. A front-rear mirror
+        # would fix the pattern but is ruled out by the hardware: rear thigh range [-0.52, 4.54] differs
+        # from front [-1.57, 3.49] (left-right mirror IS valid and sym_loss already applies it).
+        # 0 (default) -> indexes by commands[0] exactly as before, bit-identical for every existing run.
+        ref_slot_radius = bool(int(os.environ.get("REF_SLOT_RADIUS", "0")))
+        # YAW_OBS=1 appends (cos yaw, sin yaw) to the extras. Everything else in the observation is
+        # yaw-INVARIANT: projected_gravity only carries roll/pitch, and the landing error is already
+        # rotated into the body frame, so the policy currently has NO way to know how far it has turned
+        # -- only the yaw RATE, over a 0.10 s history window. _reset_root_states restores rot=[0,0,0,1]
+        # every reset and never randomises the heading, so world yaw IS "how much have I turned since
+        # this episode started", i.e. exactly the parasitic spin we keep measuring offline (58 deg on
+        # landfix2, +40.4 deg on band512). Form = quat_rotate_inverse(base_quat, forward_vec), i.e. a
+        # SECOND projected reference vector alongside projected_gravity -- see the long note at the
+        # build site for why it is not an euler-derived angle and why projected_gravity itself can
+        # never carry yaw. 3 dims in the extras rather than 3x20 in the stacked frame: yaw is a SLOW
+        # variable, the 20 copies in a 0.10 s ring are near-identical (and this observation is already
+        # the largest of the three code bases this builds on), while the rate history is in the frame.
+        # ⚠️ Adding it REQUIRES the matching entry in _mirror_obs_permutation (sym_loss is on and the
+        # map asserts the extras layout). 0 (default) -> byte-identical to every existing run.
+        yaw_obs = bool(int(os.environ.get("YAW_OBS", "0")))
+        num_single_extras = (32 + (3 if yaw_obs else 0) + (12 if pd_target_obs else 0)
                              + (12 * len(ref_preview_h) if ref_preview_obs else 0))
         history_length = 20
         num_observations = history_length * num_stacked_frame + num_single_extras   # 49*20 + 32 = 1012
@@ -180,7 +229,43 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
         # randomize_base_mass=True (real payload/battery/tolerance margin), just symmetric about 0.
         # If the retrained policy is weak at the ±edges, TIGHTEN this or add base-mass to the obs
         # (proper fix for a mass-sensitive jump: let the policy ADAPT the push to the actual mass).
-        added_mass_range = [-1.0, 1.0]
+        # ---- DR AS ENV OVERRIDES (2026-10-26) --------------------------------------------
+        # Every default below EQUALS the value that was in force before this change, so any run or
+        # eval that does not set these is bit-identical. Purpose: make the axes my_go2_jump and
+        # SATA's own go2_torque parent use -- and that this chain had narrowed or switched off --
+        # settable from the launch script, instead of hard-coding new numbers here.
+        #   knob                was (effective)   my_go2_jump      go2_torque
+        #   DR_FRIC_LO/HI       [0.5, 1.25]       [0.4, 0.8]       [0.5, 1.25]
+        #   DR_PUSH             False             True             True
+        #   DR_PUSH_VEL         1.5               0.4              1.5
+        #   DR_PUSH_VEL_ANG     1.0               (no such field)  1.0
+        #   DR_PUSH_INTERVAL_S  4                 4                4
+        #   DR_MASS_LO/HI       [-1.0, 1.0]       (base [-1, 1])   [-1, 5]
+        #   DR_COM_X            0.05              (not set)        0.2
+        # READ FROM THE CODE, not assumed:
+        #   * push_interval = ceil(push_interval_s / dt)            legged_robot.py:796
+        #   * _push_robots scales BOTH max_push_vel_xy AND max_push_vel_ang by general_scale
+        #     (go2_torque.py:390-397), and general_scale ramps 0->1 over warmup->x0. So the push
+        #     is ZERO through the discovery window and only reaches full strength after the PD
+        #     fade completes -- it is curriculum'd in by construction.
+        #   * shifted_com_range_* is only read inside `if randomize_base_mass:` and places a random
+        #     POINT MASS at that offset (go2_torque.py:200-210), so the mass range and the com
+        #     range are COUPLED: DR_MASS_HI=5 with DR_COM_X=0.2 means up to 5 kg hung 0.2 m
+        #     off-centre, which is an inertia perturbation as much as a mass one.
+        # ⚠️ The comment above this block records an eval_isolate massfix sweep in which the
+        # inherited [-1, +5] produced hit 0.00 at nominal mass. Re-widening to [-1, 5] therefore
+        # contradicts a recorded measurement; a run that sets DR_MASS_HI=5 must be judged with a
+        # NOMINAL-mass eval, not only under mass DR, or that failure mode is invisible again.
+        friction_range = [float(os.environ.get("DR_FRIC_LO", "0.5")),
+                          float(os.environ.get("DR_FRIC_HI", "1.25"))]
+        push_robots = bool(int(os.environ.get("DR_PUSH", "0")))
+        max_push_vel_xy = float(os.environ.get("DR_PUSH_VEL", "1.5"))
+        max_push_vel_ang = float(os.environ.get("DR_PUSH_VEL_ANG", "1.0"))
+        push_interval_s = float(os.environ.get("DR_PUSH_INTERVAL_S", "4"))
+        added_mass_range = [float(os.environ.get("DR_MASS_LO", "-1.0")),
+                            float(os.environ.get("DR_MASS_HI", "1.0"))]
+        _dr_com_x = float(os.environ.get("DR_COM_X", "0.05"))
+        shifted_com_range_x = [-_dr_com_x, _dr_com_x]
 
     class growth(GO2OmniJumpCurriculumTorqueCfg.growth):
         # PD fade EARLY (pure torque by ~iter500). The MIDDLE-window experiment (warmup 100000/x0 240000,
@@ -372,7 +457,17 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
                                               # parked ~0.6 m. ⚠️ discovery: the jump is still bootstrapped by squat/launch/
                                               # height rewards (which don't need the landing point), but if early flight_rate
                                               # stays 0, lower the floor (e.g. 0.2) or add a brief warmup.
-        landing_disp_y_stage2 = [-0.30, 0.30]  # IN-PLANE OMNIDIRECTIONAL (2026-07-11): forward + side + diagonal. d_y is a
+        # OMNI_DEG (2026-10-12): half-width of the commanded heading, in degrees, applied as a rotation
+        # of the drawn distance (see _resample_commands). 0 = forward only (default, unchanged);
+        # 90 = forward + pure lateral; 180 = full in-plane omnidirectional including backward.
+        omni_deg = float(os.environ.get("OMNI_DEG", "0"))
+        # Lateral半轴 scale for the omnidirectional command cloud (see the _resample_commands wrapper).
+        # 1.0 (default) = a disk, byte-identical to before. 0.5 = fore-aft to DX_MAX, left-right to half.
+        omni_y_scale = float(os.environ.get("OMNI_Y_SCALE", "1.0"))
+        # DY_MIN/DY_MAX hook (2026-10-11): the lateral band has been fixed at +-0.30 since 2026-07-11 and
+        # was never varied or measured separately. Defaults reproduce it exactly.
+        landing_disp_y_stage2 = [float(os.environ.get("DY_MIN", "-0.30")),
+                                 float(os.environ.get("DY_MAX", "0.30"))]  # IN-PLANE OMNIDIRECTIONAL (2026-07-11): forward + side + diagonal. d_y is a
                                                # fixed uniform range (no curriculum); d_x keeps its curriculum. Diagonal = both
                                                # non-zero. Paired with a command-conditional default_hip_pos (relax the hip
                                                # lock for lateral commands so the hips can abduct to push sideways). Yaw NOT
@@ -595,6 +690,58 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
         ref_track_vel_sigma        = float(os.environ.get("REF_SIG_VEL", "0.30"))
         stand_still_lin_sigma = 0.03
         stand_still_ang_sigma = 0.10
+        # ⭐2026-10-21 stand_track: ONE term owning every phase that is supposed to be a quiet
+        # stance at the DEFAULT pose (pre-arm AND the settled part of the landing buffer). It replaces
+        # stand_pose + stand_still at the SAME total weight (9.0 = 3.0 + 6.0), so this is a change of
+        # SHAPE, not of budget -- raising the standing budget is what broke discovery before.
+        # Three measured defects it fixes (scratchpad/rew_phase*.py on refss512r ck34000, 128 env,
+        # nominal + DR mass, pure torque, latch forced):
+        #   (1) stand_pose's height factor is exp(-10*|z - base_height_target|) and
+        #       base_height_target is 0.42 -- the SPAWN height, which a standing robot cannot reach.
+        #       At a perfect 0.303 m stance that factor is still only exp(-1.17) = 0.31, and its
+        #       GRADIENT points at an impossible height. Measured collection: 6% of the term's max
+        #       (0.0009 of 0.015/step). Predicted from the formula: 0.177 * 0.228 * 3.0 * dt = 0.0006.
+        #       So this term has its OWN height target and does not touch base_height_target, which
+        #       projected_landing / forward_reach use as the BALLISTIC landing-height reference.
+        #   (2) stand_pose + stand_still are a SUM worth 15% of the return, but 89% of that is
+        #       collected by stand_still, which is BLIND to posture -- so the policy buys the cheap
+        #       half (stillness) and skips the pose. A PRODUCT cannot be half-bought.
+        #   (3) standing is 58% of all sampled steps (pre-arm 14404 + post-landing 44053 of ~101k) and
+        #       the post-landing 76% of it has nothing asking for the default pose at all.
+        # The contact_frac factor also prices the post-touchdown re-hop: a foot off the ground
+        # currently costs -0.5/s against a +13/s income (63% of the landing-buffer steps have a foot
+        # off), and this term makes leaving the ground forfeit the whole stand income instead.
+        # ALL 12 JOINTS, deliberately: the measured roll (+6.3 deg) IS the hip asymmetry
+        # (FL 0.198 vs FR 0.586 rad -> cos(0.198)-cos(0.586) = 0.147 of hip-to-foot length ~ 3.8 cm
+        # across a ~0.19 m hip width = a roll of this order), so excluding the hips cannot level it.
+        # This is NOT the default_hip_pos 2->4 experiment that cost 0.95 -> 0.80 m of reach: that term
+        # has NO phase gate (it pays in load and flight too) and therefore fought the sagittal push.
+        # This one is OFF during load and push -- the splay is free exactly where it is functional.
+        # SIGMAS SIZED FROM MEASUREMENT, not from what a stance "should" look like. First attempt used
+        # stand_pose's 2.0 and stand_still's 0.03/0.10, i.e. values picked for an IDEAL stance, and the
+        # smoke test showed the term paying 2e-5/step -- below the printing threshold, so a 20 k run
+        # would have looked exactly like "no term" and we would have blamed the design. The cause is
+        # that exp(-a)*exp(-b) = exp(-(a+b)): four kernels at 0.19-0.42 each is a TOTAL EXPONENT of
+        # 5.16, deep in the dead zone. Measured operating point (scratchpad/factor_probe.py, ck34000,
+        # 128 env, DR mass, pure torque, latch forced):
+        #                     pre-arm   post-landing
+        #   pose_err (12 dof)   3.135       1.311
+        #   |z - 0.303|         0.038       0.011
+        #   |v|^2               0.093       0.039      <- pre-arm |v| = 0.31 m/s: it is SINKING
+        #   |w|^2               1.299       0.495      <- pre-arm |w| = 1.14 rad/s = 65 deg/s: and WOBBLING
+        # The pre-jump window is not a stance at all (SPAWN_Z=0.35 and arming at step 120, so part of it
+        # is still the spawn-drop transient), while the post-landing stance is already good (z = 0.299
+        # against a 0.303 default). So the kernels are set to put the pre-arm point at a total exponent
+        # of ~1.8 (term = 0.155) and a reachable good stance at ~0.22 (term = 0.806): a 5x range with
+        # gradient everywhere and no saturation. The resulting per-step value, 0.0070 pre-arm and 0.0208
+        # post-landing, reproduces what stand_pose + stand_still collect today (0.0080 / 0.0229) -- the
+        # budget is unchanged, but all of it is now conditional instead of 89% of it being posture-blind.
+        stand_track_pose_sigma   = 6.0                                               # on sum|q - q_default| over all 12 joints
+        stand_track_height       = float(os.environ.get("STAND_TRACK_H", "0.303"))   # the DEFAULT stance height, NOT the 0.42 spawn height
+        stand_track_height_sigma = 0.10
+        stand_track_lin_sigma    = 0.20                                              # on |v|^2  -> 1/e at |v| = 0.45 m/s
+        stand_track_ang_sigma    = 3.0                                               # on |w|^2  -> 1/e at |w| = 1.73 rad/s
+        stand_track_land_lsc     = int(os.environ.get("STAND_TRACK_LSC", "30"))      # landing-buffer step after which the robot is expected to be STANDING (skips the absorb)
         # ⭐STAND BEFORE YOU JUMP (2026-10-08, user). A HARD arming gate on base height, because the
         # reward route has no leverage here: stand_pose + stand_still together span only 2.4-7.7% of
         # mean_reward and the pre-jump window is a minority of their active samples, so <=4% of the
@@ -609,8 +756,42 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
         # Step BACK DOWN when landing_hit_rate falls under guard * (its level at the first advance).
         # Without the step-back a gate the policy cannot clear means it never arms and never jumps.
         stand_arm_guard = float(os.environ.get("STAND_ARM_GUARD", "0.85"))
+        # ⭐2026-10-11 CONTACT GATE (LAND_STAB_CONTACT=1). Measured on band512_s1/model_20000, this term --
+        # the one whose whole job is to ABSORB the landing -- pays MORE while the robot is back in the air:
+        # raw 0.19 at 0.10 s (four feet planted, still absorbing, |v| large) -> 0.46 at 0.25 s (all four feet
+        # off) -> 0.86 at 0.50 s. The cause is structural: it scores exp(-|v|^2) * exp(-|w_xy|^2), and a quiet
+        # ballistic arc beats an impact absorption, while w_z (4.9 rad/s through that hop) is excluded by the
+        # [:, :2] slice. So the landing brake currently REWARDS the re-hop, and raising LAND_STAB_W would pay
+        # for it harder. Scaling by the fraction of feet in contact removes the perverse direction at the
+        # source instead of adding a counterweight: zero while airborne, full when planted, and monotone in
+        # between (a FRACTION, not all-four, so the 1-foot-first touchdown instant is not a cliff).
+        landing_stability_require_contact = bool(int(os.environ.get("LAND_STAB_CONTACT", "0")))
         landing_stability_lin_sigma = 2.0   # was effectively 0.25 (floored to ~0 for real landing |v|, no gradient)
         landing_stability_ang_sigma = 1.0   # was effectively 0.5
+        # ---- POST-LANDING REDESIGN constants (see _reward_settle_drift / _reward_settle_pose) ----
+        settle_absorb_steps      = int(os.environ.get("SETTLE_ABSORB", "15"))   # buffer steps skipped: the touchdown
+                                            # chatter is unavoidable, so paying nothing there would re-create the
+                                            # constant / no-gradient region this redesign exists to remove.
+                                            # NOTE: numerically equal to clean_landing_plant_hold but unrelated.
+        settle_drift_d_ref       = 1.0      # m: the linear ramp reaches 0 here, on |p - p_touchdown|. The
+                                            # measured post-landing drift is 0.83 m at cmd 1.0 and 0.08 m at cmd
+                                            # 0.8 (stw3 ck21000), so 1.0 m keeps BOTH inside the ramp -- a smaller
+                                            # d_ref would clamp the bad case to 0 and kill its gradient, which is
+                                            # the exact failure this redesign exists to remove.
+        settle_pose_height       = 0.303    # m: the DEFAULT standing height (same target as stand_track_height,
+                                            # deliberately NOT base_height_target=0.42 which is the SPAWN height
+                                            # and is unreachable standing -- that mis-sizing is what capped
+                                            # stand_pose at 6% of its own maximum).
+        settle_pose_sigma        = 2.0      # on the L1 joint-pose error (rad, summed over 12 joints)
+        settle_pose_height_sigma = 0.03     # on |h - 0.303|  -> 1/e at 3 cm
+        settle_pose_vel_sigma    = 0.15     # on |v|          -> 1/e at 0.15 m/s
+        settle_pose_level_sigma  = 0.15     # on |g_xy|       -> 1/e at ~8.6 deg of tilt
+        settle_pose_drift_sigma  = 0.30     # on |p - p_touchdown| at the buffer end -> 1/e at 30 cm. Sized from
+                                            # the measured endpoint distribution (p50 0.236, p90 0.824 m): pays the
+                                            # median 0.45x and the p90 tail 0.064x. This is the factor that targets
+                                            # the TAIL; settle_drift can only move the bulk.
+        stand_track_cover_landing = bool(int(os.environ.get("STAND_TRACK_LAND", "1")))  # 0 -> stand_track keeps
+                                            # only its pre-arm STAND branch; the landing buffer goes to settle_*
         four_leg_push_force_floor = 200.0   # N: total vertical GRF below which four_leg_push is NOT graded -> only the
                                             # REAL push (> body weight ~147N), not the static squat-load where legs
                                             # merely bear weight (which would be farmable by lingering in the squat).
@@ -782,6 +963,10 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
         # fix for weak pose rewards is WEIGHT 1.5, not sigma). NOTE: the old joint-based
         # pushoff_leg_sync was replaced by contact-based foot_contact_sync, which uses no sigma.
         pose_guidance_sigma = 5.0
+        # exp kernel on the YAW error in RADIANS for _reward_yaw_tracking: 10 deg -> 0.89, 30 deg -> 0.34,
+        # 57 deg -> 0.02, which spans the measured range (5 deg clean vs 57 deg spun) with gradient
+        # everywhere. Lives on `rewards`, not on `rewards.scales` -- scales holds weights only.
+        yaw_tracking_sigma = float(os.environ.get("YAW_TRACK_SIGMA", "0.25"))
 
         # ---- Countermovement via a STANCE-SQUAT shaping reward (Atanassov 2025) ----
         # Root cause of "stand-and-pop" (no dip, capped height): nothing rewarded dipping
@@ -924,6 +1109,18 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
         # config: the override ignored it, so nothing held the pre-jump stance). Default 0 = unchanged.
         default_pos_prejump_apply = bool(int(os.environ.get("STAND_ANCHOR", "0")))
         default_pos_prejump_scale = 3.0
+        # ⭐2026-10-15 default_pos PENALTY -> REWARD (user). Two knobs, both no-ops by default:
+        #   DEFAULT_POS_PEN_SCOPE=air  -> the PENALTY keeps only the jump phases (loaded/flight/prelanding);
+        #                                 the STAND phase and the LANDING buffer move to the reward below.
+        #   DEFAULT_POS_REWARD=<w>     -> weight of `default_pos_reward` in class scales (0 = absent).
+        # sigma 3.0 is MEASURED, not guessed: per-phase median L1 on omniyaw_s1/model_28000 is 3.127
+        # (stand) / 4.237 (landing), so exp(-L1/3.0) = 0.353 / 0.244 -- in the gradient band with 2.9x
+        # headroom. At pose_guidance_sigma=1.5 (what the dead joint_angle_* terms used) it would be
+        # 0.124 / 0.059, i.e. the saturated tail that made those terms earn ~0.
+        # ⚠️ These live in `class rewards`, NOT in `class scales`: the reward fn reads cfg.rewards.<name>,
+        # and a kernel width put in scales raises AttributeError (the stand_pose sigma hit this once).
+        default_pos_pen_scope = os.environ.get("DEFAULT_POS_PEN_SCOPE", "all")
+        default_pos_reward_sigma = float(os.environ.get("DEFAULT_POS_REW_SIGMA", "3.0"))
         # stand_no_takeoff penalty: ignore the first N env-steps of each episode so the SPAWN drop (init base
         # 0.42 -> natural rest ~0.30 free-fall, not a hop) is not penalized; the time-based jump reflex (the
         # real target) fires later (~ep90+), so 50 cleanly separates them. Read in _reward_stand_no_takeoff.
@@ -959,6 +1156,13 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
         success_fallover_tilt = 0.4       # was 0.7 inherited (~46 deg). projected_gravity_xy above this
                                           # during the landing buffer cancels the pending success. 0.4 ~ 24 deg:
                                           # the 400-wt successful_jump now only pays for a landing that STAYS upright.
+        # ⭐刀1 (2026-10-16, user): minimum terrain-relative base height [m] at the LAST step of the
+        # landing buffer for the jump to count. 0.0 = OFF = inherited behaviour. 0.22 separates cleanly
+        # on measured buffer-end height (bufend.py, ckpt 10000): it cancels 100% of arm E omnidpr's
+        # collapsed successes (whole distribution 0.12-0.14 m) and only 5.2% of arm D omniyaw's
+        # (p50 0.293 m). Deliberately well below the 0.303 m default stance -- this is a FLOOR that
+        # forbids the belly-flat, not a pose target.
+        land_stand_min_height = float(os.environ.get("LAND_STAND_MIN_H", "0.0"))
         # (2) landing_impact regularization knobs (see _reward_landing_impact):
         landing_impact_force_floor = 150.0  # N total vertical foot force below which no impact penalty (~standing weight)
         landing_impact_force_norm = 1500.0  # N normalizer; impact penalty saturates at (floor + norm)
@@ -1171,6 +1375,52 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
             ref_base_vel    = float(os.environ.get("REF_VEL_W", "0.0"))   # the command-carrying term, see the reward
             stand_pose = float(os.environ.get("STAND_POSE_W", "0.0"))
             stand_still = float(os.environ.get("STAND_STILL_W", "0.0"))   # 0 = absent; the pre-jump sink fix
+            # ⭐stand_track REPLACES stand_pose + stand_still (run with STAND_POSE_W=0 STAND_STILL_W=0
+            # STAND_TRACK_W=9.0 -> same total standing budget, new shape). 0 = absent (the scale is
+            # popped in _prepare_reward_function), so every existing run is byte-identical.
+            stand_track = float(os.environ.get("STAND_TRACK_W", "0.0"))
+            # ⭐2026-10-15 the REWARD half of the default_pos penalty->reward swap (user). Pairs with
+            # DEFAULT_POS_PEN_SCOPE=air in `class rewards`.
+            #
+            # ❌ w=6.0 SIZED BY SLOPE AND IT WAS WRONG (killed at iter 110, kept in
+            # xiaoyulong/killed_omnidpr_s1_w6_iter110). The slope argument: the penalty's slope is a
+            # constant 1.5 in stand (0.5 x the prejump 3.0) and 0.5 in landing, while the reward's slope
+            # at the measured operating point is w*exp(-L1/sigma)/sigma = 0.118w / 0.081w, so w=6.0
+            # replaces the landing slope one-for-one and gives stand half its old pull. Matched-iteration
+            # check against omniyaw_s1 at iter 109 says that buys a term worth 2.5785 = 63% OF ALL
+            # POSITIVE REWARD (omniyaw's largest positive, landing_position, is 29%), and every jump
+            # quantity moved the wrong way: peak 0.387 -> 0.309, projected_peak 0.168 -> 0.094,
+            # projected_landing 0.164 -> 0.110, forward_reach 0.0118 -> 0.0060, flight_rate 1.00 -> 0.88.
+            # That is the reftrack_s1 failure shape (a big, always-on, command-FREE positive term that
+            # out-earns the task), and in single-jump mode it also pays for REFUSING to jump, since
+            # refusing keeps the env in the STAND phase for the whole episode (51.9% of steps -> ~100%).
+            #
+            # ⭐THE STRUCTURAL POINT: a constant-slope penalty applied over 78% of the episode supplies a
+            # huge amount of shaping force, and it CANNOT be reproduced on the positive side without
+            # taking over the reward budget. So size this by SHARE, not by slope. With the other positives
+            # summing to 1.51 at iter 109 and this term printing 0.4298*w, w=2.0 -> 36% share, i.e. the
+            # same order as the largest existing positive. That is the value being run.
+            # 0 = absent (scale popped in _prepare_reward_function) -> existing runs byte-identical.
+            default_pos_reward = float(os.environ.get("DEFAULT_POS_REWARD", "0.0"))
+            # ⭐2026-10-11 the post-touchdown re-hop. Per-step penalty on any foot off the ground AFTER the
+            # all-four-planted hold has latched (clean_landing_plant_hold=15 steps skips the impact chatter).
+            # Sizing: the detector fires on 27.6% of landing-buffer steps on band512_s1/model_20000, so a
+            # weight w/s earns 0.276*w; 6.0 -> -1.66/s, level with default_pos (-1.67/s) in the same window
+            # and the second-largest term there after the 13.6/s CONSTANT that landing_position contributes.
+            # A clean landing (refprev2_s1, trips 1.4%) pays 0.08/s, which is why the weight can be large.
+            # 0 = absent (the scale is popped in _prepare_reward_function), so default = unchanged.
+            # ⭐POST-LANDING REDESIGN (2026-10-23, user: "只关注落地后的姿态管理, 稳稳落地然后回到默认
+            # 站立姿态, 力求最简单的设计"). TWO terms with a clean split of labour, replacing the four
+            # tangled ones that together earned 8.3% of the reward sum while every velocity-sensitive
+            # one output ~0 at the 2.1 m/s that matters (see _reward_settle_drift for the measurements):
+            #   settle_drift = the PATH   (dense, LINEAR in |p - p_touchdown|, x contact fraction)
+            #   settle_pose  = the TARGET (one pulse at the last buffer step, four feet + pose + height)
+            # Retiring the other three needs NO code change, they are already env-var gated:
+            #   CLEAN_LAND_W=0  LAND_STAB_W=0  STAND_TRACK_LAND=0
+            # Both default to 0 -> absent, so every existing run/eval/scan is bit-identical.
+            settle_drift = float(os.environ.get("SETTLE_DRIFT_W", "0.0"))
+            settle_pose  = float(os.environ.get("SETTLE_POSE_W", "0.0"))
+            clean_landing = -float(os.environ.get("CLEAN_LAND_W", "0.0"))
             landing_stability = float(os.environ.get("LAND_STAB_W", "1.0"))          # RE-ENABLED to BRAKE the landing momentum: per-step trace showed the
                                              # robot lands at vx~1.3 m/s, bounces (all feet off, +0.06m) and coasts
                                              # ~0.30m forward to a stop (the "post-landing slide"). This rewards LOW
@@ -1240,6 +1490,14 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
             # (base_ang_vel_xy sits at -0.15 and is multiplied by 4 after the latch). Same precedent as
             # PD_FLOOR / SUCC_LAND_SIGMA: default 0 keeps the reported run reproducible.
             base_yaw_rate = -float(os.environ.get("YAW_RATE_W", "0.0"))
+            # DENSE heading tracking, Atanassov 2025 Table 1 ("Orientation tracking"), see the reward.
+            # Weight 1.0 reasoning: the term is active over push + landing, roughly a third of the steps
+            # in an episode, so perfect tracking earns about 0.33 * w. w=1.0 lands it near 0.2-0.33, the
+            # same tier as takeoff_velocity_match (0.23) and well under forward_reach (0.72) and
+            # landing_position (0.67) -- enough to close an UNOPPOSED hole (nothing rewards spinning;
+            # the 58 deg turn is pure parasitic drift) without bidding against the distance task, which
+            # is how hip=4.0 and four_leg=10 destroyed it. Default 0 keeps every reported run identical.
+            yaw_tracking = float(os.environ.get("YAW_TRACK_W", "0.0"))
             base_ang_vel_xy = -0.15          # REVERTED -0.4 -> -0.15: -0.4 penalized the MESSY exploratory flight so hard that "don't jump"
                                              #     won -> discovery died (flight 0 at iter526). -0.15 is the discovery-proven value. The nose-down
                                              #     ROTATION is a LATE concern -> if needed, re-add stronger damping GATED to post-discovery, not step 1.
@@ -1289,6 +1547,11 @@ class GO2OmniJumpLandingTorqueCfg(GO2OmniJumpCurriculumTorqueCfg):
             "rew_successful_distance",
             "rew_stand_pose",
             "rew_stand_still",
+            "rew_stand_track",      # the merged stand-pose/height/stillness/contact product
+            "rew_default_pos_reward",   # the penalty->reward swap; compare against rew_default_pos
+            "rew_yaw_tracking",         # was active in omniyaw_s1 but missing from this list
+            "landing_stand_rate",       # ⭐刀1: frac of finished jumps that ended the buffer standing
+
             # inherited-active but missing from the parent's print list — surface them
             "rew_base_ang_vel_xy",   # (1) flight+landing roll/pitch ω damping — the anti-tumble lever
             "rew_landing_impact",    # (2) touchdown force-spike penalty — cushion vs slam
@@ -1358,6 +1621,10 @@ def _mirror_obs_permutation(history_length, frame_dim, extras_dim):
         + [(34, 1), (33, 1), (36, 1), (35, 1)]     # foot contact       FL<->FR, RL<->RR
         + legs(37)                                 # previous action    (= act_permutation)
     )
+    # RAW GRF (GRF_OBS): same foot swap as the binary contact block above (FL<->FR, RL<->RR) and NO
+    # sign flip -- fz is a magnitude, like motor_fatigue.
+    if bool(int(os.environ.get("GRF_OBS", "0"))):
+        frame = frame + [(50, 1), (49, 1), (52, 1), (51, 1)]
     extras = (
         [(0, 1), (1, -1), (2, 1)]                  # yaw-frame landing error (lateral flips)
         + [(3, 1), (4, 1), (5, 1), (6, 1)]         # cmd height, cmd4 (jump toggle), height obs x2
@@ -1365,15 +1632,23 @@ def _mirror_obs_permutation(history_length, frame_dim, extras_dim):
         + legs(19, flip_hip=False)                 # motor_fatigue  (magnitude -> NO sign flip)
         + [(31, 1)]                                # pd_prior_alpha
     )
+    # HEADING (YAW_OBS): projected_forward mirrors exactly like projected_gravity -- a sagittal
+    # reflection preserves x and z and flips y. Read from the env here for the same reason the dims are:
+    # this function is handed only (history, frame_dim, extras_dim) and must rebuild the layout.
+    base_extras = 32
+    if bool(int(os.environ.get("YAW_OBS", "0"))):
+        extras = extras + [(32, 1), (33, -1), (34, 1)]   # projected_forward (f_y flips)
+        base_extras = 35
     # Every optional extras block appended after pd_prior_alpha is a 12-vector of JOINT ANGLES
     # (PD_TARGET_OBS' phase target, then one block per REF_PREVIEW horizon), so they all mirror
     # exactly like dof_pos: legs swap, hip/abduction flips sign. Counting blocks instead of testing
     # `extras_dim >= 44` keeps this correct for any number of preview horizons, and is identical to
     # the old branch for 32 (0 blocks) and 44 (1 block). The assert below catches a layout mismatch.
-    n_leg_blocks = (extras_dim - 32) // 12
-    assert extras_dim == 32 + 12 * n_leg_blocks, f"extras_dim {extras_dim} is not 32 + 12k"
+    n_leg_blocks = (extras_dim - base_extras) // 12
+    assert extras_dim == base_extras + 12 * n_leg_blocks, \
+        f"extras_dim {extras_dim} is not {base_extras} + 12k (YAW_OBS mismatch?)"
     for _b in range(n_leg_blocks):
-        extras = extras + legs(32 + 12 * _b)
+        extras = extras + legs(base_extras + 12 * _b)
     assert len(frame) == frame_dim, f"frame perm {len(frame)} != {frame_dim}"
     assert len(extras) == extras_dim, f"extras perm {len(extras)} != {extras_dim}"
 
@@ -1498,12 +1773,32 @@ class GO2OmniJumpLandingTorqueCfgPPO(GO2OmniJumpCurriculumTorqueCfgPPO):
         # `_takeoff_omega_on`, which is an EMA over per-reset-batch rates and opened at iter 5 (small early
         # batches read 1.0 by luck) -- it annealed 100+ iters BEFORE the jump was discovered and killed both
         # floor runs. squat_qualified_rate >= 0.90 held for 3 iterations IS the discovery event.
-        entropy_anneal_metric = "squat_qualified_rate"
+        # DIAGNOSTIC HOOK (2026-10-14): ENT_ANNEAL_OFF disables the anneal OUTRIGHT, same precedent as
+        # PD_FLOOR / NET / SYM_COEF / C_STACK. Default 0 keeps the trained configuration byte-identical.
+        # WHY. Measured on Oct13_21-04-48_omnisstill_s1 (ARM A): the metric gate opened at iter 78
+        # (squat_qualified_rate 0.919 -- squatting is trivial here, so this gate does NOT mark discovery
+        # of the actual task) and the anneal fired at iter 278, i.e. for 98.6% of a 20000-iteration run
+        # entropy_coef was 0.001 and mean_noise_std sat at 0.0501 -- EXACTLY noise_std_min, so the floor,
+        # not the policy, was setting the exploration level. A's own capability metric (reliable_reach_dx)
+        # did not leave 0 until iter ~6000, long after exploration was withdrawn. The entropy_coef comment
+        # above already records this failure mode verbatim: "At 0.001 noise_std collapsed to ~0.04 -> the
+        # policy got too CONSERVATIVE (peak ~0.50, undershoots far) and plateaued" -- and eval_ckpt_scan on
+        # A measured net flight PEAKING at ck18200 (0.555 m) and then FALLING to 0.449 m by ck20000 while
+        # the training landing_hit_rate still rose, i.e. it was polishing the near bins, not learning reach.
+        # ⚠️ TURNING THIS ON ALSO REMOVES THE noise_std CLAMP. on_policy_runner.py gates the [0.05, 0.08]
+        # clamp on `self._ent_annealed_at is not None`, so with no anneal there is no floor AND no ceiling.
+        # That ceiling was bought with four dead runs (std past ~0.10-0.12: fix012 0.49->0.37, hist78 died
+        # at 0.17, gate_local collapsed at 0.125, hist_local_ext the same). History also says constant
+        # 0.003 with a free std settles near 0.32 and gets STUCK. Both outcomes are on the table; the point
+        # of the run is to find out which one this task gets. WATCH mean_noise_std and successful_jump_rate.
+        _ent_anneal_off = bool(int(os.environ.get("ENT_ANNEAL_OFF", "0")))
+        entropy_anneal_metric = None if _ent_anneal_off else "squat_qualified_rate"
         entropy_anneal_metric_thresh = 0.90
         entropy_anneal_metric_hold = 3
-        entropy_anneal_gate = "_takeoff_omega_on"   # fallback, unused while entropy_anneal_metric is set
+        # fallback, unused while entropy_anneal_metric is set; must ALSO be None or _anneal_at is still built
+        entropy_anneal_gate = None if _ent_anneal_off else "_takeoff_omega_on"
         entropy_anneal_gate_delay = 200
-        entropy_anneal_iter = 3000
+        entropy_anneal_iter = None if _ent_anneal_off else 3000
         entropy_coef_final = 0.001
 
 
