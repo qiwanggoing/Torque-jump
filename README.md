@@ -12,17 +12,16 @@ LI Peizhuo*. LI Hongyi*, Ge SUN, [Jin CHENG](https://jin-cheng.me), Xinrong YANG
 
 ---
 
-> ### 👉 Working on the torque-jumping fork? Read [`RUNBOOK.md`](RUNBOOK.md) first.
+> ### Torque-jumping fork: the reference for it is [`RUNBOOK.md`](RUNBOOK.md).
 >
-> This fork is driven by **134 environment-variable knobs**, and nearly every one defaults to *the
-> old behaviour* — so a run that forgets an export is not an error, it is a silently different
-> experiment that finishes normally and gives you a number you will believe. `RUNBOOK.md` has the
-> knob tables, the **five evaluation traps** (each of which has already invalidated real results),
-> the state machine, the committed checkpoints in [`checkpoints/`](checkpoints/), and a list of
-> **verified dead ends** so you do not repeat them.
+> Behaviour in this fork is set almost entirely by environment variables — 134 distinct keys, nearly
+> all defaulting to the behaviour that existed before the knob was added, so an unset knob produces a
+> complete, error-free run of a different configuration. `RUNBOOK.md` holds the knob tables with
+> their defaults, what the evaluation metrics compute, the state machine, the models in
+> [`checkpoints/`](checkpoints/) with the exports each one loads under, and the measured outcomes of
+> past changes.
 >
-> Install/environment setup is below in this file and is current. Remote-box specifics are in
-> [`REMOTE_TRAINING.md`](REMOTE_TRAINING.md).
+> Install and environment setup is below in this file.
 
 ---
 
