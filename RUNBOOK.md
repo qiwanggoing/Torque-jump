@@ -412,11 +412,22 @@ late-run `settled` from 100% to 9%). Against the paper baseline, per-command net
 "stable landing frontier at 0.80–0.90" disappears (cmd 0.90: 0.72 → 0.97).
 Note `stand_still` is a **velocity brake**, not a posture target — see §5's first dead end.
 
-### `sstill6_s1_model_14700.pt` — the reference-trajectory source, actor **1024**
+### `inertiafix_s1_model_14700.pt` — the paper baseline **and** the reference-trajectory source, actor **1012**
 
-Same exports as `..._19500.pt`. This is the checkpoint
-`resources/references/commanded_ref_14700.npz` was extracted from, i.e. the default reference table
-every `REF_*` run tracks. Keep it: without it the table cannot be re-derived or extended.
+From `Sep22_04-02-15_inertiafix_s1`. **This one is the published baseline**, and it is also the
+checkpoint `resources/references/commanded_ref_14700.npz` was extracted from — i.e. the default
+reference table that every `REF_*` run tracks. Keep it: without it the table cannot be re-derived or
+extended.
+
+Its observation geometry is **different from the other two**: `1012 = 980 + 32`, i.e.
+**`PD_TARGET_OBS` unset** and no ref preview (critic 363, against sstill6's 399 and refprev2's 507).
+So take the block in `..._19500.pt` above and **drop `PD_TARGET_OBS=1`**.
+
+> ⚠️ `commanded_ref_14700.npz` carries **no provenance field** — only `cmd`, `fs`, `pre`,
+> `calf_range` and the per-command arrays — so the link between the table and this checkpoint rests
+> on the filename, on the extraction tooling living in `paper_tools/`, and on the table's
+> `calf_range = [-2.7227, -0.83776]` matching the mechanical-limit finding recorded for this
+> trajectory. If you re-extract a table, **write the source run and checkpoint into the npz.**
 
 What the extracted trajectory is: a **countermovement jump with a free-fall phase** — unload, free
 fall 0.22 m, squat bottom at z = 0.079 m against 786 N (5.3 BW), launch |v| = 2.90 m/s at 49°.
