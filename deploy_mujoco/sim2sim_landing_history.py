@@ -132,6 +132,50 @@ def load_actor(ckpt_path):
     return actor
 
 
+def replay_check(actor, npz_path):
+    """Feed Isaac's OWN obs vectors through this script's actor and compare actions.
+
+    This is the one measurement that separates WIRING from PHYSICS. The obs vectors come from
+    legged_gym/scripts/play_landing.py run with PLAY_LANDING_DUMP=<npz>, i.e. exactly what the
+    policy consumed in Isaac. Therefore:
+      match (max|diff| < 1e-4) -> the checkpoint loading and the 1012/1024-dim obs LAYOUT are
+                                  correct here; any MuJoCo jump difference is physics or the drive
+                                  logic (state machine / keyframes / timing), NOT the observation.
+      mismatch                 -> the layout or the ckpt load is wrong, and the per-block report
+                                  below says which block, because the obs is a fixed concatenation:
+                                  [frame(49) x 20 | extras(32) (| pd_target(12))].
+    It does NOT validate how this script BUILDS obs from MuJoCo state -- only that the network and
+    the vector layout it expects are right. Building is validated by the jump itself once this passes.
+    """
+    d = np.load(npz_path)
+    obs = d["obs"].astype(np.float32)
+    if obs.shape[1] != H.NUM_OBS:
+        raise SystemExit("dump has %d-dim obs, this script expects %d. The dump must come from a run "
+                         "with the SAME obs flags (PD_TARGET_OBS / REF_PREVIEW_OBS) as this script."
+                         % (obs.shape[1], H.NUM_OBS))
+    mask = (d["rl_driven"].reshape(-1) > 0.5) if "rl_driven" in d else np.ones(len(obs), bool)
+    with torch.no_grad():
+        a = actor(torch.from_numpy(obs[mask])).numpy()
+    ref = d["action"][mask]
+    da = np.abs(a - ref).max()
+    print("[replay] %d/%d policy-driven steps from %s" % (int(mask.sum()), obs.shape[0], npz_path))
+    print("[replay] actor max|diff| = %.3e   %s" % (da, "OK" if da < 1e-4 else "MISMATCH"))
+    if da >= 1e-4:
+        # Localise it: per-step error vs which obs block differs is not computable from one dump, but
+        # the WORST step and the action-component spread say whether it is a global scale/offset error
+        # (all 12 components off by a similar factor) or a layout scramble (components off at random).
+        per_comp = np.abs(a - ref).max(axis=0)
+        worst = int(np.abs(a - ref).max(axis=1).argmax())
+        print("[replay] worst step %d | per-action-component max|diff|:" % worst)
+        print("[replay]   %s" % np.array2string(per_comp, precision=4, max_line_width=200))
+        print("[replay] a uniform spread suggests a SCALE/OFFSET error in one obs block; a ragged one "
+              "suggests a LAYOUT scramble. Compare obs[worst] against this script's build_obs blocks.")
+    else:
+        print("[replay] layout + checkpoint load PROVEN correct -> the jump gap is physics or drive "
+              "logic (keyframes / state machine / torque law), not the observation vector.")
+    return da
+
+
 class Trial:
     """One stand -> settle -> jump -> land episode, driven exactly as the env drives it."""
 
@@ -147,6 +191,13 @@ class Trial:
         # exactly as the deploy architecture does. The policy still runs, it just does not drive.
         self.stand_pd = False
         self.law = TorqueLawH()
+        # --dump-obs: record THIS script's own obs vectors so they can be compared BLOCK BY BLOCK
+        # against an Isaac dump. --replay proves the LAYOUT is right; this proves whether each block
+        # is FILLED right. The honest comparison point is step 0 (both sides just reset: q=default,
+        # dq=0, prev_action=0, torques=0, fatigue=0, four feet down, err_fwd==dx), because the two
+        # trajectories diverge immediately afterwards and step k is then not the same state.
+        self.obs_log = []
+        self.state_log = []     # same 8 columns as the Isaac dump, so phases can be matched offline
         self.ring = np.zeros((H.HIST, H.FRAME), dtype=np.float64)
         self.prev_action = np.zeros(12)
         # reset_idx leaves default_joint_pd_target at default_dof_pos, so the first obs sees zeros
@@ -301,6 +352,13 @@ class Trial:
             self.target = base_xyz[:2] + np.array([self.dx, self.dy])          # slides before takeoff
 
         obs = self.build_obs(q, dq, base_xyz, lin_body, ang_body, proj_grav, yaw, contact, pd_alpha_prev)
+        if self.obs_log is not None and len(self.obs_log) < 2000:
+            self.obs_log.append(obs.copy())
+            # Mirror of play_landing's dump: same columns, same instant (obs just built, before action).
+            self.state_log.append([z, float(rb.data.qvel[0]), float(rb.data.qvel[2]),
+                                   float(proj_grav[0]), float(contact.sum()),
+                                   float(self.jumping), float(self.squat_qualified),
+                                   float(self.landed)])
         with torch.no_grad():
             action = self.actor(torch.from_numpy(obs)).numpy()
         action = np.clip(action, -C.CLIP_ACT, C.CLIP_ACT)
@@ -363,7 +421,7 @@ def interactive_loop(rb, actor, args):
     tr.hold = True
     tr.stand_pd = True
     spawn = rb.data.qpos[0:2].copy()
-    pd_a = H.PD_W * H.PD_FLOOR
+    pd_a = H.PD_W * H.PD_FLOOR * H.LOAD_PD_SCALE   # the OBS slot must report the ACTUAL pd_alpha: TorqueLawH.compute multiplies by LOAD_PD_SCALE, so omitting it here told a pure-torque policy it had 10% PD help that the torque law was not applying
     n_jump, after_land = 0, 0
 
     while viewer.is_running():
@@ -373,7 +431,7 @@ def interactive_loop(rb, actor, args):
             tr.reset(); tr.hold = True; tr.stand_pd = True
             tr.dx, tr.cmd_h = st["dx"], st["height"]
             spawn = rb.data.qpos[0:2].copy()
-            pd_a = H.PD_W * H.PD_FLOOR
+            pd_a = H.PD_W * H.PD_FLOOR * H.LOAD_PD_SCALE   # the OBS slot must report the ACTUAL pd_alpha: TorqueLawH.compute multiplies by LOAD_PD_SCALE, so omitting it here told a pure-torque policy it had 10% PD help that the torque law was not applying
             after_land = 0
             print("  [reset]", flush=True)
         if st["jump"]:
@@ -451,7 +509,21 @@ def main():
                     help="viewer + keyboard: you trigger each jump yourself (SPACE), change dx/height "
                          "with the arrow keys. Implies --viewer.")
     ap.add_argument("--pyramidal", action="store_true", default=True)
+    ap.add_argument("--replay", default=None,
+                    help="npz from legged_gym play_landing.py run with PLAY_LANDING_DUMP=<npz>: feed "
+                         "Isaac's own obs through this actor and compare actions. Run this BEFORE "
+                         "trusting any jump number -- it separates obs/ckpt wiring from physics.")
+    ap.add_argument("--dump-obs", default=None,
+                    help="write THIS script's own obs vectors (trial 1) to an npz, for a block-by-block "
+                         "comparison against an Isaac dump. --replay checks the layout; this checks the "
+                         "FILLING of each block.")
     args = ap.parse_args()
+
+    # --replay needs only the checkpoint, not the MJCF or MuJoCo: do it before anything is built so it
+    # still works when the scene/model is unavailable.
+    if args.replay:
+        replay_check(load_actor(args.ckpt), args.replay)
+        return
 
     xml = os.path.abspath(args.xml)
     if not os.path.exists(xml):
@@ -504,13 +576,24 @@ def main():
     for k in range(args.trials):
         tr = Trial(rb, actor, args.dx, args.dy, args.height)
         spawn = rb.data.qpos[0:2].copy()
-        pd_a = H.PD_W * H.PD_FLOOR
+        pd_a = H.PD_W * H.PD_FLOOR * H.LOAD_PD_SCALE   # the OBS slot must report the ACTUAL pd_alpha: TorqueLawH.compute multiplies by LOAD_PD_SCALE, so omitting it here told a pure-torque policy it had 10% PD help that the torque law was not applying
         for _ in range(args.steps):
             pd_a = tr.step(pd_a)
             if viewer is not None:
                 viewer.sync()
             if tr.landed and tr.t > 0:
                 break
+        if args.dump_obs and k == 0:
+            _o = np.asarray(tr.obs_log, dtype=np.float32)
+            np.savez(args.dump_obs, obs=_o,
+                     state=np.asarray(tr.state_log, dtype=np.float32),
+                     state_cols=np.asarray(["z", "vx", "vz", "projg_x",
+                                            "n_contact", "jumping", "squatQ", "landed"]),
+                     marks=np.asarray([tr.mark.get(m, {}).get("t", -1)
+                                       for m in ("arm", "bottom", "squatQ", "takeoff")], dtype=np.int32))
+            print("[dump-obs] wrote %s: obs%s | marks(arm,bottom,squatQ,takeoff)=%s"
+                  % (args.dump_obs, _o.shape,
+                     [tr.mark.get(m, {}).get("t", -1) for m in ("arm", "bottom", "squatQ", "takeoff")]))
         if tr.landed and tr.takeoff_xy is not None:
             a = float(np.linalg.norm(tr.land_xy - tr.takeoff_xy))
             t = float(np.linalg.norm(tr.land_xy - spawn))
