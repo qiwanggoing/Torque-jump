@@ -34,3 +34,8 @@ Thumbs.db
 *.bak_*
 *.tar.gz
 *.zip
+
+# Local test/launch scripts -- kept on disk, deliberately not handed over
+/run_*.sh
+/play_*.sh
+legged_gym/play_*.sh
