@@ -173,12 +173,18 @@ class GO2Torque(LeggedRobot):
                     lo, hi = self.SOFT_DOF_POS_BAND[self._dof_limit_key(name)]
                     self.soft_dof_pos_limits[i, 0] = lo
                     self.soft_dof_pos_limits[i, 1] = hi
-                print("[dof-limits] OFFICIAL Go2 joint ranges in use (SATA URDF thigh truncation "
-                      "overridden). hard/soft per joint type:")
-                for key in ("hip", "thigh_front", "thigh_rear", "calf"):
-                    (hl, hh), (sl, sh) = self.OFFICIAL_DOF_POS_LIMITS[key], self.SOFT_DOF_POS_BAND[key]
-                    print(f"    {key:12s} hard [{hl:+.4f}, {hh:+.4f}]  soft [{sl:+.4f}, {sh:+.4f}]  "
-                          f"terminate outside [{hl - 0.05:+.4f}, {hh + 0.05:+.4f}]")
+                # One line in the normal (correct) case; the per-joint table was 5 lines on every
+                # run and every eval. DOF_LIMITS_VERBOSE=1 brings the table back.
+                if os.environ.get("DOF_LIMITS_VERBOSE", "0").strip().lower() in ("0", "", "false", "no"):
+                    print("[dof-limits] OFFICIAL Go2 joint ranges in use (SATA URDF thigh truncation "
+                          "overridden).")
+                else:
+                    print("[dof-limits] OFFICIAL Go2 joint ranges in use (SATA URDF thigh truncation "
+                          "overridden). hard/soft per joint type:")
+                    for key in ("hip", "thigh_front", "thigh_rear", "calf"):
+                        (hl, hh), (sl, sh) = self.OFFICIAL_DOF_POS_LIMITS[key], self.SOFT_DOF_POS_BAND[key]
+                        print(f"    {key:12s} hard [{hl:+.4f}, {hh:+.4f}]  soft [{sl:+.4f}, {sh:+.4f}]  "
+                              f"terminate outside [{hl - 0.05:+.4f}, {hh + 0.05:+.4f}]")
         return props
 
     def check_termination(self):
@@ -190,6 +196,70 @@ class GO2Torque(LeggedRobot):
         self.reset_buf |= self.projected_gravity[:, 2] > 0
         self.time_out_buf = self.episode_length_buf > self.max_episode_length  # no terminal reward for time-outs
         self.reset_buf |= self.time_out_buf
+
+    # ------------------------------------------------------------------ #
+    # SENSOR / ACTUATION LATENCY  (ported from my_go2_jump, 2026-10-27)
+    # ------------------------------------------------------------------ #
+    # my_go2_jump randomises three latencies (range_obs_motor_latency / range_obs_imu_latency /
+    # range_cmd_action_latency, all [1, 3]) that this engine did not implement at all -- grep for
+    # obs_latency / randomize_pd_gains / motor_zero_offset here and in legged_robot.py finds nothing.
+    #
+    # THE UNIT IS THE SIM STEP, NOT THE POLICY STEP. step() below runs
+    # `while self.current_dt * self.current_freq < 1`, so one policy step covers TWO sim steps while
+    # the control frequency is still ramping 100 -> 200 Hz, and one afterwards. Counting sim steps
+    # keeps the delay at k * dt = k * 5 ms for the whole run; counting policy steps would silently
+    # double the physical delay through the entire discovery window. my_go2_jump updates its buffers
+    # inside the decimation loop for the same reason, and its GO2_JUMP task is decimation=1,
+    # dt=0.005 -- the SAME 200 Hz as this chain -- so its [1, 3] ports across 1:1 as 5-15 ms. (The
+    # "0.001s" in its own comment refers to the BASE config dt, which GO2_JUMP overrides.)
+    #
+    # A delay of 1 means "last sim step's value": my_go2_jump has no zero-delay env, since it draws
+    # randint(lo, hi+1) over [1, 3]. hi == 0 short-circuits to the identity, so with the defaults
+    # ("0,0") every existing config is bit-identical and no buffer is ever allocated.
+    @staticmethod
+    def _lat_range(name):
+        """[lo, hi] delay in SIM steps from env var "lo,hi". Default "0,0" = axis off."""
+        v = str(os.environ.get(name, "0,0")).split(",")
+        return max(int(float(v[0])), 0), max(int(float(v[-1])), 0)
+
+    @staticmethod
+    def _flt_range(name, default):
+        """[lo, hi] floats from env var "lo,hi"; absent -> (default, default)."""
+        v = str(os.environ.get(name, f"{default},{default}")).split(",")
+        return float(v[0]), float(v[-1])
+
+    def _latency_buf(self, key, cur, lo, hi):
+        """Per-env variable-delay ring, same shape as my_go2_jump's: depth hi+1, slot 0 = newest, one
+        delay index per env (resampled on reset). cur is (N, D); returns the delayed (N, D)."""
+        if hi <= 0:
+            return cur
+        buf = getattr(self, "_lat_" + key, None)
+        if buf is None or buf.shape[1] != cur.shape[1] or buf.shape[2] != hi + 1:
+            # PRIMED with the current sample, not zeros. A zero-filled ring would hand the policy a
+            # fabricated "everything reads zero" state for the first hi steps -- the same argument
+            # _prime_history makes for the 20-frame history ring.
+            buf = cur.detach().unsqueeze(-1).repeat(1, 1, hi + 1)
+            setattr(self, "_lat_" + key, buf)
+            setattr(self, "_latidx_" + key,
+                    torch.randint(lo, hi + 1, (self.num_envs,), device=self.device))
+        else:
+            buf[:, :, 1:] = buf[:, :, :hi].clone()
+            buf[:, :, 0] = cur.detach()
+        return buf[torch.arange(self.num_envs, device=self.device), :,
+                   getattr(self, "_latidx_" + key)]
+
+    def _lat_on_reset(self, key, name, cur, env_ids):
+        """Episode reset: redraw those envs' delay and refill their ring with the CURRENT sample, so a
+        just-reset env never reads state from before its own reset."""
+        lo, hi = self._lat_range(name)
+        if hi <= 0 or len(env_ids) == 0:
+            return
+        idx = getattr(self, "_latidx_" + key, None)
+        if idx is not None:
+            idx[env_ids] = torch.randint(lo, hi + 1, (len(env_ids),), device=self.device)
+        buf = getattr(self, "_lat_" + key, None)
+        if buf is not None:
+            buf[env_ids] = cur[env_ids].detach().unsqueeze(-1).repeat(1, 1, buf.shape[2])
 
     def _process_rigid_body_props(self, props, env_id):
         # randomize base mass
@@ -225,8 +295,37 @@ class GO2Torque(LeggedRobot):
             props[0].inertia.y = gymapi.Vec3(intertia[1, 0], intertia[1, 1], intertia[1, 2])
             props[0].inertia.z = gymapi.Vec3(intertia[2, 0], intertia[2, 1], intertia[2, 2])
             props[0].com = gymapi.Vec3(com[0], com[1], com[2])
-            for i in range(len(props)):
-                props[i].mass += np.random.uniform(rng[0] / 16, rng[1] / 16)
+
+            # LINK MASS -- two MUTUALLY EXCLUSIVE forms for one axis, never stacked:
+            #   DR_LINK_MASS unset  -> the ADDITIVE legacy loop below, bit-identical to every run so far.
+            #   DR_LINK_MASS=0.9,1.1 -> my_go2_jump's MULTIPLICATIVE form, and the legacy loop is skipped.
+            #
+            # ⚠️ THE LEGACY FORM GENERATES NEGATIVE LINK MASSES, which is why it is kept only for
+            # reproducibility and not on merit. It adds uniform(rng/16) kg to EVERY link -- the same
+            # ABSOLUTE amount whatever the link weighs. With added_mass_range=[-1,1] that is +-0.0625 kg
+            # against the URDF's actual masses:
+            #     base 6.921 -> +-0.9%      hip 0.678 -> +-9.2%     thigh 1.152 -> +-5.4%
+            #     calf 0.154 -> +-40.6%     calflower 0.040 -> +-156%     Head_upper/lower 0.001 -> +-6250%
+            # so a calflower link draws a NEGATIVE mass about 18% of the time and each head link about
+            # 49% of the time, in every run with randomize_base_mass on (= all of them). It also adds to
+            # props[0] AFTER the composite inertia above was computed, so that extra trunk mass is not
+            # represented in the inertia. The multiplicative form is relative and cannot go negative.
+            #
+            # DELIBERATE DEVIATION from my_go2_jump: there randomize_link_mass is its OWN switch,
+            # independent of randomize_base_mass. Here it is nested under randomize_base_mass on
+            # purpose, because eval_ckpt_scan_dr.py suppresses domain randomisation by setting
+            # randomize_base_mass/_friction/push_robots False and knows nothing about DR_LINK_MASS.
+            # An independent switch would leave link-mass randomisation silently ON inside a
+            # "nominal" eval -- exactly the shape of the eval traps this task has been bitten by.
+            lm_lo, lm_hi = self._flt_range("DR_LINK_MASS", 1.0)
+            if lm_lo == 1.0 and lm_hi == 1.0:
+                for i in range(len(props)):
+                    props[i].mass += np.random.uniform(rng[0] / 16, rng[1] / 16)
+            else:
+                # props[0] is the trunk and is handled by the point-mass block above; scale 1.. only,
+                # one independent draw per link, exactly as my_go2_jump's multiplied_link_mass_range.
+                for i in range(1, len(props)):
+                    props[i].mass *= np.random.uniform(lm_lo, lm_hi)
 
         return props
 
