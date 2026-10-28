@@ -25,3 +25,12 @@ dist/
 # OS
 .DS_Store
 Thumbs.db
+
+# Run artifacts and scratch (2026-10-28, handover cleanup)
+*.log
+*.html
+.archify/
+.codegraph/
+*.bak_*
+*.tar.gz
+*.zip
