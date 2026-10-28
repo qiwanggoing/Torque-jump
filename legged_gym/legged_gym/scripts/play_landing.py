@@ -197,8 +197,23 @@ def main():
                        / max(1.0, float(env.cfg.growth.x0) - float(env.cfg.growth.warmup_steps))))
     _floor = max(0.0, min(1.0, float(getattr(env.cfg.growth, "pd_fade_floor", 0.0))))
     _pd_a = float(env.cfg.control.pd_prior_weight) * max(_floor, 1.0 - _gs)
+    # pd_alpha is TWO-STAGE and printing only the first stage is the single most expensive trap in
+    # this project (hit 5 times). Stage 1 = pd_prior_weight * max(PD_FLOOR, 1-general_scale), the
+    # global fade -- that is _pd_a above. Stage 2 = _mult in go2_omnijump_curriculum_torque's
+    # _compute_torques: LOAD_PD_SCALE (the closed-loop load-phase withdrawal) composed with the
+    # PD_OFF_PHASE mask. LOAD_PD_SCALE DEFAULTS TO 1.0 in a fresh process, so a run trained with
+    # LOAD_FADE + PD_FADE_SCOPE=all (whose endpoint really is pd_alpha=0.000) gets the full stage-1
+    # PD handed back unless the eval sets it to 0 -- and the old one-number print was identical
+    # either way, so it could not tell the two apart. Print the composition instead.
+    _lf = float(os.environ.get("LOAD_PD_SCALE", "1.0"))
+    _offp = str(os.environ.get("PD_OFF_PHASE", "")).strip().lower() or "none"
+    _applied = _pd_a * _lf * (0.0 if _offp == "all" else 1.0)
+    _flag = ("" if _applied <= 1e-9 else
+             "  !! PD IS ON -- set LOAD_PD_SCALE=0.0 PD_OFF_PHASE=all for pure torque")
     print(f"[play] {os.path.basename(_resume_path)} -> iter {ckpt_iter}: step_count={REPLAY_STEP} "
-          f"(non-linear fade-correct), replay pd_alpha={_pd_a:.3f}")
+          f"(non-linear fade-correct)")
+    print(f"[play] pd_alpha = global_fade {_pd_a:.3f} x load_pd_scale {_lf:.2f} x phase_off '{_offp}'"
+          f"  ->  APPLIED {_applied:.3f}" + ("  (pure torque)" if _applied <= 1e-9 else "") + _flag)
 
     # (removed BIG=500000 pure-torque override — env now replays the checkpoint's own general_scale/pd_alpha)
     init = torch.tensor([float(env.cfg.init_state.pos[0]), float(env.cfg.init_state.pos[1])], device=env.device)
@@ -231,7 +246,7 @@ def main():
     env.compute_observations()
     obs = env.get_observations()
     _mass_note = f"added_mass={ADDED_MASS:+.1f}kg" if abs(ADDED_MASS) > 1e-6 else "nominal mass (URDF)"
-    print(f"[play_landing] cmd dx={DX} dy={DY} height={HEIGHT} | {_mass_note} | normal jump flow, replay pd_alpha={_pd_a:.3f}", flush=True)
+    print(f"[play_landing] cmd dx={DX} dy={DY} height={HEIGHT} | {_mass_note} | normal jump flow", flush=True)
 
     import math
     pg2deg = lambda v: math.degrees(math.asin(max(-1.0, min(1.0, float(v)))))  # projected_gravity_x -> tilt deg
@@ -244,7 +259,14 @@ def main():
     DISABLE_JUMP_ON_LAND = False  # 单跳只练跳(user): 落地不 force cmd4=0, 跟训练 disable_jump_on_landing=False 一致.
     DEBUG_HOP = False      # True = print the per-step feet-off / per-episode reset debug (hop diagnosis).
                            # False = clean output: just the per-jump [land] line (peak height + forward reach).
-    MONITOR_CONTACT = _env_bool("PLAY_LANDING_MONITOR_CONTACT", False) # DEFAULT OFF = clean output (just the per-jump [land] line).
+    # LEVEL, not a flag. 0 = off (default) = clean output, just the per-jump [land] line.
+    # 1 = phase transitions + the only post-landing events that carry information: the FIRST
+    #     all-four-planted and EVERY all-feet-off (relift, the thing landing cleanliness is
+    #     actually read from). The raw per-step contact permutation flickers 25+ times while
+    #     landing, which buried the phase line it was there to annotate.
+    # 2 = every contact-permutation change (the old level-1 behaviour).
+    _mc = os.environ.get("PLAY_LANDING_MONITOR_CONTACT", "").strip().lower()
+    MONITOR_CONTACT = 2 if _mc == "2" else (1 if _mc in ("1", "true", "yes", "on") else 0)
                            # Set PLAY_LANDING_MONITOR_CONTACT=1 to also dump the FULL per-foot contact + height + drift + fwd vel
                            # EVERY step after landing (the post-landing slide/hop diagnosis).
     n_flights = 0          # all-feet-off phases this episode (1 = clean single jump; 2+ = extra in-place hop)
@@ -256,6 +278,44 @@ def main():
     pl_min_feet = 4          #   maintain_contact can't catch it; all4_frac low / min_feet<4 => STEP-creep, it can)
     prev_cs = None
     prev_phase = None
+    prev_nc = None
+    shown_all4 = False
+    # ---- PLAY_LANDING_TRACE=1: one line per EPISODE, including the ones that never took off --------
+    # WHY. The default output prints ONLY inside `if just_landed`, so n_jump / n_hit count LANDINGS,
+    # not episodes: an episode that dies in the stand phase leaves NO line at all and the printed
+    # `hit=` is conditioned on having landed. With terminate_after_contacts_on=["base"] (inherited
+    # from go2_omnijump_torque_config.py:77) and collision_cutoff = sum|F| > 0.2 N, a nose-down dip
+    # that brushes the trunk ends the episode silently -- exactly the failure being looked at, and
+    # exactly the one the old accounting could not see. Nothing logged the TAKEOFF process either
+    # (arm step, squat bottom, takeoff pitch/velocity), and `max_nd` was computed and then dropped.
+    # Default OFF -> the existing output is unchanged.
+    TRACE = _env_bool("PLAY_LANDING_TRACE", False)
+    n_ep = n_ep_hit = n_ep_noarm = n_ep_noto = n_ep_noland = 0
+    tr = {}
+
+    def _tr_reset():
+        tr.clear()
+        tr.update(armed=False, tookoff=False, squatQ=False, hit=False,
+                  arm_step=-1, to_step=-1, bottom=9.9,
+                  to_pitch=0.0, to_vx=0.0, to_vz=0.0,
+                  stand_nd=-9.9, ep_nd=-9.9)
+
+    _tr_reset()
+    _pd_probe = True        # one-shot: report the pd_alpha the env ACTUALLY applied
+    # ---- Isaac->MuJoCo PAIRING DUMP (PLAY_LANDING_DUMP=path.npz) ----------------------------------
+    # Records the (obs, action) pair the policy ACTUALLY produced, so deploy_mujoco/*.py --replay can
+    # feed these exact obs vectors through the same checkpoint and compare actions. A match proves the
+    # checkpoint loading AND the observation layout/ordering are right in the MuJoCo port; any jump
+    # difference is then physics or the drive logic, not wiring. Without this, the two cannot be told
+    # apart -- which is why the Aug 1.9e-6 pairing could not be reproduced (no dump producer existed).
+    # obs is taken BEFORE env.step() = exactly what policy() consumed. Single env (idx 0) only.
+    DUMP_PATH = os.environ.get("PLAY_LANDING_DUMP", "").strip()
+    DUMP_STEPS = int(_env_float("PLAY_LANDING_DUMP_STEPS", 1200))   # 1200 @200Hz = 6 s = a few jumps
+    import numpy as _np0
+    _dump_obs, _dump_act, _dump_st = [], [], []
+    _dump_rs, _dump_dq, _dump_tq = [], [], []
+    if DUMP_PATH:
+        print(f"[dump] recording {DUMP_STEPS} (obs, action) pairs -> {DUMP_PATH}", flush=True)
     for _ in range(100000):
         # PD-replay: pin step_count to the checkpoint's iter so general_scale/pd_alpha match training.
         # (control_type='TG' -> _update_growth_scale won't override this; only use_test would, which we avoid.)
@@ -266,7 +326,60 @@ def main():
             comp = actor_critic.comp_forward(obs.detach())   # Step H: deterministic τ_comp (PD-mimic)
             if comp is not None:
                 env.comp_torque = comp                        # feed env so the stabiliser runs after PD fades
+        if DUMP_PATH and len(_dump_obs) < DUMP_STEPS:
+            # obs BEFORE the step = the vector policy() just consumed; actions = what it answered.
+            _dump_obs.append(obs[0].detach().cpu().numpy().copy())
+            _dump_act.append(actions[0].detach().cpu().numpy().copy())
+            # PHYSICAL state for phase alignment. Step index is NOT comparable across the two sims
+            # (play_landing calls compute_observations() once before the loop, so Isaac step 0 has
+            # already rolled the history ring and carries reset randomisation, while the MuJoCo port
+            # fills all 20 history slots with one frame). Comparing obs blocks only makes sense at a
+            # milestone both sims can label from physics, so record what the MuJoCo --dump-obs marks
+            # are derived from and let the offline comparator find arm/bottom/squatQ/takeoff itself.
+            # Contact test is >1.0 N on fz, identical to the MuJoCo port's C.CONTACT_THRESH.
+            _nc = float((env.contact_forces[0, env.feet_indices, 2] > 1.0).sum().item())
+            # Full rigid-body state + the torque Isaac actually applied last step. With these the
+            # MuJoCo port can be put into Isaac's exact state and driven OPEN-LOOP from the recorded
+            # actions (tests the torque law + contacts) or the recorded torques (tests contacts only),
+            # which is the only way to separate "the observations are wired wrong" from "the physics
+            # differ" once the two trajectories have diverged.
+            _dump_rs.append(env.root_states[0].detach().cpu().numpy().copy())   # 13: xyz quat v w
+            _dump_dq.append(_np0.concatenate([env.dof_pos[0].detach().cpu().numpy(),
+                                              env.dof_vel[0].detach().cpu().numpy()]))
+            _dump_tq.append(env.torques[0].detach().cpu().numpy().copy())
+            _dump_st.append([
+                float(env.root_states[0, 2].item()),                    # base z
+                float(env.root_states[0, 7].item()),                    # world vx
+                float(env.root_states[0, 9].item()),                    # world vz
+                float(env.projected_gravity[0, 0].item()),              # -sin(pitch)
+                _nc,                                                    # feet in contact (0..4)
+                float(env.jumping_state[0].item()),
+                float(env.squat_qualified[0].item()),
+                float(env.has_landed[0].item()),
+            ])
+            if len(_dump_obs) >= DUMP_STEPS:
+                import numpy as _np
+                _o = _np.asarray(_dump_obs, dtype=_np.float32)
+                _a = _np.asarray(_dump_act, dtype=_np.float32)
+                _s = _np.asarray(_dump_st, dtype=_np.float32)
+                _np.savez(DUMP_PATH, obs=_o, action=_a, state=_s,
+                          root_states=_np.asarray(_dump_rs, dtype=_np.float64),
+                          dof=_np.asarray(_dump_dq, dtype=_np.float64),
+                          torque=_np.asarray(_dump_tq, dtype=_np.float64),
+                          state_cols=_np.asarray(["z", "vx", "vz", "projg_x",
+                                                  "n_contact", "jumping", "squatQ", "landed"]),
+                          rl_driven=_np.ones(len(_o), dtype=_np.float32))
+                print(f"[dump] wrote {DUMP_PATH}: obs{_o.shape} action{_a.shape} "
+                      f"(every step is policy-driven in play_landing)", flush=True)
+                return
         obs, _, _, dones, infos = env.step(actions.detach())
+        if _pd_probe:
+            _pd_probe = False
+            _meas = float(env.pd_prior_alpha.float().mean())
+            print(f"[play] pd_alpha MEASURED off env.pd_prior_alpha after step 1: {_meas:.4f}"
+                  + ("" if abs(_meas - _applied) < 5e-3 else
+                     f"   !! does not match the predicted {_applied:.3f} -- trust this number"),
+                  flush=True)
         # TEST: while standing, force cmd4 to a CLEAR 0.0 (the env otherwise pins it to 0.45, just under the 0.5
         # jump threshold). If the stand-hop STOPS -> it was near-threshold command hesitation (cheap fix);
         # if it PERSISTS -> the policy has no stable stand fixed-point (needs a stand-hold reward / retrain).
@@ -301,13 +414,23 @@ def main():
                 _phase = "AIRBORNE"
             else:
                 _phase = "LANDED"
-            if _cs != prev_cs or _phase != prev_phase:
+            if MONITOR_CONTACT >= 2:
+                _show = (_cs != prev_cs or _phase != prev_phase)
+            elif _phase == "LANDED":
+                _show = (_phase != prev_phase                      # the touchdown line
+                         or (_nc == 0 and prev_nc != 0)            # relift: all four feet left again
+                         or (_nc >= 4 and not shown_all4))         # first time it is fully planted
+                shown_all4 = shown_all4 or _nc >= 4
+            else:
+                _show = (_phase != prev_phase)
+            if _show:
                 _h = float(env.root_states[0, 2])
                 _vx = float(env.root_states[0, 7])
                 _vz = float(env.root_states[0, 9])
                 print(f"  [step {ep_len:3d}] phase={_phase:13s} | contact[FL,FR,RL,RR]={_cs} (n={_nc}) | h={_h:.3f}m | vx={_vx:+.2f}m/s vz={_vz:+.2f}m/s", flush=True)
-                prev_cs = _cs
-                prev_phase = _phase
+            prev_cs = _cs
+            prev_phase = _phase
+            prev_nc = _nc
         # Count distinct FLIGHT phases per episode: a clean single jump = 1 all-feet-off period; an EXTRA
         # in-place HOP after landing = a 2nd all-feet-off period. Catches the post-landing hop that the
         # land-event print misses (just_landed fires only on the FIRST touchdown).
@@ -325,7 +448,75 @@ def main():
                       f"h={float(env.root_states[0,2]):.2f}", flush=True)
         feet_off_prev = feet_off
         ep_len += 1
+        if TRACE:
+            # post-step state: projected_gravity[:,0] > 0 is nose-DOWN, and just_took_off fired during
+            # THIS step, so the takeoff snapshot is taken at the takeoff instant, not one step late.
+            _nd = float(env.projected_gravity[0, 0])
+            tr["ep_nd"] = max(tr["ep_nd"], _nd)
+            _armed_now = bool(env.jumping_state[0])
+            if not _armed_now:
+                # the stand phase is the one with NO pitch penalty at all (_reward_pitch_level
+                # multiplies nose_down by jumping_state), so track its worst nose-down separately
+                tr["stand_nd"] = max(tr["stand_nd"], _nd)
+            else:
+                if not tr["armed"]:
+                    tr["armed"] = True
+                    tr["arm_step"] = ep_len
+                if not bool(env.has_taken_off[0]):
+                    tr["bottom"] = min(tr["bottom"], float(env.root_states[0, 2]))
+            if bool(env.squat_qualified[0]):
+                tr["squatQ"] = True
+            if bool(env.just_took_off[0]) and not tr["tookoff"]:
+                tr["tookoff"] = True
+                tr["to_step"] = ep_len
+                tr["to_pitch"] = _nd
+                tr["to_vx"] = float(env.root_states[0, 7])
+                tr["to_vz"] = float(env.root_states[0, 9])
         if bool(dones.any()):
+            if TRACE:
+                # time_out_buf is set fresh in check_termination and NOT cleared by reset_idx, and
+                # reset_idx does not touch contact_forces either, so both still describe the step that
+                # ended the episode. Everything is guarded: a diagnostic must never kill the viewer.
+                n_ep += 1
+                try:
+                    _timeout = bool(env.time_out_buf[0])
+                except Exception:
+                    _timeout = False
+                try:
+                    _bf = float(torch.norm(env.contact_forces[0, env.termination_contact_indices, :],
+                                           dim=-1).sum())
+                except Exception:
+                    _bf = -1.0
+                if _timeout:
+                    _cause = "timeout"
+                elif _bf > 0.2:
+                    _cause = f"base-contact {_bf:.0f}N"
+                else:
+                    _cause = "postjump/other"
+                if not tr["armed"]:
+                    _out = "NO-ARM    "
+                    n_ep_noarm += 1
+                elif not tr["tookoff"]:
+                    _out = "NO-TAKEOFF"
+                    n_ep_noto += 1
+                elif not landed_ep:
+                    _out = "NO-LANDING"
+                    n_ep_noland += 1
+                else:
+                    _out = "LAND-HIT  " if tr["hit"] else "LAND-MISS "
+                n_ep_hit += int(tr["hit"])
+                _bot = tr["bottom"] if tr["bottom"] < 9.0 else float("nan")
+                if tr["tookoff"]:
+                    _tos = (f"to@{tr['to_step']:3d} toPitch={pg2deg(tr['to_pitch']):+5.1f}d "
+                            f"toV=({tr['to_vx']:+.2f},{tr['to_vz']:+.2f})")
+                else:
+                    _tos = "to@ --  toPitch=   --  toV=(  --  ,  --  )"
+                print(f"[ep #{n_ep:3d}] {_out} len={ep_len:3d} reset={_cause:16s} "
+                      f"arm@{tr['arm_step']:3d} squatQ={int(tr['squatQ'])} bottom={_bot:.3f} {_tos} "
+                      f"| maxNoseDown stand={pg2deg(tr['stand_nd']):+5.1f}d ep={pg2deg(tr['ep_nd']):+5.1f}d "
+                      f"| epHit {n_ep_hit}/{n_ep}={n_ep_hit / n_ep:.2f} "
+                      f"[noArm {n_ep_noarm} noTakeoff {n_ep_noto} noLand {n_ep_noland}]", flush=True)
+                _tr_reset()
             if DEBUG_HOP:
                 tilt = pg2deg(env.projected_gravity[0, 0])   # nose-down tilt at reset (>0 nose-down); large => tipped over
                 print(f"[reset] ep_len={ep_len} tilt={tilt:.0f}deg h={float(env.root_states[0,2]):.2f} "
@@ -346,6 +537,8 @@ def main():
             pl_min_feet = 4
             prev_cs = None
             prev_phase = None
+            prev_nc = None
+            shown_all4 = False
         # track the worst nose-down tilt while airborne/landing (same units as cfg.rewards.landing_tilt_terminate)
         if bool(env.airborne[0]) or bool(env.prelanding[0]) or bool(env.landing[0]):
             max_nd = max(max_nd, float(env.projected_gravity[0, 0]))
@@ -360,14 +553,23 @@ def main():
                 hit = (err <= 0.10) and (peak >= 0.40)
                 n_jump += 1
                 n_hit += int(hit)
+                if TRACE:
+                    tr["hit"] = tr["hit"] or bool(hit)
                 # DIAG: real dx command, how far AHEAD of the TAKEOFF point the target actually is, and the
                 # forward reach measured FROM THE TAKEOFF POINT (= this jump's TRUE distance, not cumulative).
                 cmd0 = float(env.commands[idx, 0])
                 tgt_ahead = float(env.landing_target[idx, 0] - env.takeoff_root_xy[idx, 0])
                 fwd_tk = float(land[0] - env.takeoff_root_xy[idx, 0])
-                print(f"[land #{n_jump}] REALcmd0={cmd0:+.2f} tgt_ahead={tgt_ahead:+.2f}m | peak={peak:.3f}m  "
-                      f"fwd_from_takeoff={fwd_tk:+.3f}m fwd_from_spawn={fwd:+.3f}m | land_err={err:.3f} "
-                      f"{'HIT ' if hit else 'miss'} hit_rate={n_hit/n_jump:.2f}", flush=True)
+                # RESULT ONLY: peak height, net flight from the TAKEOFF anchor (fwd -- the only
+                # distance this project counts), total from spawn (tot, includes creep), landing
+                # error, hit, running hit rate. REALcmd0 / tgt_ahead used to sit on every line as a
+                # guard against the "DX command came out 0" bug (note at the top of this file); they
+                # are now appended ONLY when they disagree with the requested command, so the guard
+                # still fires and costs nothing when everything is fine.
+                _cmd_bad = abs(cmd0 - DX) > 0.02 or abs(tgt_ahead - DX) > 0.05
+                _warn = f"  !! REALcmd0={cmd0:+.2f} tgt_ahead={tgt_ahead:+.2f} (asked {DX:+.2f})" if _cmd_bad else ""
+                print(f"[land #{n_jump}] peak={peak:.3f} fwd={fwd_tk:+.3f} tot={fwd:+.3f} "
+                      f"err={err:.3f} {'HIT ' if hit else 'miss'} hit={n_hit/n_jump:.2f}{_warn}", flush=True)
                 max_nd = 0.0
                 resets_since = 0
 
